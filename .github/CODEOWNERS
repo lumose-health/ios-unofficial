@@ -2,15 +2,16 @@
 # https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
 #
 # Order matters -- later rules take precedence over earlier ones.
-# Mirrors the org-wide ownership model: maintainer area teams co-own
-# the default tree with the project lead, governance and workflow
-# files stay lead-only, and promotions to main are separately
-# restricted to the lead by the org-level main update lock.
+# Mirrors the org-wide ownership model: the area maintainer team is
+# auto-requested for review on the default tree, governance and workflow
+# files stay lead-only, and promotions to main are separately restricted
+# to the lead by the org-level main update lock. Ownership here is for
+# review REQUEST (tagging) only -- develop requires 0 reviews and no
+# code-owner review, so maintainers self-merge their own PRs.
 
-# Default: co-owned by the maintainer area teams and the project
-# lead -- any listed owner satisfies the code-owner review, and
-# authors can never approve their own PRs.
-* @lumose-health/web @lumose-health/ai @jlengelbrecht
+# Default: the iOS app is the web/frontend maintainer's area, so the web
+# team is auto-requested alongside the project lead on others' PRs.
+* @lumose-health/web @jlengelbrecht
 
 # Governance & project policy: project lead only.
 /.github/CODEOWNERS @jlengelbrecht
