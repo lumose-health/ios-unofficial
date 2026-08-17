@@ -19,7 +19,10 @@ Two layers:
 
   3. Provenance consistency — the pinned Android revision in
      scripts/spk2/provenance.env, which verify_vectors.sh regenerates from, must
-     be the revision the fixture README documents.
+     be the commit named in the `Commit` row of the README's provenance table.
+     That row is parsed, not searched for: the same SHA also appears in the
+     README's historical evidence, and a substring match would accept a
+     falsified table.
 
 Fixture schema (one JSON object per file under Tests/Fixtures/EcJpake/):
 
@@ -70,6 +73,7 @@ case, AC 2) is present.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -103,6 +107,16 @@ HANDSHAKE_READ_RESULTS = (
 )
 HEX_DIGITS = set("0123456789abcdef")
 KNOWN_CORRUPTION_OPS = ("truncate", "xor")
+
+# The `| Commit | `<sha>` ... |` row of the README's provenance table — the one
+# place the README states which revision the fixtures came from. Matched as a
+# whole row rather than searched for as a substring: the SHA also appears in the
+# README's historical evidence, and a substring search would let a falsified
+# table pass on the strength of that unrelated mention.
+README_COMMIT_ROW = re.compile(
+    r"^\|\s*Commit\s*\|\s*`([0-9a-zA-Z]+)`.*\|\s*$",
+    re.MULTILINE,
+)
 
 
 class Errors:
@@ -337,11 +351,21 @@ def _validate_provenance(readme: Path, errors: Errors) -> None:
 
     if not readme.is_file():
         return  # already reported by the caller
-    if sha not in readme.read_text(encoding="utf-8"):
+    documented = README_COMMIT_ROW.findall(readme.read_text(encoding="utf-8"))
+    if len(documented) != 1:
         errors.add(
             "README.md",
-            f"does not record the pinned Android commit {sha}; the provenance table and "
-            f"{PROVENANCE_FILE.name} must agree (re-pinning updates both)",
+            f"expected exactly one provenance-table row of the form "
+            f"'| Commit | `<sha>` ... |', found {len(documented)}; that row is what "
+            f"documents the revision {PROVENANCE_FILE.name} regenerates from",
+        )
+        return
+    if documented[0] != sha:
+        errors.add(
+            "README.md",
+            f"the provenance table records commit {documented[0]}, but "
+            f"{PROVENANCE_FILE.name} pins {sha}; verify_vectors.sh regenerates from the "
+            f"pin, so the two must agree (re-pinning updates both)",
         )
 
 

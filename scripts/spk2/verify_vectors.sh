@@ -6,8 +6,9 @@
 # The Android checkout is treated as strictly read-only: all work happens in a
 # disposable worktree created at the revision pinned in scripts/spk2/provenance.env
 # (never the checkout's mutable HEAD), and that one worktree — no other — is removed
-# before the script exits. If its removal fails the script exits nonzero, so a
-# leftover registration can never be reported as a passing gate (AC 6).
+# before the script exits. If its removal fails — or cannot be confirmed, because the
+# worktree query itself failed — the script exits nonzero, so a leftover registration
+# can never be reported as a passing gate (AC 6).
 #
 # Usage:  bash scripts/spk2/verify_vectors.sh             verify (the gate)
 #         bash scripts/spk2/verify_vectors.sh --update    rewrite the committed fixtures
@@ -82,24 +83,50 @@ WORKTREE="$(cd -- "$(mktemp -d "${TMPDIR:-/tmp}/spk2-ecjpake-worktree.XXXXXX")" 
 WORKDIR="$(cd -- "$(mktemp -d "${TMPDIR:-/tmp}/spk2-ecjpake-regen.XXXXXX")" && pwd -P)"
 REGEN_DIR="$WORKDIR/fixtures"
 
-worktree_is_registered() {
-  git -C "$ANDROID_REPO" worktree list --porcelain 2>/dev/null | grep -qxF "worktree $WORKTREE"
+# Three states, deliberately not two: an unreadable/failing `git worktree list` is
+# NOT evidence that the worktree is gone. Collapsing the two would let a broken
+# query silently look like a clean checkout and pass the gate (AC 6).
+#   0 = registered   1 = confirmed absent   2 = the query itself failed
+WORKTREE_REGISTERED=0
+WORKTREE_ABSENT=1
+WORKTREE_QUERY_FAILED=2
+
+worktree_registration_state() {
+  local listing
+  listing="$(git -C "$ANDROID_REPO" worktree list --porcelain 2>/dev/null)" \
+    || return "$WORKTREE_QUERY_FAILED"
+  printf '%s\n' "$listing" | grep -qxF "worktree $WORKTREE" \
+    && return "$WORKTREE_REGISTERED"
+  return "$WORKTREE_ABSENT"
 }
 
 cleanup() {
   local status=$?
   local failed=0
+  local state=0
 
-  # Only ever touch the worktree this run created: no repo-wide `worktree prune`,
-  # which would also drop unrelated stale registrations in a shared checkout.
-  if worktree_is_registered; then
-    git -C "$ANDROID_REPO" worktree remove --force "$WORKTREE" >/dev/null 2>&1 || failed=1
-  fi
+  worktree_registration_state || state=$?
+  case "$state" in
+    # Only ever touch the worktree this run created: no repo-wide `worktree prune`,
+    # which would also drop unrelated stale registrations in a shared checkout.
+    "$WORKTREE_REGISTERED")
+      git -C "$ANDROID_REPO" worktree remove --force "$WORKTREE" >/dev/null 2>&1 || failed=1
+      ;;
+    "$WORKTREE_QUERY_FAILED")
+      echo "FAIL: could not list the worktrees of $ANDROID_REPO, so the disposable worktree $WORKTREE was not removed" >&2
+      failed=1
+      ;;
+  esac
   rm -rf "$WORKTREE" "$WORKDIR" || failed=1
 
   # Cleanup is part of the gate (AC 6), so verify it rather than assume it.
-  if worktree_is_registered; then
+  state=0
+  worktree_registration_state || state=$?
+  if [ "$state" = "$WORKTREE_REGISTERED" ]; then
     echo "FAIL: $ANDROID_REPO still registers the disposable worktree $WORKTREE" >&2
+    failed=1
+  elif [ "$state" = "$WORKTREE_QUERY_FAILED" ]; then
+    echo "FAIL: could not list the worktrees of $ANDROID_REPO, so removal of $WORKTREE is unconfirmed; check it by hand" >&2
     failed=1
   fi
   if [ -e "$WORKTREE" ] || [ -e "$WORKDIR" ]; then
@@ -122,8 +149,15 @@ git -C "$ANDROID_REPO" worktree add --detach "$WORKTREE" "$TARGET_SHA" >/dev/nul
 
 # Cleanup finds its own worktree by exact registered path, so prove that lookup works
 # now — while the worktree still exists — rather than silently leaking it later.
-worktree_is_registered \
-  || die "git did not register the disposable worktree under the path it was given ($WORKTREE); refusing to run, since cleanup could not find it afterwards"
+preflight_state=0
+worktree_registration_state || preflight_state=$?
+case "$preflight_state" in
+  "$WORKTREE_REGISTERED") ;;
+  "$WORKTREE_ABSENT")
+    die "git did not register the disposable worktree under the path it was given ($WORKTREE); refusing to run, since cleanup could not find it afterwards" ;;
+  *)
+    die "could not list the worktrees of $ANDROID_REPO; refusing to run, since cleanup could not confirm removal of $WORKTREE afterwards" ;;
+esac
 
 ANDROID_SHA_ACTUAL="$(git -C "$WORKTREE" rev-parse HEAD)"
 [ "$ANDROID_SHA_ACTUAL" = "$TARGET_SHA" ] \

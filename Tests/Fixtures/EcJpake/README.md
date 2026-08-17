@@ -25,7 +25,10 @@ That commit is the pin in `scripts/spk2/provenance.env`, and it is what
 Android checkout's current `HEAD`, so the command below keeps reproducing this
 revision after that checkout moves on. If the pinned commit is missing from the
 checkout the script fails rather than substituting another revision, and
-`validate_fixtures.py` fails while the pin and this table disagree.
+`validate_fixtures.py` fails while the pin and this table disagree — it parses the
+`Commit` row above specifically (`| Commit | \`<40 hex chars>\` … |`, exactly one
+such row), so falsifying the table is caught even though the same SHA appears
+elsewhere in this file. Keep that row's shape if you reformat the table.
 
 The Android checkout is never modified. `verify_vectors.sh` creates a disposable
 `git worktree` at the pinned commit, copies the harness in, runs it, and removes
