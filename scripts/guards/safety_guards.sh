@@ -63,9 +63,12 @@
 # equivalents.
 #
 # Clock — NOT CAUGHT:
-#   * reaching the wall clock through a type this list does not name (`NSDate()`,
-#     `DispatchTime.now()`, `mach_absolute_time()`) — extend CLOCK_FORBIDDEN when
-#     such a call has a legitimate reason to appear;
+#   * reaching the wall clock through a spelling that CONTAINS none of the
+#     forbidden tokens (`DispatchTime.now()`, `mach_absolute_time()`) — extend
+#     CLOCK_FORBIDDEN when such a call has a legitimate reason to appear. The clock
+#     scan matches unbounded substrings, so a differently PREFIXED spelling of the
+#     same type is caught: `NSDate()` and `NSDate.now` contain `Date()` and
+#     `Date.now` and are reported (`wall-clock-nsdate` in --self-test);
 #   * a read inside an adversarially constructed interpolation, per the known
 #     bypasses below.
 #
@@ -325,8 +328,9 @@ run_check() {
     # Scan integrity comes first: every count below is a count of the STRIPPED
     # source, so a file the stripper refuses has not been checked, and reporting
     # the rest as clean would be reporting a green gate over an unread file.
-    # The stripper refuses exactly one thing — an unterminated multi-line string
-    # literal, which would otherwise elide everything after it.
+    # The stripper refuses exactly two things — an unterminated multi-line string
+    # literal and an unterminated block comment, each of which would otherwise
+    # elide everything after it.
     local file msg unscannable=0 scanned=0
     while IFS= read -r file; do
         [ -n "$file" ] || continue
@@ -348,16 +352,36 @@ EOF
     say "AD-2/SI-4 — one definition site per safety constant (by VALUE, not spelling)"
 
     # The value rules: equality in any spelling, plus the drift bands.
-    local verdict message
+    #
+    # The classifier's output is CAPTURED before it is read, rather than piped into
+    # the loop from a heredoc, because a command substitution that fails inside a
+    # redirection fails silently: `set -e` does not reach into it and the
+    # redirection still succeeds. A scan or classifier that died would then feed the
+    # loop nothing, leave FAILURES untouched, and let the run print `clean` over
+    # constants that were never judged — the same green-gate-over-unread-source
+    # outcome the precondition above exists to prevent. So two things are required
+    # of the output: a zero exit from the whole pipeline (pipefail is set, so a
+    # failure at either end propagates), and the classifier's end-of-run marker,
+    # which it prints only after judging every canonical record.
+    local verdict message classified expected_canon marker
+    classified=$(numeric_records \
+        | awk -v spec="$CANON_SPEC" -v canonical_file="$CANONICAL_FILE" -f "$CLASSIFIER") \
+        || die "the numeric scan or the classifier failed — the constant rules did not run"
+    expected_canon=$(awk -v spec="$CANON_SPEC" 'BEGIN { print split(spec, records, ";") }')
+    marker=$(printf '%s\n' "$classified" | tail -n 1)
+    [ "$marker" = "D|$expected_canon" ] \
+        || die "the classifier did not report judging all $expected_canon canonical constant(s) — last line was ${marker:-nothing}; the constant rules did not run"
+
     while IFS='|' read -r verdict message; do
         case "$verdict" in
             V) bad "$message" ;;
             P) ok "$message" ;;
+            D) ;;
             "") ;;
             *) die "unexpected classifier output: $verdict|$message" ;;
         esac
     done <<EOF
-$(numeric_records | awk -v spec="$CANON_SPEC" -v canonical_file="$CANONICAL_FILE" -f "$CLASSIFIER")
+$classified
 EOF
 
     # One thing the value rules cannot see: whether the bound is spelled
@@ -433,7 +457,12 @@ EOF
 # mentioning a value is not defining it, but no string form may be used as cover
 # for a real one, and the `#`-count controls pin the line between the two.
 #
-# A third kind of case runs at the end: xfail cases for the DOCUMENTED KNOWN
+# The `sabotage-*` group asks a different question from all of those. Those cases
+# prove the guard reports a violation it can see; the sabotage cases prove it
+# refuses to report CLEAN when a rule never ran — they break a copy of the guard's
+# own helpers and require the run to fail rather than fall quiet.
+#
+# A last kind of case runs at the end: xfail cases for the DOCUMENTED KNOWN
 # BYPASSES in the header, which assert what the guard does not catch. A guard's
 # stated limits are a claim like any other, and this is where that claim is
 # checked instead of remembered.
@@ -466,6 +495,7 @@ drifted-epoch-scientific|FAIL|Sources/SafetyCore/GuardProbe.swift|let epochCopy 
 wall-clock-date|FAIL|Sources/SafetyCore/GuardProbe.swift|let stamp = Date()
 wall-clock-date-now|FAIL|Sources/SafetyCore/GuardProbe.swift|let stamp = Date.now
 wall-clock-date-init|FAIL|Sources/SafetyCore/GuardProbe.swift|let make = Date.init
+wall-clock-nsdate|FAIL|Sources/SafetyCore/GuardProbe.swift|let stamp = NSDate()
 clock-space-paren|FAIL|Sources/SafetyCore/GuardProbe.swift|let stamp = Date ()
 clock-space-dot-now|FAIL|Sources/SafetyCore/GuardProbe.swift|let stamp = Date .now
 clock-space-inside-parens|FAIL|Sources/SafetyCore/GuardProbe.swift|let stamp = Date (  )
@@ -480,6 +510,7 @@ raw-string-interpolated-constant|FAIL|Sources/SafetyCore/GuardProbe.swift|let no
 raw-string-then-real-duplicate|FAIL|Sources/SafetyCore/GuardProbe.swift|let q = #\"harmless \"quoted\" text\"#; let dup = 18.0156
 raw-string-inner-shorter-delimiter|FAIL|Sources/SafetyCore/GuardProbe.swift|let q = ##\"a \"# b\"##; let dup = 18.0156
 hash-directive-then-constant|FAIL|Sources/SafetyCore/GuardProbe.swift|let x = #line + 20
+unterminated-block-comment|FAIL|Sources/SafetyCore/GuardProbe.swift|/* open
 comments-only-control|PASS|Sources/SafetyCore/GuardProbe.swift|// 18.0156 and 20...500 and 1199145600 and Date() and Date.now
 block-comment-control|PASS|Sources/SafetyCore/GuardProbe.swift|/* 18.0156 20...500 1199145600 Date() 18.02 501 */
 string-contents-control|PASS|Sources/SafetyCore/GuardProbe.swift|let s = \"18.0156 20...500 1199145600 Date() Date.now 18.02 501\"
@@ -493,23 +524,33 @@ self_test_write() {
     printf 'import Foundation\n%s\n' "$2" > "$1"
 }
 
+# Every case's scratch tree is created inside one parent directory, so a single
+# EXIT trap (installed in self_test) cleans up on every path out — including the
+# ones `set -e` takes when a case's own SETUP fails, which the per-case `rm -rf`
+# in self_test_run is never reached to handle.
+SELF_TEST_HOME=""
+
 self_test_scratch() {
     # A copy of Sources/ to mutate. Printed so the caller can populate it.
     local tmp
-    tmp=$(mktemp -d "${TMPDIR:-/tmp}/safety_guards_selftest.XXXXXX")
+    tmp=$(mktemp -d "$SELF_TEST_HOME/case.XXXXXX")
     cp -R "$ROOT/Sources" "$tmp/Sources"
     printf '%s' "$tmp"
 }
 
-# self_test_run <name> <expect PASS|FAIL> <scratch root>
+# self_test_run <name> <expect PASS|FAIL> <scratch root> [guard script]
 #
-# The single place a case's verdict is decided, so all three kinds of case
-# (single line, multi line, structural mutation) are judged identically and
-# `--explain` shows the same evidence for each. Removes the scratch tree.
+# The single place a case's verdict is decided, so all four kinds of case (single
+# line, multi line, structural mutation, sabotaged guard) are judged identically
+# and `--explain` shows the same evidence for each. Removes the scratch tree.
+#
+# The optional fourth argument names the guard to run; it defaults to this script,
+# and is overridden only by the sabotage cases, which run a deliberately broken
+# COPY of it.
 self_test_run() {
-    local name="$1" expect="$2" tmp="$3" status=0 log="$3/guard.log"
+    local name="$1" expect="$2" tmp="$3" guard="${4:-${BASH_SOURCE[0]}}" status=0 log="$3/guard.log"
 
-    bash "${BASH_SOURCE[0]}" --root "$tmp" --quiet >"$log" 2>&1 || status=$?
+    bash "$guard" --root "$tmp" --quiet >"$log" 2>&1 || status=$?
 
     if { [ "$expect" = "FAIL" ] && [ "$status" -eq 0 ]; } ||
        { [ "$expect" = "PASS" ] && [ "$status" -ne 0 ]; }; then
@@ -583,8 +624,28 @@ self_test_structural() {
     self_test_run "$name" "$expect" "$tmp"
 }
 
+# self_test_sabotaged <name> <expect> <mutation shell snippet using $G as the
+# copied guard directory>
+#
+# Every case above asks the same question: does the guard notice a violation in
+# the SOURCE? These ask the other one, which no source mutation can reach — does
+# the guard notice when one of its own rules did not run at all? A rule that can
+# be skipped while the run still prints `clean` is not a gate, so the skip is
+# staged for real: the mutation breaks a COPY of this script's helpers, and that
+# copy is what runs. The gate in the working tree is never touched.
+self_test_sabotaged() {
+    local name="$1" expect="$2" mutation="$3" tmp
+    tmp=$(self_test_scratch)
+    cp -R "$SCRIPT_DIR" "$tmp/guards"
+    G="$tmp/guards" eval "$mutation"
+    self_test_run "$name" "$expect" "$tmp" "$tmp/guards/safety_guards.sh"
+}
+
 self_test() {
     local total=0 bad_cases=0 bypasses=0 line name expect path payload tmp
+
+    SELF_TEST_HOME=$(mktemp -d "${TMPDIR:-/tmp}/safety_guards_selftest.XXXXXX")
+    trap 'rm -rf "$SELF_TEST_HOME"' EXIT
 
     printf 'safety_guards --self-test: proving each guard can fail\n\n'
 
@@ -649,6 +710,27 @@ EOF
     total=$((total + 1))
     self_test_structural "constant-moved-out-of-canonical-file" FAIL \
         "sed -i.bak '/18\\.0156/d' \"\$T/$CANONICAL_FILE\" && rm -f \"\$T/$CANONICAL_FILE.bak\" && printf 'let factor = 18.0156\\n' > \"\$T/Sources/SafetyCore/Elsewhere.swift\"" \
+        || bad_cases=$((bad_cases + 1))
+    total=$((total + 1))
+
+    # A skipped rule must not read as a passed one. The constant rules are the
+    # ones with somewhere to hide: their verdicts arrive as the text of another
+    # process, so a classifier that says nothing looks exactly like a clean tree
+    # unless the guard insists on hearing the rules finish. Both halves of that
+    # insistence get a case — a nonzero exit anywhere in the pipeline, and output
+    # that ends without the classifier's end-of-run marker.
+    #
+    # The control comes first: it runs an UNTOUCHED copy of the guard, so a
+    # sabotage case failing means the sabotage was noticed and not that running
+    # from a copy fails by itself.
+    self_test_sabotaged "guard-copy-control" PASS ':' || bad_cases=$((bad_cases + 1))
+    total=$((total + 1))
+    self_test_sabotaged "classifier-exits-nonzero" FAIL \
+        'printf "BEGIN { print \"P|judged\"; exit 4 }\n" > "$G/lib/classify_numerics.awk"' \
+        || bad_cases=$((bad_cases + 1))
+    total=$((total + 1))
+    self_test_sabotaged "classifier-emits-nothing" FAIL \
+        'printf "BEGIN { exit 0 }\n" > "$G/lib/classify_numerics.awk"' \
         || bad_cases=$((bad_cases + 1))
     total=$((total + 1))
 

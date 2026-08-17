@@ -6,7 +6,13 @@
 #             -f classify_numerics.awk < records
 #
 # Input records: `<file>|<line>|<raw>|<value>` (see scan_numerics.awk).
-# Output lines:  `V|<message>` for a violation, `P|<message>` for a passed check.
+# Output lines:  `V|<message>` for a violation, `P|<message>` for a passed check, and
+#                one final `D|<n>` marker naming how many canonical constants were
+#                judged. The marker is printed at the very end of END, so a caller
+#                that sees it knows these rules ran over the whole record stream.
+#                Without it the caller cannot tell a clean run from a scan that died
+#                and said nothing — and silence read as clean is the one failure a
+#                gate must not have.
 # The canonical values live in safety_guards.sh, not here — this file is the rule,
 # that file is the pin.
 #
@@ -78,4 +84,8 @@ END {
 
         printf "P|%s (%s) defined exactly once, at %s\n", cname[k], ctext[k], s
     }
+
+    # The end-of-run marker, after the last verdict. See the header: this is the
+    # caller's evidence that the rules above ran, rather than producing nothing.
+    printf "D|%d\n", ncanon
 }

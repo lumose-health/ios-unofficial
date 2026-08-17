@@ -37,11 +37,12 @@
 #     wall-clock read (this is the cycle-3 review finding, whose probe was
 #     `#"timestamp: \#(Date())"#`), and treating text as code invents duplicates.
 #
-# Multi-line strings are the one construct with state that outlives a line, so
-# `instr` is reset per line EXCEPT inside one — an unbalanced quote on an
-# ordinary line cannot swallow the rest of the file. An unterminated multi-line
-# literal would, so it is refused in END with a nonzero exit rather than reported
-# as a clean scan of a file whose tail was silently elided.
+# Multi-line strings and block comments are the two constructs whose state
+# outlives a line, so `instr` is reset per line EXCEPT inside a multi-line literal
+# — an unbalanced quote on an ordinary line cannot swallow the rest of the file.
+# An unterminated multi-line literal or an unterminated `/*` would, so BOTH are
+# refused in END with a nonzero exit rather than reported as a clean scan of a
+# file whose tail was silently elided.
 #
 # LIMITS — stated exactly, because the previous version of this header said
 # "not modelled: nothing", and that was false in the unsafe direction.
@@ -194,6 +195,10 @@ function rest_is_blank(s, pos) {
 END {
     if (multi == 1) {
         print "strip_swift_comments: unterminated multi-line string literal — refusing to report a scan whose tail was elided" > "/dev/stderr"
+        exit 3
+    }
+    if (block > 0) {
+        print "strip_swift_comments: unterminated block comment — refusing to report a scan whose tail was elided" > "/dev/stderr"
         exit 3
     }
 }
