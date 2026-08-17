@@ -1,0 +1,8 @@
+# BMAD install, agent skills, and planning/implementation artifacts are
+# intentionally local-only: dispatch workers get stories mirrored into their
+# worktrees (see model-router dispatch.sh), and AGENT_DIR points at the main
+# checkout for persona injection.
+_bmad/
+_bmad-output/
+.agents/
+.claude/
