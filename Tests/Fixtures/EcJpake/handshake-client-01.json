@@ -1,0 +1,101 @@
+{
+  "client_id": "client",
+  "curve": "P-256",
+  "derived_secret": {
+    "client": "2c0fab29d6701461a64fe10abb87cc61ea73a11ec60d61e1703a269fdb4572a7",
+    "server": "2c0fab29d6701461a64fe10abb87cc61ea73a11ec60d61e1703a269fdb4572a7"
+  },
+  "description": "Full P-256 EC-JPAKE handshake: client and server driven by the recorded deterministic byte stream, both roles reaching the same derived secret.",
+  "hash": "SHA-256",
+  "kind": "handshake",
+  "randomness": {
+    "log": [
+      {
+        "bytes": "e2213ed6a059db90fd27160d129a8519a853cf5eb98fec84b0300924c9b40ce9",
+        "purpose": "getRound1: private scalar x1, createRandomInRange(1, n-1) -> BigInteger(1, bytes)",
+        "role": "client"
+      },
+      {
+        "bytes": "b7184e7abb943431ba0e2c7d4cf462c80a35dce814ce011b153a45b38eef9f3b",
+        "purpose": "getRound1: ZKP nonce v proving x1, createRandomInRange(1, n-1) -> BigInteger(1, bytes)",
+        "role": "client"
+      },
+      {
+        "bytes": "926316f39f09f2394aa8199d31a8af8d7c6be7135d36a0bf353165af0650e97b",
+        "purpose": "getRound1: private scalar x2, createRandomInRange(1, n-1) -> BigInteger(1, bytes)",
+        "role": "client"
+      },
+      {
+        "bytes": "4e4fda5e771550c65258c87d3bf5a016da50ae6e38c4edbabc2e5f0e67ff85b3",
+        "purpose": "getRound1: ZKP nonce v proving x2, createRandomInRange(1, n-1) -> BigInteger(1, bytes)",
+        "role": "client"
+      },
+      {
+        "bytes": "baaa9bf50be2e978b98e7c823c6f735f",
+        "purpose": "getRound2: mulSecret blinding factor b -> BigInteger(1, bytes)",
+        "role": "client"
+      },
+      {
+        "bytes": "f8d7f401502b64f2850f0ade19141ef95cf1863c3b4d0734e975311c5b046097",
+        "purpose": "getRound2: ZKP nonce v proving xm, createRandomInRange(1, n-1) -> BigInteger(1, bytes)",
+        "role": "client"
+      },
+      {
+        "bytes": "d7a2cb88b476dbd51a9207ca4eb9ad9c",
+        "purpose": "deriveSecret: mulSecret blinding factor b -> BigInteger(1, bytes)",
+        "role": "client"
+      },
+      {
+        "bytes": "9999b901a2f9bb3fcd293718bf5d9b12771bd87e389513760d67579ad547e5ba",
+        "purpose": "getRound1: private scalar x1, createRandomInRange(1, n-1) -> BigInteger(1, bytes)",
+        "role": "server"
+      },
+      {
+        "bytes": "36f3c03f8c41a6d6531689d412c044b88e6a006b036f90e45082b3b3501ffa44",
+        "purpose": "getRound1: ZKP nonce v proving x1, createRandomInRange(1, n-1) -> BigInteger(1, bytes)",
+        "role": "server"
+      },
+      {
+        "bytes": "b5823e5f4093e27ffbc5433fd837010d81b8608dbe1d026b21a106653eba9fb5",
+        "purpose": "getRound1: private scalar x2, createRandomInRange(1, n-1) -> BigInteger(1, bytes)",
+        "role": "server"
+      },
+      {
+        "bytes": "6f60871ed5de09429caef1f20a7686b6f2bd1627c30ff7e356d4626d68df3306",
+        "purpose": "getRound1: ZKP nonce v proving x2, createRandomInRange(1, n-1) -> BigInteger(1, bytes)",
+        "role": "server"
+      },
+      {
+        "bytes": "fb65ec219a5b916fb979267a0c06190a",
+        "purpose": "getRound2: mulSecret blinding factor b -> BigInteger(1, bytes)",
+        "role": "server"
+      },
+      {
+        "bytes": "3342376fcdee2df94959fa04c3345fac26b43e91a5294ef20147d992c790795f",
+        "purpose": "getRound2: ZKP nonce v proving xm, createRandomInRange(1, n-1) -> BigInteger(1, bytes)",
+        "role": "server"
+      },
+      {
+        "bytes": "f7aebbf028f672c00afbbae1422921a8",
+        "purpose": "deriveSecret: mulSecret blinding factor b -> BigInteger(1, bytes)",
+        "role": "server"
+      }
+    ],
+    "scheme": "Deterministic SHA-256 counter stream. Each role's SecureRandom returns the concatenation of SHA-256(seedAscii || be32(i)) for i = 0, 1, 2, ..., consumed sequentially across calls; seedAscii is \"SPK-2/EC-JPAKE/client/v1\" for the client and \"SPK-2/EC-JPAKE/server/v1\" for the server. A port does not need to reimplement this: 'log' below lists, in call order, every byte string SecureRandom.nextBytes returned to EcJpake."
+  },
+  "read_results": {
+    "client_read_round1": 330,
+    "client_read_round2": 168,
+    "server_read_round1": 330,
+    "server_read_round2": 165
+  },
+  "rounds": {
+    "client_round1": "41040d09bf163c3d6cec130c47eea39a55aef18708c3e3e735fe009acaa4688acfd711ffcce88c93429b7f841efe4c446d5461b2a8a64fe413a562cf76f0658273bb4104eb327d79e40f6c8ebdf5e273476312a04a89a9b087e6f078698e68831d74d0985e7b9f54e652bed2d6e00050bbfe4fe0532bd2631fb318fb6b11b8954ad9f8d420a99a548e03ce1cc3b99a0411e3c7b841ca04f7704b0db57166d6e854bae4a4b941043d8b6a445f758be552f4c355591a010f1bd59e1dfe4e8a4e728ff1b2988ff60de5d47e8641c703f70bc21339ca5249bc82ce3785e51642f293d1488d8885d88b4104e8954580f530b1ecca88bb3abba866021f72684dc36357e9384b6c1ea35db96545a40b5c8f8155ca8acbf560c4a2425839d36d7268f92209bcd968ecbf49b7402065b96a4b15fff14826b0c43e0f17d3cc69a837cf3aaf739ccdd3e6a31ee44730",
+    "client_round2": "41043cff18fdd3fe03176d8919e31a8ee0bfa08d536b26ec4e21c990fdd7f320811c6d2caa91f3037710bdb73ee5ea0c4939cc4dfcab1c3e1f6eec2b2bb6793fa9f84104ef9c0d8471585f64d3f091cc9fbee0ef65982e72c05cef387d074ecdc299fe2f52e1780e2b403f450bbcb8108622695bd181e7500e345942fcd7a80c804f72af208d93136295ff0c55d7f133d5f987938ccb643bcd079088974ff777e209f71450",
+    "server_round1": "41040c608342014e9913e34870cbc0f0e63f51991e52aec3c9290dbd7682677af6514daed2460119a387aac39a065cd08e7d60edf8dd4a8e3522d22cab7fe0f1f4fd41040f7bbcd9580e506182f9c7802ccf9a60c2ad15842825e3e0f418490b681113aa8e0e7022f9660530d7744e9f5a2b2c9a78f74f77c63f7c93f07c5e36feb0698620b3374c240b45c29cbe431ba6a4693105fab6951fdf4368328651eb51afdb577a4104973530d431f9efb241328d762c1742ea0c20c655e485674cbaf10bb9a9da64ab1e448e12ced55b2a0f22f42692a2bf3520aedff510dde266e7d2b5d91db7edd94104ae5b3f20fde5544210a7d1e3874385e703822a8594e2f3c73953624c7fea14c0b7ab5620be37e1297fe342469c968e66137ca2a66326fad6da24271a7dc0a01220802ba65a39a90d1bc5f31b7abc92e4957310dfe171ab396126b2fd2c026ae0cd",
+    "server_round2": "03001741043e63492ade628c9c72aa4d987c8839fc7ec54ef2912880a119ae8cdd1b915656aa92530f7a857c114fbcd80324f4462cac8865bec8780a28719c001c8b8a99044104c0b80fb963fe42f4f06ed873a932f9119b02d7e72783c9991eacf0aa59a825e5e5a4dd3c0b1288bf15bc61d3cef6745228957f70df649f1f9e3d5e6f934918bb20e78303cf1ce42fb5f7d743a43e4bab32917e1df80fbc2b36f5e8142e8ff6e2bc"
+  },
+  "schema_version": 1,
+  "secret": "313233343536",
+  "server_id": "server"
+}
