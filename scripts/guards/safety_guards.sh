@@ -45,21 +45,26 @@
 #     read from a plist, a constant assembled at runtime. Only the first operand
 #     of that example is visible to a literal scan (and it is in the band, so it
 #     happens to fail — do not rely on that).
-#   * multi-line (`"""`) and raw (`#"..."#`) string literals are not modelled by
-#     the comment stripper; their contents are treated as CODE, which over-counts
-#     and fails loudly rather than hiding anything.
+#   * a value that is only ever string TEXT. Every Swift string form — ordinary,
+#     multi-line, and the raw variants with any number of `#`s — has its contents
+#     elided, in every case, because naming a value is not defining one. What is
+#     NOT elided is interpolation: `"\(x)"`, `#"\#(x)"#` and `##"\##(x)"##` are
+#     executed code and are scanned as code (see the clock note below).
 #
 # Clock — CAUGHT: every forbidden spelling with arbitrary whitespace and line
 # breaks around the call parentheses and member dots (`Date ()`, `Date .now`,
-# `Date . init`), and reads inside string interpolation (`"\(Date())"`). NOT
-# CAUGHT: reaching the wall clock through a type this list does not name
-# (`NSDate()`, `DispatchTime.now()`, `mach_absolute_time()`) — extend
+# `Date . init`), and reads inside string interpolation of any string form —
+# `"\(Date())"`, `#"\#(Date())"#`, `##"\##(Date())"##`, and the multi-line
+# equivalents. NOT CAUGHT: reaching the wall clock through a type this list does
+# not name (`NSDate()`, `DispatchTime.now()`, `mach_absolute_time()`) — extend
 # CLOCK_FORBIDDEN when such a call has a legitimate reason to appear.
 # ---------------------------------------------------------------------------
 #
 # The scan is comment-stripped and string-literal aware (lib/strip_swift_comments.awk):
-# a doc comment or an ordinary string may name a value without tripping the guard,
-# and neither can hide a real occurrence from it.
+# a doc comment or a string of any form may name a value without tripping the
+# guard, and none of them can hide a real occurrence from it — the delimiter and
+# its `#` count are tracked, so a string cannot end early (leaving the parser
+# scanning text as code) or late (swallowing the code after it).
 #
 # There is no per-line escape hatch, by design. A new legitimate occurrence of a
 # guarded value means editing this script — deliberately, in the same PR, where a
@@ -256,6 +261,30 @@ run_check() {
 
     say "safety_guards: scanning $SOURCES"
     say ""
+
+    # Scan integrity comes first: every count below is a count of the STRIPPED
+    # source, so a file the stripper refuses has not been checked, and reporting
+    # the rest as clean would be reporting a green gate over an unread file.
+    # The stripper refuses exactly one thing — an unterminated multi-line string
+    # literal, which would otherwise elide everything after it.
+    local file msg unscannable=0 scanned=0
+    while IFS= read -r file; do
+        [ -n "$file" ] || continue
+        scanned=$((scanned + 1))
+        if ! msg=$(awk -f "$STRIPPER" "$file" 2>&1 >/dev/null); then
+            bad "$(rel "$file") could not be scanned — ${msg:-the comment/string stripper failed}"
+            unscannable=1
+        fi
+    done <<EOF
+$(swift_files "$SOURCES")
+EOF
+    if [ "$unscannable" -eq 1 ]; then
+        printf 'safety_guards: %d violation(s) — nothing else was checked, because the counts would be meaningless\n' "$FAILURES" >&2
+        return 1
+    fi
+    ok "all $scanned source file(s) parse"
+
+    say ""
     say "AD-2/SI-4 — one definition site per safety constant (by VALUE, not spelling)"
 
     # The value rules: equality in any spelling, plus the drift bands.
@@ -339,9 +368,13 @@ EOF
 # The `equivalent-*` and `drifted-*` cases are the false-negative class an
 # adversarial review demonstrated against the previous textual guard: Swift
 # spellings that are the same number, and near-misses that are not. The `clock-
-# space-*` cases are the whitespace bypass from the same review. The `string-*`
-# cases pin both directions of string handling — mentioning a value is not
-# defining it, but a string cannot be used as cover for a real one.
+# space-*` cases are the whitespace bypass from the same review. The `string-*`,
+# `raw-string-*` and `multiline-*` cases pin both directions of string handling —
+# mentioning a value is not defining it, but no string form may be used as cover
+# for a real one, and the `#`-count controls pin the line between the two.
+#
+# Every probe spelling below was compiled and run before being trusted; the ones
+# that look like typos (`\#(…)` inside a `##"…"##` literal) are the point.
 # ---------------------------------------------------------------------------
 SELF_TEST_CASES="
 control-clean|PASS|
@@ -376,9 +409,17 @@ clock-in-string-interpolation|FAIL|Sources/SafetyCore/GuardProbe.swift|let note 
 constant-in-string-interpolation|FAIL|Sources/SafetyCore/GuardProbe.swift|let note = \"factor \\(18.0156)\"
 wall-clock-in-string-tail|FAIL|Sources/SafetyCore/GuardProbe.swift|let u = \"https://x\"; let stamp = Date()
 string-then-real-duplicate|FAIL|Sources/SafetyCore/GuardProbe.swift|let s = \"harmless\"; let dup = 18.0156
+raw-string-interpolation-clock|FAIL|Sources/SafetyCore/GuardProbe.swift|let stamp = #\"timestamp: \\#(Date())\"#
+raw-string-multihash-interpolation-clock|FAIL|Sources/SafetyCore/GuardProbe.swift|let stamp = ##\"timestamp: \\##(Date())\"##
+raw-string-interpolated-constant|FAIL|Sources/SafetyCore/GuardProbe.swift|let note = #\"factor \\#(18.0156)\"#
+raw-string-then-real-duplicate|FAIL|Sources/SafetyCore/GuardProbe.swift|let q = #\"harmless \"quoted\" text\"#; let dup = 18.0156
+raw-string-inner-shorter-delimiter|FAIL|Sources/SafetyCore/GuardProbe.swift|let q = ##\"a \"# b\"##; let dup = 18.0156
+hash-directive-then-constant|FAIL|Sources/SafetyCore/GuardProbe.swift|let x = #line + 20
 comments-only-control|PASS|Sources/SafetyCore/GuardProbe.swift|// 18.0156 and 20...500 and 1199145600 and Date() and Date.now
 block-comment-control|PASS|Sources/SafetyCore/GuardProbe.swift|/* 18.0156 20...500 1199145600 Date() 18.02 501 */
 string-contents-control|PASS|Sources/SafetyCore/GuardProbe.swift|let s = \"18.0156 20...500 1199145600 Date() Date.now 18.02 501\"
+raw-string-contents-control|PASS|Sources/SafetyCore/GuardProbe.swift|let s = #\"18.0156 20...500 1199145600 Date() Date.now 18.02 501\"#
+raw-string-fewer-hashes-control|PASS|Sources/SafetyCore/GuardProbe.swift|let inert = ##\"inert \\#(Date()) 18.0156\"##
 identifier-digits-control|PASS|Sources/SafetyCore/GuardProbe.swift|let sha20 = value500 + hash1199145600
 "
 
@@ -387,8 +428,61 @@ self_test_write() {
     printf 'import Foundation\n%s\n' "$2" > "$1"
 }
 
+self_test_scratch() {
+    # A copy of Sources/ to mutate. Printed so the caller can populate it.
+    local tmp
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/safety_guards_selftest.XXXXXX")
+    cp -R "$ROOT/Sources" "$tmp/Sources"
+    printf '%s' "$tmp"
+}
+
+# self_test_run <name> <expect PASS|FAIL> <scratch root>
+#
+# The single place a case's verdict is decided, so all three kinds of case
+# (single line, multi line, structural mutation) are judged identically and
+# `--explain` shows the same evidence for each. Removes the scratch tree.
+self_test_run() {
+    local name="$1" expect="$2" tmp="$3" status=0 log="$3/guard.log"
+
+    bash "${BASH_SOURCE[0]}" --root "$tmp" --quiet >"$log" 2>&1 || status=$?
+
+    if { [ "$expect" = "FAIL" ] && [ "$status" -eq 0 ]; } ||
+       { [ "$expect" = "PASS" ] && [ "$status" -ne 0 ]; }; then
+        printf '  FAIL %-42s expected the guard to %s, it exited %d\n' "$name" "$expect" "$status" >&2
+        sed 's/^/         /' "$log" >&2
+        rm -rf "$tmp"
+        return 1
+    fi
+    printf '  ok   %-42s guard %s (exit %d)\n' "$name" "$expect" "$status"
+    if [ "$EXPLAIN" -eq 1 ]; then sed 's/^/         | /' "$log"; fi
+    rm -rf "$tmp"
+    return 0
+}
+
+# self_test_multiline <name> <expect> <line>...
+#
+# For probes that need more than one line — the multi-line string literals, whose
+# whole point is state that outlives a line. The lines are passed as arguments
+# rather than embedded in SELF_TEST_CASES so that backslashes and quotes reach
+# the file exactly as typed; a mangled probe would "pass" while testing nothing.
+self_test_multiline() {
+    local name="$1" expect="$2" tmp
+    shift 2
+    tmp=$(self_test_scratch)
+    printf '%s\n' "import Foundation" "$@" > "$tmp/Sources/SafetyCore/GuardProbe.swift"
+    self_test_run "$name" "$expect" "$tmp"
+}
+
+# self_test_structural <name> <expect> <mutation shell snippet using $T as the scratch root>
+self_test_structural() {
+    local name="$1" expect="$2" mutation="$3" tmp
+    tmp=$(self_test_scratch)
+    T="$tmp" eval "$mutation"
+    self_test_run "$name" "$expect" "$tmp"
+}
+
 self_test() {
-    local total=0 bad_cases=0 line name expect path payload tmp status log
+    local total=0 bad_cases=0 line name expect path payload tmp
 
     printf 'safety_guards --self-test: proving each guard can fail\n\n'
 
@@ -401,48 +495,57 @@ self_test() {
         [ "$path" = "$payload" ] && payload=""
 
         total=$((total + 1))
-        tmp=$(mktemp -d "${TMPDIR:-/tmp}/safety_guards_selftest.XXXXXX")
-        cp -R "$ROOT/Sources" "$tmp/Sources"
+        tmp=$(self_test_scratch)
 
         case "$name" in
             control-clean) ;;
             *) self_test_write "$tmp/$path" "$payload" ;;
         esac
 
-        log="$tmp/guard.log"
-        status=0
-        bash "${BASH_SOURCE[0]}" --root "$tmp" --quiet >"$log" 2>&1 || status=$?
-
-        if { [ "$expect" = "FAIL" ] && [ "$status" -eq 0 ]; } ||
-           { [ "$expect" = "PASS" ] && [ "$status" -ne 0 ]; }; then
-            printf '  FAIL %-30s expected the guard to %s, it exited %d\n' "$name" "$expect" "$status" >&2
-            sed 's/^/         /' "$log" >&2
-            bad_cases=$((bad_cases + 1))
-        else
-            printf '  ok   %-30s guard %s (exit %d)\n' "$name" "$expect" "$status"
-            if [ "$EXPLAIN" -eq 1 ]; then sed 's/^/         | /' "$log"; fi
-        fi
-
-        rm -rf "$tmp"
+        self_test_run "$name" "$expect" "$tmp" || bad_cases=$((bad_cases + 1))
     done <<EOF
 $SELF_TEST_CASES
 EOF
 
+    # Multi-line string literals: the contents are text like any other string,
+    # but the interpolation inside them is executed code, and the code AFTER the
+    # closing delimiter is code — both on the same line as the delimiter and
+    # after it. Each of those is one way a wall-clock read or a duplicate
+    # constant could sit in plain sight while the gate reported green.
+    self_test_multiline "multiline-interpolation-clock" FAIL \
+        'let ml = """' 'stamp \(Date())' '"""' || bad_cases=$((bad_cases + 1))
+    total=$((total + 1))
+    self_test_multiline "multiline-raw-interpolation-clock" FAIL \
+        'let ml = #"""' 'stamp \#(Date())' '"""#' || bad_cases=$((bad_cases + 1))
+    total=$((total + 1))
+    self_test_multiline "multiline-close-then-duplicate" FAIL \
+        'let n = """' 'text' '""".count + Int(18.0156)' || bad_cases=$((bad_cases + 1))
+    total=$((total + 1))
+    self_test_multiline "multiline-contents-control" PASS \
+        'let ml = """' '18.0156 20...500 1199145600 Date() Date.now 18.02 501' '"""' \
+        || bad_cases=$((bad_cases + 1))
+    total=$((total + 1))
+    # An unterminated multi-line literal is the one input that could make the
+    # stripper elide a file's whole tail. It must be refused, not scanned.
+    self_test_multiline "unterminated-multiline-string" FAIL \
+        'let ml = """' 'text' || bad_cases=$((bad_cases + 1))
+    total=$((total + 1))
+
     # Structural cases that mutate the tree rather than add a file.
-    self_test_structural "missing-clock-exemption" "rm -f \"\$T/$CLOCK_EXEMPT_FILE\"" || bad_cases=$((bad_cases + 1))
+    self_test_structural "missing-clock-exemption" FAIL "rm -f \"\$T/$CLOCK_EXEMPT_FILE\"" || bad_cases=$((bad_cases + 1))
     total=$((total + 1))
-    self_test_structural "extra-read-in-exemption" "printf 'let extra = Date()\\n' >> \"\$T/$CLOCK_EXEMPT_FILE\"" || bad_cases=$((bad_cases + 1))
+    self_test_structural "extra-read-in-exemption" FAIL "printf 'let extra = Date()\\n' >> \"\$T/$CLOCK_EXEMPT_FILE\"" || bad_cases=$((bad_cases + 1))
     total=$((total + 1))
-    self_test_structural "spaced-read-in-exemption" "printf 'let extra = Date ()\\n' >> \"\$T/$CLOCK_EXEMPT_FILE\"" || bad_cases=$((bad_cases + 1))
+    self_test_structural "spaced-read-in-exemption" FAIL "printf 'let extra = Date ()\\n' >> \"\$T/$CLOCK_EXEMPT_FILE\"" || bad_cases=$((bad_cases + 1))
     total=$((total + 1))
     # The one thing the value rules cannot see: the canonical range re-spelled
     # exclusively. It decodes to the same two literals, in the same file, so only
     # the textual spelling check can catch it.
-    self_test_structural "exclusive-bound-spelling" \
+    self_test_structural "exclusive-bound-spelling" FAIL \
         "sed -i.bak 's/20\\.\\.\\.500/20..<500/' \"\$T/$CANONICAL_FILE\" && rm -f \"\$T/$CANONICAL_FILE.bak\"" \
         || bad_cases=$((bad_cases + 1))
     total=$((total + 1))
-    self_test_structural "constant-moved-out-of-canonical-file" \
+    self_test_structural "constant-moved-out-of-canonical-file" FAIL \
         "sed -i.bak '/18\\.0156/d' \"\$T/$CANONICAL_FILE\" && rm -f \"\$T/$CANONICAL_FILE.bak\" && printf 'let factor = 18.0156\\n' > \"\$T/Sources/SafetyCore/Elsewhere.swift\"" \
         || bad_cases=$((bad_cases + 1))
     total=$((total + 1))
@@ -450,29 +553,6 @@ EOF
     printf '\n%d case(s), %d unexpected result(s)\n' "$total" "$bad_cases"
     [ "$bad_cases" -eq 0 ] || return 1
     printf 'safety_guards --self-test: every guard fails when it should\n'
-    return 0
-}
-
-# self_test_structural <name> <mutation shell snippet using $T as the scratch root>
-self_test_structural() {
-    local name="$1" mutation="$2" tmp status log
-    tmp=$(mktemp -d "${TMPDIR:-/tmp}/safety_guards_selftest.XXXXXX")
-    cp -R "$ROOT/Sources" "$tmp/Sources"
-    T="$tmp" eval "$mutation"
-
-    log="$tmp/guard.log"
-    status=0
-    bash "${BASH_SOURCE[0]}" --root "$tmp" --quiet >"$log" 2>&1 || status=$?
-
-    if [ "$status" -eq 0 ]; then
-        printf '  FAIL %-30s expected the guard to FAIL, it exited 0\n' "$name" >&2
-        sed 's/^/         /' "$log" >&2
-        rm -rf "$tmp"
-        return 1
-    fi
-    printf '  ok   %-30s guard FAIL (exit %d)\n' "$name" "$status"
-    if [ "$EXPLAIN" -eq 1 ]; then sed 's/^/         | /' "$log"; fi
-    rm -rf "$tmp"
     return 0
 }
 
