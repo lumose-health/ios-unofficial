@@ -3,10 +3,12 @@ package com.glycemicgpt.mobile.ble.crypto
 import org.bouncycastle.jce.ECNamedCurveTable
 import org.bouncycastle.jce.spec.ECParameterSpec
 import org.bouncycastle.math.ec.ECPoint
+import org.bouncycastle.util.BigIntegers
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.math.BigInteger
 import java.security.MessageDigest
@@ -26,12 +28,14 @@ import java.security.SecureRandom
  * number of times), and writes one JSON fixture per scenario into the directory named by
  * the `spk2.fixture.out` system property.
  *
- * The generator also *proves* the rule a Swift port needs in order to turn the recorded
- * bytes back into scalars: for every logged 32-byte draw it recomputes the public point
- * as `G * BigInteger(1, bytes)` and asserts it equals the point `EcJpake` actually
- * emitted. If BouncyCastle's rejection sampling ever draws more than once, or the draw
- * order changes, the assertions below fail loudly instead of producing a mislabelled
- * fixture.
+ * The generator also *proves* the rules a Swift port needs in order to turn the recorded
+ * bytes back into payloads. Independently of `EcJpake`, and from nothing but the logged
+ * draws and the JPAKE secret, it recomputes every field it then parses back out of the
+ * emitted payloads — both round 1 public points, both round 1 ZKP commitments and
+ * response scalars, the round 2 point, commitment and response scalar, and both derived
+ * secrets — and asserts each equals what `EcJpake` produced. If BouncyCastle's rejection
+ * sampling ever draws more than once, or the draw order or wire format changes, the
+ * assertions below fail loudly instead of producing a mislabelled fixture.
  *
  * Output is byte-stable: sorted keys at every level, lower-hex byte fields, two-space
  * indent, exactly one trailing newline — `verify_vectors.sh` byte-diffs it.
@@ -75,13 +79,6 @@ class EcJpakeKatGeneratorTest {
             }
             draws += Draw(role, phase, bytes.copyOf())
         }
-
-        private fun be32(value: Int): ByteArray = byteArrayOf(
-            ((value ushr 24) and 0xFF).toByte(),
-            ((value ushr 16) and 0xFF).toByte(),
-            ((value ushr 8) and 0xFF).toByte(),
-            (value and 0xFF).toByte(),
-        )
     }
 
     /** The draw sequence `EcJpake` is expected to make, per role, for a full handshake. */
@@ -149,12 +146,18 @@ class EcJpakeKatGeneratorTest {
         assertDrawsMatchSpec(clientRand)
         assertDrawsMatchSpec(serverRand)
 
-        // Prove `scalar = BigInteger(1, loggedBytes)` against the emitted payloads, so the
-        // recorded log is provably sufficient to rebuild every point (AC 3).
-        val clientPoints = verifyRound1Scalars(ec, clientRound1, clientRand)
-        val serverPoints = verifyRound1Scalars(ec, serverRound1, serverRand)
-        verifyRound2Nonce(ec, clientRound2, clientRand, hasCurveId = false, myX1 = clientPoints.x1, peer = serverPoints)
-        verifyRound2Nonce(ec, serverRound2, serverRand, hasCurveId = true, myX1 = serverPoints.x1, peer = clientPoints)
+        // Everything below is computed from the recorded draws and the secret alone, then
+        // compared against what EcJpake emitted — so the log is *shown* to be sufficient to
+        // rebuild every payload field, not merely asserted to be (AC 3).
+        val clientSide = Independent(ec, clientRand)
+        val serverSide = Independent(ec, serverRand)
+
+        verifyRound1(clientRound1, clientSide)
+        verifyRound1(serverRound1, serverSide)
+        val clientXm = verifyRound2(clientRound2, clientSide, serverSide, hasCurveId = false)
+        val serverXm = verifyRound2(serverRound2, serverSide, clientSide, hasCurveId = true)
+        verifyDerivedSecret(clientSecret, clientSide, serverSide, peerXm = serverXm)
+        verifyDerivedSecret(serverSecret, serverSide, clientSide, peerXm = clientXm)
 
         val written = mutableListOf<File>()
 
@@ -191,28 +194,42 @@ class EcJpakeKatGeneratorTest {
         // to rebuild the base payload before applying the corruption.
         val round1Log = logEntries(clientRand).take(round1DrawCount)
 
-        val truncated = clientRound1.copyOfRange(0, 100)
+        // The corruption is described in machine-readable form and then *applied* from
+        // that description, so a fixture cannot claim one corruption and record another;
+        // the validation gate rebuilds `payload` the same way (see ecjpake_replay.py).
+        val truncation = mapOf(
+            "description" to "truncate to the first 100 bytes",
+            "op" to "truncate",
+            "length" to 100,
+        )
+        val truncated = corrupt(clientRound1, truncation)
         written += write(
             outDir,
             "malformed-round1-truncated-01.json",
             common(
                 kind = "malformed",
-                description = "Truncated peer round 1: the client round 1 payload cut to 100 of its " +
-                    "${clientRound1.size} bytes, so the second point runs off the end of the stream.",
+                description = "Truncated peer round 1: the client round 1 payload cut to " +
+                    "${truncated.size} of its ${clientRound1.size} bytes, so the second point runs " +
+                    "off the end of the stream.",
                 log = round1Log,
             ) + rejection(
                 call = "readRound1",
                 payload = truncated,
                 basePayload = clientRound1,
-                corruption = "truncate to the first 100 bytes",
+                corruption = truncation,
                 outcome = captureRejection { EcJpake(EcJpake.Role.SERVER, SECRET, freshRand()).readRound1(truncated) },
             ),
         )
 
         // Flipping the low bit of the final ZKP scalar keeps the payload structurally
         // valid, so the rejection comes from the proof check rather than the parser.
-        val corrupted = clientRound1.copyOf()
-        corrupted[corrupted.size - 1] = (corrupted[corrupted.size - 1].toInt() xor 0x01).toByte()
+        val bitFlip = mapOf(
+            "description" to "XOR 0x01 into the last byte (the low byte of the second ZKP scalar r)",
+            "op" to "xor",
+            "offset" to clientRound1.size - 1,
+            "mask" to "01",
+        )
+        val corrupted = corrupt(clientRound1, bitFlip)
         written += write(
             outDir,
             "malformed-round1-zkp-01.json",
@@ -225,7 +242,7 @@ class EcJpakeKatGeneratorTest {
                 call = "readRound1",
                 payload = corrupted,
                 basePayload = clientRound1,
-                corruption = "XOR 0x01 into the last byte (the low byte of the second ZKP scalar r)",
+                corruption = bitFlip,
                 outcome = captureRejection { EcJpake(EcJpake.Role.SERVER, SECRET, freshRand()).readRound1(corrupted) },
             ),
         )
@@ -236,7 +253,65 @@ class EcJpakeKatGeneratorTest {
 
     // -- Verification helpers --------------------------------------------------
 
-    private class Round1Points(val x1: ECPoint, val x2: ECPoint)
+    /**
+     * One side of the handshake rebuilt from the recorded draws and the JPAKE secret,
+     * with no reference to anything `EcJpake` emitted. This is the same computation the
+     * Swift port (and `scripts/spk2/ecjpake_replay.py`) has to perform.
+     */
+    private class Independent(val ec: ECParameterSpec, rand: RecordingRandom) {
+        val role: String = rand.role
+        val id: ByteArray = rand.role.toByteArray(Charsets.US_ASCII)
+        private val s = BigInteger(1, SECRET)
+
+        val x1: BigInteger = scalar(rand, 0)
+        val v1: BigInteger = scalar(rand, 1)
+        val x2: BigInteger = scalar(rand, 2)
+        val v2: BigInteger = scalar(rand, 3)
+        private val round2Blind: ByteArray = rand.draws[4].bytes
+        val vRound2: BigInteger = scalar(rand, 5)
+        private val deriveBlind: ByteArray = rand.draws[6].bytes
+
+        val X1: ECPoint = ec.g.multiply(x1)
+        val X2: ECPoint = ec.g.multiply(x2)
+
+        /** Round 2 uses the generator `peer.X1 + peer.X2 + own.X1`. */
+        fun round2Generator(peer: Independent): ECPoint = peer.X1.add(peer.X2).add(X1)
+
+        /** Mirror of `EcJpake.mulSecret`, with the blinding factor taken from the log. */
+        fun mulSecret(blind: ByteArray, negate: Boolean): BigInteger {
+            val bN = BigInteger(1, blind).multiply(ec.n).add(s)
+            val r = x2.multiply(bN)
+            return (if (negate) r.negate() else r).mod(ec.n)
+        }
+
+        fun round2Scalar(): BigInteger = mulSecret(round2Blind, negate = false)
+
+        fun deriveScalar(): BigInteger = mulSecret(deriveBlind, negate = true)
+
+        /** Mirror of `EcJpake.zkpHash`. */
+        fun zkpHash(gen: ECPoint, commitment: ECPoint, pub: ECPoint): BigInteger {
+            val out = ByteArrayOutputStream()
+            for (point in listOf(gen, commitment, pub)) {
+                val encoded = point.normalize().getEncoded(false)
+                out.write(be32(encoded.size))
+                out.write(encoded)
+            }
+            out.write(be32(id.size))
+            out.write(id)
+            val digest = MessageDigest.getInstance(HASH).digest(out.toByteArray())
+            return BigInteger(1, digest).mod(ec.n)
+        }
+
+        /** Mirror of `EcJpake.writeZkp`'s response scalar `r = v - x*h mod n`. */
+        fun zkpResponse(gen: ECPoint, priv: BigInteger, pub: ECPoint, nonce: BigInteger): BigInteger {
+            val commitment = gen.multiply(nonce)
+            val h = zkpHash(gen, commitment, pub)
+            return nonce.subtract(priv.multiply(h)).mod(ec.n)
+        }
+
+        private fun scalar(rand: RecordingRandom, index: Int): BigInteger =
+            BigInteger(1, rand.draws[index].bytes)
+    }
 
     private fun assertDrawsMatchSpec(rand: RecordingRandom) {
         assertEquals(
@@ -252,55 +327,92 @@ class EcJpakeKatGeneratorTest {
     }
 
     /**
-     * Re-derives both round 1 public points and both round 1 ZKP commitments from the
-     * logged bytes and checks them against the emitted payload.
+     * Checks every field of an emitted round 1 payload — both public points, both ZKP
+     * commitments and both response scalars — against values recomputed from the log.
      */
-    private fun verifyRound1Scalars(ec: ECParameterSpec, round1: ByteArray, rand: RecordingRandom): Round1Points {
+    private fun verifyRound1(round1: ByteArray, side: Independent) {
+        val ec = side.ec
         val reader = Reader(round1)
         val x1 = reader.point(ec)
         val v1 = reader.point(ec)
-        reader.num()
+        val r1 = reader.num()
         val x2 = reader.point(ec)
         val v2 = reader.point(ec)
-        reader.num()
-        assertEquals("round 1 for '${rand.role}' had trailing bytes", round1.size, reader.pos)
+        val r2 = reader.num()
+        assertEquals("round 1 for '${side.role}' had trailing bytes", round1.size, reader.pos)
 
-        assertSamePoint("${rand.role} X1", ec.g.multiply(scalar(rand, 0)), x1)
-        assertSamePoint("${rand.role} ZKP V for X1", ec.g.multiply(scalar(rand, 1)), v1)
-        assertSamePoint("${rand.role} X2", ec.g.multiply(scalar(rand, 2)), x2)
-        assertSamePoint("${rand.role} ZKP V for X2", ec.g.multiply(scalar(rand, 3)), v2)
-        return Round1Points(x1, x2)
+        assertSamePoint("${side.role} X1", side.X1, x1)
+        assertSamePoint("${side.role} ZKP V for X1", ec.g.multiply(side.v1), v1)
+        assertEquals(
+            "${side.role} ZKP response r for X1 does not match the value recomputed from the log",
+            side.zkpResponse(ec.g, side.x1, side.X1, side.v1),
+            r1,
+        )
+        assertSamePoint("${side.role} X2", side.X2, x2)
+        assertSamePoint("${side.role} ZKP V for X2", ec.g.multiply(side.v2), v2)
+        assertEquals(
+            "${side.role} ZKP response r for X2 does not match the value recomputed from the log",
+            side.zkpResponse(ec.g, side.x2, side.X2, side.v2),
+            r2,
+        )
     }
 
     /**
-     * Checks the round 2 ZKP commitment against the logged nonce. The generator point for
-     * round 2 is `peer.X1 + peer.X2 + my.X1`, so a correct result also confirms that the
-     * 16-byte blinding draw precedes the nonce draw.
+     * Checks every field of an emitted round 2 payload — the curve id the server writes,
+     * the public point `Xm`, the ZKP commitment and the response scalar — against values
+     * recomputed from the log and the JPAKE secret. Returns the recomputed `Xm`, which
+     * feeds the peer's derived-secret check.
      */
-    private fun verifyRound2Nonce(
-        ec: ECParameterSpec,
+    private fun verifyRound2(
         round2: ByteArray,
-        rand: RecordingRandom,
+        side: Independent,
+        peer: Independent,
         hasCurveId: Boolean,
-        myX1: ECPoint,
-        peer: Round1Points,
-    ) {
+    ): ECPoint {
+        val ec = side.ec
         val reader = Reader(round2)
         if (hasCurveId) {
-            assertEquals("round 2 for '${rand.role}' must start with ECCurveType.named_curve", 3, reader.u8())
-            assertEquals("round 2 for '${rand.role}' must name curve 23 (secp256r1)", 23, reader.u16())
+            assertEquals("round 2 for '${side.role}' must start with ECCurveType.named_curve", 3, reader.u8())
+            assertEquals("round 2 for '${side.role}' must name curve 23 (secp256r1)", 23, reader.u16())
         }
-        reader.point(ec) // Xm — a function of the JPAKE secret, not of a single logged draw.
+        val xmPoint = reader.point(ec)
         val v = reader.point(ec)
-        reader.num()
-        assertEquals("round 2 for '${rand.role}' had trailing bytes", round2.size, reader.pos)
+        val r = reader.num()
+        assertEquals("round 2 for '${side.role}' had trailing bytes", round2.size, reader.pos)
 
-        val g = peer.x1.add(peer.x2).add(myX1)
-        assertSamePoint("${rand.role} round 2 ZKP V", g.multiply(scalar(rand, 5)), v)
+        val gen = side.round2Generator(peer)
+        val xm = side.round2Scalar()
+        val expectedXm = gen.multiply(xm)
+        assertSamePoint("${side.role} round 2 Xm", expectedXm, xmPoint)
+        assertSamePoint("${side.role} round 2 ZKP V", gen.multiply(side.vRound2), v)
+        assertEquals(
+            "${side.role} round 2 ZKP response r does not match the value recomputed from the log",
+            side.zkpResponse(gen, xm, expectedXm, side.vRound2),
+            r,
+        )
+        return expectedXm
     }
 
-    private fun scalar(rand: RecordingRandom, index: Int): BigInteger =
-        BigInteger(1, rand.draws[index].bytes)
+    /**
+     * Recomputes a role's derived secret from the log, the JPAKE secret and the peer's
+     * *recomputed* round 2 point, then checks it against the secret `EcJpake` derived.
+     * Nothing emitted by the implementation feeds this computation.
+     */
+    private fun verifyDerivedSecret(
+        produced: ByteArray,
+        side: Independent,
+        peer: Independent,
+        peerXm: ECPoint,
+    ) {
+        val k = peerXm.add(peer.X2.multiply(side.deriveScalar())).multiply(side.x2)
+        val expected = MessageDigest.getInstance(HASH)
+            .digest(BigIntegers.asUnsignedByteArray(k.normalize().xCoord.toBigInteger()))
+        assertArrayEquals(
+            "${side.role} derived secret does not match the value recomputed from the log",
+            expected,
+            produced,
+        )
+    }
 
     private fun assertSamePoint(what: String, expected: ECPoint, actual: ECPoint) {
         assertArrayEquals(
@@ -364,11 +476,36 @@ class EcJpakeKatGeneratorTest {
         ),
     )
 
+    /**
+     * Applies a machine-readable corruption descriptor — the same operations
+     * `ecjpake_replay.apply_corruption` implements — to a well-formed payload.
+     */
+    private fun corrupt(base: ByteArray, corruption: Map<String, Any?>): ByteArray =
+        when (val op = corruption["op"]) {
+            "truncate" -> {
+                val length = corruption["length"] as Int
+                require(length in 0 until base.size) { "truncation length $length is not inside the payload" }
+                base.copyOfRange(0, length)
+            }
+            "xor" -> {
+                val offset = corruption["offset"] as Int
+                val mask = unhex(corruption["mask"] as String)
+                require(offset >= 0 && offset + mask.size <= base.size) { "xor at $offset runs off the payload" }
+                val out = base.copyOf()
+                for (i in mask.indices) {
+                    out[offset + i] = (out[offset + i].toInt() xor mask[i].toInt()).toByte()
+                }
+                require(!out.contentEquals(base)) { "the mask is all zero; it would not corrupt anything" }
+                out
+            }
+            else -> error("unsupported corruption op: $op")
+        }
+
     private fun rejection(
         call: String,
         payload: ByteArray,
         basePayload: ByteArray,
-        corruption: String,
+        corruption: Map<String, Any?>,
         outcome: Throwable,
     ): Map<String, Any?> = mapOf(
         "input" to mapOf(
@@ -457,7 +594,21 @@ class EcJpakeKatGeneratorTest {
         return out.toString()
     }
 
+    private fun unhex(value: String): ByteArray {
+        require(value.length % 2 == 0) { "not a hex string: $value" }
+        return ByteArray(value.length / 2) { value.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
+    }
+
     private companion object {
+
+        /** Big-endian uint32, as `EcJpake.writeUint32Be` emits into the ZKP hash input. */
+        fun be32(value: Int): ByteArray = byteArrayOf(
+            ((value ushr 24) and 0xFF).toByte(),
+            ((value ushr 16) and 0xFF).toByte(),
+            ((value ushr 8) and 0xFF).toByte(),
+            (value and 0xFF).toByte(),
+        )
+
         const val OUT_PROPERTY = "spk2.fixture.out"
         const val OUT_ENV = "SPK2_FIXTURE_OUT"
 

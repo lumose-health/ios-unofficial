@@ -12,9 +12,14 @@ Two layers:
      verify_vectors.sh depends on.
   2. Cryptographic replay (ecjpake_replay.py) — a stdlib-only P-256
      implementation rebuilds every committed payload from nothing but the
-     fixture's own `secret` and `randomness.log`. This is what actually proves
-     AC 3: if the recorded log were insufficient, or a payload were edited by
-     hand, the replay would not reproduce it.
+     fixture's own `secret` and `randomness.log`, and re-parses each rebuilt
+     payload to check the recorded byte counts and rejections. This is what
+     actually proves AC 3: if the recorded log were insufficient, or a payload
+     or outcome were edited by hand, the replay would not reproduce it.
+
+  3. Provenance consistency — the pinned Android revision in
+     scripts/spk2/provenance.env, which verify_vectors.sh regenerates from, must
+     be the revision the fixture README documents.
 
 Fixture schema (one JSON object per file under Tests/Fixtures/EcJpake/):
 
@@ -42,12 +47,16 @@ Fixture schema (one JSON object per file under Tests/Fixtures/EcJpake/):
 
   kind == "malformed"
     input           obj    {call: str, role: str, payload: hex,
-                            base_payload: hex, corruption: str}
+                            base_payload: hex, corruption: obj}
                            `base_payload` is the well-formed payload the
                            randomness log reproduces; `payload` is it after
-                           `corruption` was applied.
-    outcome         obj    {rejected: true, exception_class: str,
-                            message: str (optional)}
+                           `corruption` was applied. `corruption` is
+                           machine-readable — {description, op, ...operands},
+                           op "truncate" (length) or "xor" (offset, mask) — so
+                           the replay rebuilds `payload` instead of trusting it.
+    outcome         obj    {rejected: true, exception_class: str, message: str}
+                           the replay re-parses `payload` and requires this
+                           outcome to be the rejection it actually provokes.
 
 Determinism rules enforced here because the regeneration gate byte-diffs the
 files: keys are stored in sorted order at every level, byte fields are
@@ -72,6 +81,7 @@ import ecjpake_replay  # noqa: E402  (sibling module, resolved via the line abov
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_DIR = REPO_ROOT / "Tests" / "Fixtures" / "EcJpake"
+PROVENANCE_FILE = REPO_ROOT / "scripts" / "spk2" / "provenance.env"
 
 SCHEMA_VERSION = 1
 EXPECTED_CURVE = "P-256"
@@ -92,6 +102,7 @@ HANDSHAKE_READ_RESULTS = (
     "server_read_round2",
 )
 HEX_DIGITS = set("0123456789abcdef")
+KNOWN_CORRUPTION_OPS = ("truncate", "xor")
 
 
 class Errors:
@@ -235,24 +246,50 @@ def _validate_handshake(obj: dict, errors: Errors, where: str) -> None:
 
 
 def _validate_malformed(obj: dict, errors: Errors, where: str) -> None:
-    payload = _require(obj, "input", dict, errors, where)
-    if payload is not None:
-        call = _require(payload, "call", str, errors, f"{where} input")
+    inp = _require(obj, "input", dict, errors, where)
+    if inp is not None:
+        input_where = f"{where} input"
+        call = _require(inp, "call", str, errors, input_where)
         if call is not None and not call.strip():
-            errors.add(f"{where} input", "'call' must name the EcJpake method that rejected the payload")
+            errors.add(input_where, "'call' must name the EcJpake method that rejected the payload")
+        role = _require(inp, "role", str, errors, input_where)
+        if role is not None and role not in (EXPECTED_CLIENT_ID, EXPECTED_SERVER_ID):
+            errors.add(input_where, f"'role' must name the rejecting side, 'client' or 'server', got {role!r}")
         # An empty payload is a legitimate malformed input, so allow it.
-        _require_hex(payload, "payload", errors, f"{where} input", allow_empty=True)
+        payload = _require_hex(inp, "payload", errors, input_where, allow_empty=True)
+        # base_payload + corruption is what makes `payload` verifiable rather than
+        # merely present: the replay rebuilds it instead of reading it back.
+        base = _require_hex(inp, "base_payload", errors, input_where)
+        if payload is not None and base is not None and payload == base:
+            errors.add(input_where, "'payload' equals 'base_payload'; nothing was corrupted")
+        corruption = _require(inp, "corruption", dict, errors, input_where)
+        if corruption is not None:
+            corruption_where = f"{input_where} corruption"
+            description = _require(corruption, "description", str, errors, corruption_where)
+            if description is not None and not description.strip():
+                errors.add(corruption_where, "'description' must state in prose what was corrupted")
+            op = _require(corruption, "op", str, errors, corruption_where)
+            if op is not None and op not in KNOWN_CORRUPTION_OPS:
+                errors.add(corruption_where, f"'op' must be one of {sorted(KNOWN_CORRUPTION_OPS)}, got {op!r}")
 
     outcome = _require(obj, "outcome", dict, errors, where)
     if outcome is not None:
+        outcome_where = f"{where} outcome"
         rejected = outcome.get("rejected")
         if rejected is not True:
-            errors.add(f"{where} outcome", f"'rejected' must be true, got {rejected!r}")
-        exception_class = _require(outcome, "exception_class", str, errors, f"{where} outcome")
+            errors.add(outcome_where, f"'rejected' must be true, got {rejected!r}")
+        exception_class = _require(outcome, "exception_class", str, errors, outcome_where)
         if exception_class is not None and not exception_class.strip():
-            errors.add(f"{where} outcome", "'exception_class' must name the thrown exception")
-        if "message" in outcome and not isinstance(outcome["message"], str):
-            errors.add(f"{where} outcome", "'message' must be a string when present")
+            errors.add(outcome_where, "'exception_class' must name the thrown exception")
+        message = _require(outcome, "message", str, errors, outcome_where)
+        # The replay pins the message to the rejection it actually reproduces, so an
+        # unknown one is a gate failure rather than free-form documentation.
+        if message is not None and message not in ecjpake_replay.REJECTION_MESSAGES:
+            errors.add(
+                outcome_where,
+                f"'message' {message!r} is not a rejection ecjpake_replay can reproduce "
+                f"(known: {sorted(ecjpake_replay.REJECTION_MESSAGES)})",
+            )
 
 
 def _replay(obj: dict, kind: str, errors: Errors, where: str) -> None:
@@ -263,11 +300,49 @@ def _replay(obj: dict, kind: str, errors: Errors, where: str) -> None:
             if kind == "handshake"
             else ecjpake_replay.replay_malformed(obj)
         )
-    except (ecjpake_replay.ReplayError, ValueError, KeyError) as exc:
+    except (ecjpake_replay.ReplayError, ecjpake_replay.Rejection, ValueError, KeyError) as exc:
         errors.add(f"{where} replay", f"could not be replayed ({type(exc).__name__}: {exc})")
         return
     for problem in problems:
         errors.add(f"{where} replay", problem)
+
+
+def _validate_provenance(readme: Path, errors: Errors) -> None:
+    """The regeneration pin and the documented provenance must name the same commit.
+
+    verify_vectors.sh regenerates from provenance.env, so if the README recorded a
+    different revision the documented command would no longer reproduce the
+    documented source — the drift finding this check closes.
+    """
+    where = "provenance.env"
+    try:
+        text = PROVENANCE_FILE.read_text(encoding="utf-8")
+    except OSError as exc:
+        errors.add(where, f"unreadable ({exc}); verify_vectors.sh regenerates from this pin")
+        return
+
+    values = [
+        line.split("=", 1)[1].strip()
+        for line in text.splitlines()
+        if line.startswith("ANDROID_SHA=")
+    ]
+    if len(values) != 1:
+        errors.add(where, f"expected exactly one ANDROID_SHA= line, found {len(values)}")
+        return
+
+    sha = values[0]
+    if len(sha) != 40 or set(sha) - HEX_DIGITS:
+        errors.add(where, f"ANDROID_SHA must be a full 40-character lower-hex commit id, got {sha!r}")
+        return
+
+    if not readme.is_file():
+        return  # already reported by the caller
+    if sha not in readme.read_text(encoding="utf-8"):
+        errors.add(
+            "README.md",
+            f"does not record the pinned Android commit {sha}; the provenance table and "
+            f"{PROVENANCE_FILE.name} must agree (re-pinning updates both)",
+        )
 
 
 def validate_fixture(path: Path, errors: Errors) -> str | None:
@@ -321,6 +396,7 @@ def main() -> int:
     readme = FIXTURE_DIR / "README.md"
     if not readme.is_file():
         errors.add("README.md", "missing; provenance and the zero-prior-KATs record are required (AC 4)")
+    _validate_provenance(readme, errors)
 
     kinds = [validate_fixture(path, errors) for path in paths]
 

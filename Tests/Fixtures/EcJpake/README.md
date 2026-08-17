@@ -20,11 +20,19 @@ output — see [Regenerating](#regenerating).
 | Harness | `scripts/spk2/harness/EcJpakeKatGeneratorTest.kt` (in **this** repo) |
 | Captured | 2026-08-16 |
 
-The Android checkout is never modified. `scripts/spk2/verify_vectors.sh` creates a
-disposable `git worktree` at the commit above, copies the harness in, runs it, and
-removes the worktree on every exit path. The harness uses `EcJpake`'s existing
-`rand: SecureRandom` constructor parameter — no production source was changed,
-and the harness is not committed to the Android repo.
+That commit is the pin in `scripts/spk2/provenance.env`, and it is what
+`scripts/spk2/verify_vectors.sh` checks out — regeneration never follows the
+Android checkout's current `HEAD`, so the command below keeps reproducing this
+revision after that checkout moves on. If the pinned commit is missing from the
+checkout the script fails rather than substituting another revision, and
+`validate_fixtures.py` fails while the pin and this table disagree.
+
+The Android checkout is never modified. `verify_vectors.sh` creates a disposable
+`git worktree` at the pinned commit, copies the harness in, runs it, and removes
+that worktree — and only that worktree — before exiting; if the removal does not
+succeed the script exits nonzero rather than reporting a pass. The harness uses
+`EcJpake`'s existing `rand: SecureRandom` constructor parameter — no production
+source was changed, and the harness is not committed to the Android repo.
 
 ## Fixtures
 
@@ -33,6 +41,13 @@ and the harness is not committed to the Android repo.
 | `handshake-client-01.json` | `handshake` | Full client + server handshake: both round 1 and round 2 payloads in both directions, the byte counts returned by `readRound1`/`readRound2`, and the derived secret from **both** roles (they agree). |
 | `malformed-round1-truncated-01.json` | `malformed` | The client round 1 payload cut to its first 100 bytes; `readRound1` throws `java.lang.RuntimeException: Unexpected end of stream`. |
 | `malformed-round1-zkp-01.json` | `malformed` | The client round 1 payload with the low bit of its final ZKP scalar flipped, so it parses but the proof fails; `readRound1` throws `java.lang.RuntimeException: ZKP validation failed`. |
+
+A malformed fixture records `base_payload` (the well-formed payload its randomness
+log reproduces), a machine-readable `corruption` — `{description, op, ...operands}`,
+`op` being `truncate` (`length`) or `xor` (`offset`, `mask`) — and `payload`, which
+is `base_payload` with that corruption applied. A port should rebuild `payload`
+itself rather than trusting the recorded bytes; the validation gate does exactly
+that, and then re-parses the result to confirm it provokes the recorded `outcome`.
 
 Parameters are constant across all fixtures: curve P-256, hash SHA-256, ids
 `client` / `server`, JPAKE secret `313233343536` (the ASCII pairing code
@@ -77,7 +92,11 @@ Per role, in order: `x1`, ZKP nonce for `x1`, `x2`, ZKP nonce for `x2` (32 bytes
 each, `getRound1`), then the 16-byte `mulSecret` blinding factor and the round 2
 ZKP nonce (`getRound2`), then a second 16-byte blinding factor (`deriveSecret`).
 Each entry's `purpose` states this, and the harness asserts the sizes and order
-rather than trusting them.
+rather than trusting them. It also recomputes, from those draws and the secret
+alone, every field it parses back out of the emitted payloads — both round 1
+points, both round 1 ZKP commitments and response scalars, the round 2 point,
+commitment and response scalar, and both derived secrets — and fails the capture
+if any of them differs from what `EcJpake` produced.
 
 The derivation rules a port needs:
 
@@ -99,7 +118,19 @@ The derivation rules a port needs:
 
 `scripts/spk2/ecjpake_replay.py` is a working, dependency-free implementation of
 exactly the above; it reproduces every committed byte and runs as part of the
-validation gate. Use it as the reference when porting.
+validation gate. Use it as the reference when porting. It implements both
+directions — writing each payload and re-parsing it the way the peer does — so
+the recorded byte counts and the malformed fixtures' recorded rejections are
+checked against a real parse. No committed byte range is ever fed into a
+computation whose result is then compared against a committed byte range: the
+derived secrets come from the replayed round 2 points, and a malformed
+`input.payload` is rebuilt from `base_payload` plus `corruption`.
+
+The replay reproduces the two rejections `EcJpake` raises as
+`java.lang.RuntimeException` — `Unexpected end of stream` and
+`ZKP validation failed`. A malformed fixture recording any other outcome fails the
+gate on purpose: extend `REJECTION_MESSAGES` in `ecjpake_replay.py` (and the parse
+path that produces it) in the same change that adds such a fixture.
 
 ## Regenerating
 
@@ -109,8 +140,21 @@ bash scripts/spk2/verify_vectors.sh            # gate: byte-diff against the Kot
 python3 scripts/spk2/validate_fixtures.py      # gate: structure + stdlib-only replay
 ```
 
-`ANDROID_REPO` overrides the Android checkout path (default
-`/Users/devbox/repos/lumose-health/android-unofficial`).
+Both modes regenerate from the commit pinned in `scripts/spk2/provenance.env`, not
+from the Android checkout's `HEAD`. `ANDROID_REPO` overrides the checkout path
+(default `/Users/devbox/repos/lumose-health/android-unofficial`).
+
+Re-pinning to a newer Android revision is a deliberate, separate act:
+
+```sh
+ANDROID_SHA=<new sha> bash scripts/spk2/verify_vectors.sh --update
+```
+
+That rewrites the `ANDROID_SHA` line in `provenance.env`; update the provenance
+table at the top of this file (commit, subject, capture date) in the same commit,
+or `validate_fixtures.py` fails on the mismatch. `ANDROID_SHA` is rejected in
+verify mode, where honouring it would mean the gate no longer proves anything
+about the recorded provenance.
 
 If a regenerated fixture ever differs from the committed one, that is a real
 signal: either `EcJpake` changed, or the capture is no longer deterministic. Do
