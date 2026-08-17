@@ -50,21 +50,81 @@
 #     elided, in every case, because naming a value is not defining one. What is
 #     NOT elided is interpolation: `"\(x)"`, `#"\#(x)"#` and `##"\##(x)"##` are
 #     executed code and are scanned as code (see the clock note below).
+#   * a value inside an ADVERSARIALLY constructed interpolation. The interpolated
+#     expression is scanned on a best-effort LEXICAL basis — its end is found by
+#     counting parentheses in the raw text — so a `)` hidden inside a comment or a
+#     nested string literal within the expression closes the scan early and elides
+#     what follows. See "Known bypasses" below; this is not a hypothetical.
 #
 # Clock — CAUGHT: every forbidden spelling with arbitrary whitespace and line
 # breaks around the call parentheses and member dots (`Date ()`, `Date .now`,
-# `Date . init`), and reads inside string interpolation of any string form —
-# `"\(Date())"`, `#"\#(Date())"#`, `##"\##(Date())"##`, and the multi-line
-# equivalents. NOT CAUGHT: reaching the wall clock through a type this list does
-# not name (`NSDate()`, `DispatchTime.now()`, `mach_absolute_time()`) — extend
-# CLOCK_FORBIDDEN when such a call has a legitimate reason to appear.
+# `Date . init`), and reads inside ordinary string interpolation of any string
+# form — `"\(Date())"`, `#"\#(Date())"#`, `##"\##(Date())"##`, and the multi-line
+# equivalents.
+#
+# Clock — NOT CAUGHT:
+#   * reaching the wall clock through a type this list does not name (`NSDate()`,
+#     `DispatchTime.now()`, `mach_absolute_time()`) — extend CLOCK_FORBIDDEN when
+#     such a call has a legitimate reason to appear;
+#   * a read inside an adversarially constructed interpolation, per the known
+#     bypasses below.
+#
+# ---------------------------------------------------------------------------
+# KNOWN BYPASSES (documented, executable, expected to pass through)
+#
+# This scan is TEXT-BASED. It lexes Swift well enough to be useful and not well
+# enough to be a compiler, and the gap is not evenly distributed: string
+# delimiters are modelled exactly, while the inside of an interpolation is
+# approximated by counting parentheses. Someone who knows that can walk past the
+# gate on purpose. Both spellings below compile, run, and do the forbidden thing
+# under `swift -swift-version 6`, and the guard exits 0 on each of them TODAY:
+#
+#     let stamp = "\({ /* ) */ Date() }())"              # `)` hidden in a comment
+#     let a = "\(String(")").count + Date().hashValue)"  # `)` in a nested literal
+#
+# In both, the `)` inside the comment or nested literal is counted as the end of
+# the interpolation, so `Date()` is elided as string text and never scanned.
+#
+# They are carried in --self-test as xfail cases
+# (`known-bypass-interpolation-comment-paren`,
+# `known-bypass-interpolation-nested-literal-paren`) rather than left in prose,
+# because a limit nobody executes is a limit nobody notices going stale. If one
+# starts being caught, --self-test says so loudly: that is good news, and it means
+# these coverage statements now understate the guard and must be rewritten in the
+# same change.
+#
+# What this does NOT mean: the guard is not defeated by ordinary code, or by
+# ordinary mistakes, which is what it is for. Drift arrives as a copy-pasted
+# constant or a convenient `Date()`, not as a paren smuggled through a block
+# comment. Treat the bypasses as the honest edge of a text scan, and as the reason
+# the deferred work below exists.
+#
+# ---------------------------------------------------------------------------
+# DEFERRED-WORK — story 8-6 (swift-syntax static analysis)
+#
+# The awk lexer under lib/ is INTERIM. Closing the interpolation gap by hand means
+# reimplementing Swift's lexer in awk, one adversarial probe at a time, and each
+# round has bought less than the one before — cycle 3 hardened string delimiters
+# and cycle 4's review walked straight past them through an interpolated
+# expression. That is a signal about the approach, not about the effort.
+#
+# Story 8-6 replaces this with swift-syntax, which parses the language instead of
+# approximating it: interpolations, comments and nested literals stop being
+# special cases because the parser already knows what they are. When it lands,
+# these rules port to it, the xfail cases become ordinary FAIL cases, and this
+# section and the coverage statements above go away.
+#
+# Until then: do not harden the awk further in response to a new probe. Add the
+# probe as a documented xfail and take it to 8-6.
 # ---------------------------------------------------------------------------
 #
 # The scan is comment-stripped and string-literal aware (lib/strip_swift_comments.awk):
 # a doc comment or a string of any form may name a value without tripping the
-# guard, and none of them can hide a real occurrence from it — the delimiter and
-# its `#` count are tracked, so a string cannot end early (leaving the parser
-# scanning text as code) or late (swallowing the code after it).
+# guard, and no string DELIMITER can hide a real occurrence from it — the
+# delimiter and its `#` count are tracked, so a string cannot end early (leaving
+# the parser scanning text as code) or late (swallowing the code after it). The
+# one place a real occurrence can still hide is inside an interpolated expression,
+# per the known bypasses above.
 #
 # There is no per-line escape hatch, by design. A new legitimate occurrence of a
 # guarded value means editing this script — deliberately, in the same PR, where a
@@ -373,6 +433,11 @@ EOF
 # mentioning a value is not defining it, but no string form may be used as cover
 # for a real one, and the `#`-count controls pin the line between the two.
 #
+# A third kind of case runs at the end: xfail cases for the DOCUMENTED KNOWN
+# BYPASSES in the header, which assert what the guard does not catch. A guard's
+# stated limits are a claim like any other, and this is where that claim is
+# checked instead of remembered.
+#
 # Every probe spelling below was compiled and run before being trusted; the ones
 # that look like typos (`\#(…)` inside a `##"…"##` literal) are the point.
 # ---------------------------------------------------------------------------
@@ -473,6 +538,43 @@ self_test_multiline() {
     self_test_run "$name" "$expect" "$tmp"
 }
 
+# ---------------------------------------------------------------------------
+# Documented known bypasses (xfail). See the KNOWN BYPASSES section in the header.
+#
+# These assert what the guard does NOT do. They are here rather than in prose so
+# the limit is executed on every self-test run: a documented limit that nobody
+# runs drifts out of date silently, in whichever direction is least convenient.
+#
+# An xfail that starts being CAUGHT is reported as an unexpected result on
+# purpose. It is good news, but it makes the coverage statements in this script
+# and in lib/strip_swift_comments.awk overstate the guard's limits, and those have
+# to be rewritten in the same change — a red self-test is what makes that happen
+# rather than being meant to happen.
+# ---------------------------------------------------------------------------
+
+# self_test_known_bypass <name> <why> <line of Swift>
+self_test_known_bypass() {
+    local name="$1" why="$2" payload="$3" tmp status=0
+    tmp=$(self_test_scratch)
+    self_test_write "$tmp/Sources/SafetyCore/GuardProbe.swift" "$payload"
+
+    bash "${BASH_SOURCE[0]}" --root "$tmp" --quiet >"$tmp/guard.log" 2>&1 || status=$?
+
+    if [ "$status" -ne 0 ]; then
+        printf '  XPASS %-41s known bypass is now CAUGHT (exit %d)\n' "$name" "$status" >&2
+        printf '        This is an improvement, not a regression. Promote the case to a\n' >&2
+        printf '        FAIL case and rewrite the coverage statements in this script and\n' >&2
+        printf '        in lib/strip_swift_comments.awk, which still claim it escapes.\n' >&2
+        sed 's/^/         /' "$tmp/guard.log" >&2
+        rm -rf "$tmp"
+        return 1
+    fi
+    printf '  xfail %-41s not caught, as documented — %s\n' "$name" "$why"
+    if [ "$EXPLAIN" -eq 1 ]; then sed 's/^/         | /' "$tmp/guard.log"; fi
+    rm -rf "$tmp"
+    return 0
+}
+
 # self_test_structural <name> <expect> <mutation shell snippet using $T as the scratch root>
 self_test_structural() {
     local name="$1" expect="$2" mutation="$3" tmp
@@ -482,7 +584,7 @@ self_test_structural() {
 }
 
 self_test() {
-    local total=0 bad_cases=0 line name expect path payload tmp
+    local total=0 bad_cases=0 bypasses=0 line name expect path payload tmp
 
     printf 'safety_guards --self-test: proving each guard can fail\n\n'
 
@@ -550,9 +652,24 @@ EOF
         || bad_cases=$((bad_cases + 1))
     total=$((total + 1))
 
-    printf '\n%d case(s), %d unexpected result(s)\n' "$total" "$bad_cases"
+    # The documented limits, executed. Kept last and counted separately: they
+    # assert what the guard does NOT catch, so folding them into the case total
+    # would inflate the number that means "ways this guard was proven to fail".
+    printf '\n  known bypasses — text-scan limits, deferred to story 8-6 (swift-syntax)\n'
+    self_test_known_bypass "known-bypass-interpolation-comment-paren" \
+        "a \`)\` inside a comment ends the interpolation scan early" \
+        'let stamp = "\({ /* ) */ Date() }())"' || bad_cases=$((bad_cases + 1))
+    bypasses=$((bypasses + 1))
+    self_test_known_bypass "known-bypass-interpolation-nested-literal-paren" \
+        "so does a \`)\` inside a nested string literal" \
+        'let a = "\(String(")").count + Date().hashValue)"' || bad_cases=$((bad_cases + 1))
+    bypasses=$((bypasses + 1))
+
+    printf '\n%d case(s), %d documented known bypass(es), %d unexpected result(s)\n' \
+        "$total" "$bypasses" "$bad_cases"
     [ "$bad_cases" -eq 0 ] || return 1
-    printf 'safety_guards --self-test: every guard fails when it should\n'
+    printf 'safety_guards --self-test: every guard fails when it should, and every\n'
+    printf 'documented bypass still bypasses\n'
     return 0
 }
 

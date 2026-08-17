@@ -20,8 +20,9 @@
 #         `"expected 18.0156"` — is not a definition and must not be counted
 #         (a false POSITIVE, which erodes trust in the gate until it is ignored).
 #   * string interpolation: the interpolated expression is real code and is
-#     emitted as code, so `"\(Date())"` still trips the clock guard. Parentheses
-#     are matched, so `"\(f(x))"` is handled.
+#     emitted as code, so `"\(Date())"` still trips the clock guard. Its extent
+#     is found by counting parentheses in the expression's RAW TEXT, which is
+#     where this parser stops being a parser — see LIMITS below.
 #
 # DELIMITER AWARENESS is what makes the string handling safe rather than merely
 # plausible, and it runs both ways:
@@ -42,9 +43,39 @@
 # literal would, so it is refused in END with a nonzero exit rather than reported
 # as a clean scan of a file whose tail was silently elided.
 #
-# Not modelled: nothing. Every string form Swift 6 accepts is handled above; the
-# residual risk is in this parser being wrong, which is what the guard's
-# --self-test cases exist to keep honest.
+# LIMITS — stated exactly, because the previous version of this header said
+# "not modelled: nothing", and that was false in the unsafe direction.
+#
+# String DELIMITERS are modelled completely: every form Swift 6 accepts, with any
+# `#` count, opens and closes where the compiler says it does. What is best-effort
+# is the INSIDE of an interpolation. Once `\(` opens one, this parser only counts
+# parentheses in the text until they balance; it does not re-enter comment or
+# string handling for the expression. So a `)` written inside a `/* … */` comment,
+# or inside a nested string literal, within the interpolated expression is counted
+# as a real closing paren. The interpolation is then closed EARLY, and the rest of
+# the expression — on that line — is elided as if it were string text.
+#
+# Both spellings of that are compiler-validated bypasses, not theory. Each
+# compiles, runs, and reads the wall clock under `swift -swift-version 6`:
+#
+#     let stamp = "\({ /* ) */ Date() }())"           # `)` hidden in a comment
+#     let a = "\(String(")").count + Date().hashValue)"   # `)` in a nested literal
+#
+# and this stripper emits `let stamp =  { /*  ""` and `let a =  String(")" ""` —
+# the `Date()` is gone from both. The guard carries them as DOCUMENTED KNOWN
+# BYPASSES in --self-test (`known-bypass-interpolation-comment-paren`,
+# `known-bypass-interpolation-nested-literal-paren`), expected to pass through, so
+# the day they stop passing through we learn coverage improved instead of finding
+# out by accident.
+#
+# The over-counting direction — a `(` hidden the same way, leaving the
+# interpolation open so text is scanned as code — is the loud one: it invents
+# violations, a human looks, nothing ships wrong.
+#
+# Closing this properly means lexing Swift rather than approximating it; see the
+# DEFERRED-WORK note in safety_guards.sh (story 8-6, swift-syntax analysis). The
+# residual risk beyond it is this parser simply being wrong, which is what the
+# guard's --self-test cases exist to keep honest.
 
 BEGIN { block = 0; instr = 0; multi = 0; hashes = 0; interp = 0; depth = 0 }
 
