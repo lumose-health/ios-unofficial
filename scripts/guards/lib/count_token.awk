@@ -1,21 +1,24 @@
 # Count occurrences of a literal token on stdin. Prints a single integer.
 #
-# Usage:  awk -v tok='18.0156' -v bounded=1 -f count_token.awk
+# Usage:  awk -v tok='20...500' -v bounded=1 -f count_token.awk
 #
-# `bounded=1` applies NUMERIC BOUNDARIES so that a widening or precision drift is
-# caught rather than quietly matched. Plain substring counting would let
-# `20...500` -> `20...5000`, `18.0156` -> `18.01565` and `18.0156` -> `18.0156e1`
-# slip through, because the canonical token is a prefix of the drifted one —
-# exactly the unsafe direction. So a bounded match is rejected when:
+# Textual counting, for the two checks that are about SPELLING rather than value
+# (the value checks live in scan_numerics.awk / classify_numerics.awk):
+#   * the inclusive range literal `20...500` — `20..<500` denotes a different
+#     bound while decoding to the same two numbers, so only text can catch it;
+#   * the wall-clock tokens `Date()`, `Date.now`, … which are not numbers at all.
+#
+# `bounded=1` applies NUMERIC BOUNDARIES so that a widening drift is caught
+# rather than quietly matched: plain substring counting would let
+# `20...500` -> `20...5000` slip through, because the canonical token is a prefix
+# of the drifted one — exactly the unsafe direction. So a bounded match is
+# rejected when:
 #   * a DIGIT precedes it   — `1199145600` does not contain the bound `19`;
 #   * a DIGIT, `e` or `E` follows it — `20...5000` is not `20...500`.
 #
-# `.` and `_` are deliberately NOT boundaries. The guard counts the bare bound
-# numerals as well as the range literal, and both `20` and `500` sit against a
-# `.` inside the canonical `20...500`; treating `.` as a boundary would make the
-# guard blind to one of them. `_` is already gone by this point — the caller
-# normalises Swift digit separators first, so `1_199_145_600` arrives as
-# `1199145600` and cannot be used to smuggle in a second copy.
+# `.` and `_` are deliberately NOT boundaries: the canonical `20...500` has `.`
+# on both sides of its interior, and `_` is already gone by this point — the
+# caller normalises Swift digit separators first.
 #
 # `bounded=0` counts plain substrings, for non-numeric tokens such as `Date()`.
 #

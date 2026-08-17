@@ -17,11 +17,49 @@
 #                clock") are rejected everywhere under Sources/SafetyCore except
 #                SystemClock.swift — the single adapter, exempted by exact path.
 #
-# The scan is comment-stripped and string-literal aware (lib/strip_swift_comments.awk)
-# so a doc comment may name a value without tripping the guard, and cannot hide a
-# real occurrence from it. Numeric matching is digit-bounded (lib/count_token.awk)
-# so `20...5000` and `18.01565` are caught rather than matched as the canonical
-# token they are a prefix of.
+# ---------------------------------------------------------------------------
+# WHAT THIS GUARD CATCHES, AND WHAT IT DOES NOT
+#
+# Stated exactly, because a guard whose reach is overstated is worse than one
+# with no documentation: people stop looking where it cannot see.
+#
+# Constants — CAUGHT:
+#   * any literal numerically EQUAL to a canonical constant, in ANY Swift literal
+#     spelling: `18.0156`, `1.80156e1`, `2e1...5e2`, `0x14`, `1_199_145_600`,
+#     `0b10100`. Literals are lexed and decoded to doubles and compared as
+#     NUMBERS (lib/scan_numerics.awk), so spelling cannot hide a second
+#     definition. This part is complete — there is no equal value that escapes.
+#   * a DRIFTED near-copy that lands inside the band around a canonical value:
+#     18.0 / 18.02 / 18.0182 for the factor, 19 / 21 / 499 / 501 for the bounds,
+#     any 2001–2014 Unix-epoch-shaped number for the epoch. The bands are listed
+#     below with the values.
+#   * the inclusive spelling of the range: `20..<500` or `20..<501` fails, since
+#     the exclusive form silently moves a safety bound by one.
+#
+# Constants — NOT CAUGHT (know this; do not assume the gate has your back here):
+#   * drift that lands OUTSIDE the band — `let f = 15.0`, `let ceiling = 900`.
+#     Band-widening trades this for false positives on unrelated code; the bands
+#     are set where drift actually occurs (rounding and off-by-one), not where it
+#     is theoretically possible.
+#   * a value never written as a literal: `18.0 + 0.0156`, `factor * 2`, a value
+#     read from a plist, a constant assembled at runtime. Only the first operand
+#     of that example is visible to a literal scan (and it is in the band, so it
+#     happens to fail — do not rely on that).
+#   * multi-line (`"""`) and raw (`#"..."#`) string literals are not modelled by
+#     the comment stripper; their contents are treated as CODE, which over-counts
+#     and fails loudly rather than hiding anything.
+#
+# Clock — CAUGHT: every forbidden spelling with arbitrary whitespace and line
+# breaks around the call parentheses and member dots (`Date ()`, `Date .now`,
+# `Date . init`), and reads inside string interpolation (`"\(Date())"`). NOT
+# CAUGHT: reaching the wall clock through a type this list does not name
+# (`NSDate()`, `DispatchTime.now()`, `mach_absolute_time()`) — extend
+# CLOCK_FORBIDDEN when such a call has a legitimate reason to appear.
+# ---------------------------------------------------------------------------
+#
+# The scan is comment-stripped and string-literal aware (lib/strip_swift_comments.awk):
+# a doc comment or an ordinary string may name a value without tripping the guard,
+# and neither can hide a real occurrence from it.
 #
 # There is no per-line escape hatch, by design. A new legitimate occurrence of a
 # guarded value means editing this script — deliberately, in the same PR, where a
@@ -29,11 +67,17 @@
 # updated. A guard with a bypass comment stops being a guard the first time
 # someone is in a hurry.
 #
-# Usage:  bash scripts/guards/safety_guards.sh              run the gate
-#         bash scripts/guards/safety_guards.sh --self-test  prove the gate can fail
-#         bash scripts/guards/safety_guards.sh --root DIR   scan DIR/Sources
-#                                                           (used by --self-test)
-#         bash scripts/guards/safety_guards.sh --quiet       report failures only
+# Usage:  bash scripts/guards/safety_guards.sh                       run the gate
+#         bash scripts/guards/safety_guards.sh --self-test           prove the gate can fail
+#         bash scripts/guards/safety_guards.sh --self-test --explain ...and show WHY
+#         bash scripts/guards/safety_guards.sh --root DIR            scan DIR/Sources
+#                                                                    (used by --self-test)
+#         bash scripts/guards/safety_guards.sh --quiet               report failures only
+#
+# `--explain` prints each self-test case's guard output. It exists because "the
+# case failed" is weak evidence on its own: a case can fail for a reason that has
+# nothing to do with what it is testing, and then the rule it was meant to prove
+# is untested while the table says otherwise.
 #
 # Exit: 0 clean, 1 violation, 2 usage/environment error.
 
@@ -42,14 +86,18 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 STRIPPER="$SCRIPT_DIR/lib/strip_swift_comments.awk"
 COUNTER="$SCRIPT_DIR/lib/count_token.awk"
+SCANNER="$SCRIPT_DIR/lib/scan_numerics.awk"
+CLASSIFIER="$SCRIPT_DIR/lib/classify_numerics.awk"
 
 ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
 MODE="check"
 QUIET=0
+EXPLAIN=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --self-test) MODE="self-test"; shift ;;
+        --explain) EXPLAIN=1; shift ;;
         --quiet) QUIET=1; shift ;;
         --root)
             [ $# -ge 2 ] || { echo "--root needs a directory" >&2; exit 2; }
@@ -63,17 +111,29 @@ done
 # Canonical values. These literals live HERE, not in Sources/ — the guard is the
 # pin, the source is the single definition site. Changing one is a cross-repo
 # decision: Android and the backend must move in the same change.
+#
+# CANON_SPEC drives the numeric rules: `name:value:band low:band high`, records
+# separated by `;`. A literal equal to the value is a definition (exactly one
+# allowed, in the canonical file); a literal inside the band but not equal to the
+# value is drift, and always fails.
+#
+# Band rationale:
+#   factor 17.5–18.5   every rounded conversion factor in the wild (18, 18.02,
+#                      18.0182) lands here; nothing else legitimately does.
+#   bounds ±5%         the off-by-one and nudged-bound mistakes (19, 21, 499,
+#                      501) without swallowing ordinary small integers.
+#   epoch 1.0e9–1.4e9  any Unix timestamp between 2001 and 2014, which is the
+#                      only reason a number of that magnitude would be typed out.
 # ---------------------------------------------------------------------------
 CANONICAL_FILE="Sources/SafetyCore/SafetyConstants.swift"
 CLOCK_EXEMPT_FILE="Sources/SafetyCore/SystemClock.swift"
 
-FACTOR="18.0156"           # mg/dL per mmol/L
 RANGE_LITERAL="20...500"   # the inclusive glucose bound, as written in Swift
-BOUND_LOW="20"
-BOUND_HIGH="500"
-BOUND_LOW_OUTSIDE="19"     # one below the inclusive lower bound
-BOUND_HIGH_OUTSIDE="501"   # one above the inclusive upper bound
-EPOCH="1199145600"         # Tandem epoch offset, seconds (2008-01-01T00:00:00Z)
+
+CANON_SPEC="mg/dL per mmol/L factor:18.0156:17.5:18.5"
+CANON_SPEC="$CANON_SPEC;glucose lower bound:20:19:21"
+CANON_SPEC="$CANON_SPEC;glucose upper bound:500:475:525"
+CANON_SPEC="$CANON_SPEC;Tandem epoch offset:1199145600:1000000000:1400000000"
 
 # Every spelling of "read the wall clock". A superset of the three AC 4 names:
 # the extras are the same act under another name, and leaving them out would let
@@ -89,14 +149,32 @@ bad() { printf '  FAIL %s\n' "$*" >&2; FAILURES=$((FAILURES + 1)); }
 die() { printf 'safety_guards: %s\n' "$*" >&2; exit 2; }
 
 # --- normalisation ---------------------------------------------------------
-# Comments out, Swift digit separators out (twice, because a single pass leaves
-# `1_2_3` as `12_3`), whitespace around range operators out — so `20 ... 500`
-# and `1_199_145_600` cannot be used to spell a second copy the scan misses.
+# Comments and string contents out, Swift digit separators out (twice, because a
+# single pass leaves `1_2_3` as `12_3`), whitespace around range operators out —
+# so `20 ... 500` and `1_199_145_600` cannot spell a copy the scan misses.
 normalize() {
     awk -f "$STRIPPER" "$1" \
         | sed -E 's/([0-9])_([0-9])/\1\2/g' \
         | sed -E 's/([0-9])_([0-9])/\1\2/g' \
         | sed -E 's/[[:space:]]*\.\.\.[[:space:]]*/.../g; s/[[:space:]]*\.\.<[[:space:]]*/..</g'
+}
+
+# The clock scan needs a different normalisation, because Swift lets whitespace —
+# including newlines — sit between a callee and its parentheses and around member
+# dots. `Date ()` and `Date .now` type-check and read the wall clock exactly like
+# `Date()`; a guard that only knows one formatting of the call is decoration. So:
+# join the file into a single stream, then collapse whitespace around dots, before
+# call parentheses, and inside an empty argument list.
+#
+# Joining lines can in principle manufacture a match across a line boundary (a
+# `Date` type annotation followed by a line starting with `(`). That direction is
+# safe — the guard fails loudly and a human looks — and the construct does not
+# occur in practice.
+normalize_clock() {
+    awk -f "$STRIPPER" "$1" \
+        | tr '\n' ' ' \
+        | sed -E 's/[[:space:]]*\.[[:space:]]*/./g; s/([A-Za-z_][A-Za-z0-9_]*)[[:space:]]+\(/\1(/g; s/\([[:space:]]+\)/()/g'
+    printf '\n'
 }
 
 swift_files() {
@@ -105,20 +183,21 @@ swift_files() {
 }
 
 count_in_file() { normalize "$1" | awk -v tok="$2" -v bounded="$3" -f "$COUNTER"; }
+count_in_file_clock() { normalize_clock "$1" | awk -v tok="$2" -v bounded=0 -f "$COUNTER"; }
 
 rel() { printf '%s' "${1#"$ROOT"/}"; }
 
-# total_and_sites <dir> <token> <bounded> -> "<total>|<rel(path):n rel(path):n ...>"
+# total_and_sites <dir> <token> <bounded> <counter fn> -> "<total>|<rel(path):n ...>"
 #
 # The site list is space-separated, so a source path containing a space would be
 # mis-split by the callers. That direction is safe: a mis-split site matches
 # neither the canonical path nor the clock exemption, so the guard fails loudly
 # rather than passing something it did not really check.
 total_and_sites() {
-    local dir="$1" token="$2" bounded="$3" total=0 sites="" file n
+    local dir="$1" token="$2" bounded="$3" counter="$4" total=0 sites="" file n
     while IFS= read -r file; do
         [ -n "$file" ] || continue
-        n=$(count_in_file "$file" "$token" "$bounded")
+        n=$("$counter" "$file" "$token" "$bounded")
         if [ "$n" -gt 0 ]; then
             total=$((total + n))
             sites="$sites $(rel "$file"):$n"
@@ -133,7 +212,7 @@ EOF
 expect_count() {
     local token="$1" bounded="$2" expected="$3" where="$4" description="$5"
     local result total sites
-    result=$(total_and_sites "$SOURCES" "$token" "$bounded")
+    result=$(total_and_sites "$SOURCES" "$token" "$bounded" count_in_file)
     total="${result%%|*}"
     sites="${result#*|}"
 
@@ -150,12 +229,25 @@ expect_count() {
     ok "$description (\`$token\` x$total)"
 }
 
+# Every numeric literal under Sources/, decoded to its value.
+numeric_records() {
+    local file
+    while IFS= read -r file; do
+        [ -n "$file" ] || continue
+        normalize "$file" | awk -v file="$(rel "$file")" -f "$SCANNER"
+    done <<EOF
+$(swift_files "$SOURCES")
+EOF
+}
+
 # ---------------------------------------------------------------------------
 # Preconditions. A guard that passes on a tree it never actually read is worse
 # than no guard, because it reports green.
 # ---------------------------------------------------------------------------
 [ -f "$STRIPPER" ] || die "missing helper: $STRIPPER"
 [ -f "$COUNTER" ] || die "missing helper: $COUNTER"
+[ -f "$SCANNER" ] || die "missing helper: $SCANNER"
+[ -f "$CLASSIFIER" ] || die "missing helper: $CLASSIFIER"
 
 run_check() {
     [ -d "$SOURCES" ] || die "no Sources/ directory under $ROOT"
@@ -164,42 +256,27 @@ run_check() {
 
     say "safety_guards: scanning $SOURCES"
     say ""
-    say "AD-2/SI-4 — one definition site per safety constant"
+    say "AD-2/SI-4 — one definition site per safety constant (by VALUE, not spelling)"
 
-    expect_count "$FACTOR" 1 1 canonical "mg/dL per mmol/L factor"
-    expect_count "$RANGE_LITERAL" 1 1 canonical "glucose bound range literal"
-    expect_count "$EPOCH" 1 1 canonical "Tandem epoch offset"
-
-    # The bare bound numerals. Exactly one each, and both inside the canonical
-    # range literal — this is what catches a re-spelling the range-literal scan
-    # cannot see: `20..<501`, `let minGlucose = 20`, `mgdl > 500`, a widened
-    # `20...5000`. The off-by-one neighbours must not appear at all; an
-    # exclusive-bound mistake is the classic way a safety bound drifts by one.
-    expect_count "$BOUND_LOW" 1 1 canonical "lower bound numeral"
-    expect_count "$BOUND_HIGH" 1 1 canonical "upper bound numeral"
-    expect_count "$BOUND_LOW_OUTSIDE" 1 0 anywhere "no off-by-one lower bound"
-    expect_count "$BOUND_HIGH_OUTSIDE" 1 0 anywhere "no off-by-one upper bound"
-
-    # Any OTHER `18.x` numeral is a rounded conversion factor — 18.02, 18.0182,
-    # 18.016 — which would make the watch and the phone print different numbers
-    # for one reading. Exactly one `18.x` may exist, and the check above already
-    # pinned it to the canonical value in the canonical file.
-    local factor_variants
-    factor_variants=$(
-        {
-            while IFS= read -r file; do
-                [ -n "$file" ] || continue
-                normalize "$file"
-            done <<EOF
-$(swift_files "$SOURCES")
+    # The value rules: equality in any spelling, plus the drift bands.
+    local verdict message
+    while IFS='|' read -r verdict message; do
+        case "$verdict" in
+            V) bad "$message" ;;
+            P) ok "$message" ;;
+            "") ;;
+            *) die "unexpected classifier output: $verdict|$message" ;;
+        esac
+    done <<EOF
+$(numeric_records | awk -v spec="$CANON_SPEC" -v canonical_file="$CANONICAL_FILE" -f "$CLASSIFIER")
 EOF
-        } | { grep -oE '(^|[^0-9])18\.[0-9]+' || true; } | wc -l | tr -d ' '
-    )
-    if [ "$factor_variants" -ne 1 ]; then
-        bad "conversion factor: expected exactly one \`18.x\` numeral under Sources/, found $factor_variants (a rounded variant of the factor is a cross-surface display drift)"
-    else
-        ok "no rounded variants of the conversion factor"
-    fi
+
+    # One thing the value rules cannot see: whether the bound is spelled
+    # INCLUSIVELY. `20..<500` and `20..<501` decode to the same two canonical
+    # literals as `20...500` while meaning something different — and an
+    # exclusive-bound mistake is the classic way a safety bound drifts by one.
+    # So the canonical range literal is also pinned textually.
+    expect_count "$RANGE_LITERAL" 1 1 canonical "inclusive glucose bound spelling"
 
     say ""
     say "AD-14 — one clock; the wall clock is reachable only through SystemClock"
@@ -212,10 +289,9 @@ EOF
         bad "the clock exemption names $CLOCK_EXEMPT_FILE, which does not exist — remove the exemption or restore the file; a stale exemption silently widens the guard"
     fi
 
-    local scope="$SOURCES/SafetyCore" token result total sites offenders
+    local scope="$SOURCES/SafetyCore" token result sites offenders site
     for token in $CLOCK_FORBIDDEN; do
-        result=$(total_and_sites "$scope" "$token" 0)
-        total="${result%%|*}"
+        result=$(total_and_sites "$scope" "$token" 0 count_in_file_clock)
         sites="${result#*|}"
         offenders=""
         for site in $sites; do
@@ -236,7 +312,7 @@ EOF
     # a type that takes a Clock and can be tested at its boundaries.
     local exempt_reads
     if [ "$exemption_present" -eq 1 ]; then
-        exempt_reads=$(count_in_file "$ROOT/$CLOCK_EXEMPT_FILE" "Date()" 0)
+        exempt_reads=$(count_in_file_clock "$ROOT/$CLOCK_EXEMPT_FILE" "Date()" 0)
         if [ "$exempt_reads" -ne 1 ]; then
             bad "$CLOCK_EXEMPT_FILE must contain exactly one \`Date()\`, found $exempt_reads — the exemption is an adapter, not a home for logic"
         else
@@ -257,13 +333,21 @@ EOF
 # --self-test (AC 6): a guard that cannot fail is not a guard.
 #
 # Copies Sources/ to a scratch tree, injects one violation at a time, and asserts
-# the guard rejects it — plus two controls that must still PASS, so the negative
+# the guard rejects it — plus controls that must still PASS, so the negative
 # cases prove precision rather than a script that always fails.
+#
+# The `equivalent-*` and `drifted-*` cases are the false-negative class an
+# adversarial review demonstrated against the previous textual guard: Swift
+# spellings that are the same number, and near-misses that are not. The `clock-
+# space-*` cases are the whitespace bypass from the same review. The `string-*`
+# cases pin both directions of string handling — mentioning a value is not
+# defining it, but a string cannot be used as cover for a real one.
 # ---------------------------------------------------------------------------
 SELF_TEST_CASES="
 control-clean|PASS|
 dup-factor|FAIL|Sources/SafetyCore/GuardProbe.swift|let duplicateFactor = 18.0156
 drifted-factor|FAIL|Sources/SafetyCore/GuardProbe.swift|let roundedFactor = 18.02
+integer-factor|FAIL|Sources/SafetyCore/GuardProbe.swift|let crudeFactor = 18.0
 dup-range|FAIL|Sources/SafetyCore/GuardProbe.swift|let duplicateRange = 20...500
 spaced-range|FAIL|Sources/SafetyCore/GuardProbe.swift|let spacedRange = 20 ... 500
 widened-range|FAIL|Sources/SafetyCore/GuardProbe.swift|let widenedRange = 20...5000
@@ -272,11 +356,30 @@ bare-lower-bound|FAIL|Sources/SafetyCore/GuardProbe.swift|let minGlucose = 20
 bare-upper-bound|FAIL|Sources/SafetyCore/GuardProbe.swift|let maxGlucose = 500
 off-by-one-bound|FAIL|Sources/SafetyCore/GuardProbe.swift|let ceiling = 501
 dup-epoch-underscored|FAIL|Sources/SafetyCore/GuardProbe.swift|let epochCopy = 1_199_145_600
+equivalent-factor-scientific|FAIL|Sources/SafetyCore/GuardProbe.swift|let factorCopy: Double = 1.80156e1
+equivalent-range-scientific|FAIL|Sources/SafetyCore/GuardProbe.swift|let rangeCopy: ClosedRange<Double> = 2e1...5e2
+equivalent-epoch-scientific|FAIL|Sources/SafetyCore/GuardProbe.swift|let epochCopy: TimeInterval = 1.1991456e9
+equivalent-bound-hex|FAIL|Sources/SafetyCore/GuardProbe.swift|let lowCopy = 0x14
+equivalent-bound-binary|FAIL|Sources/SafetyCore/GuardProbe.swift|let lowCopy = 0b10100
+drifted-factor-hexfloat|FAIL|Sources/SafetyCore/GuardProbe.swift|let crudeFactor = 0x1.2p4
+drifted-factor-scientific|FAIL|Sources/SafetyCore/GuardProbe.swift|let factorCopy = 1.802e1
+drifted-range-scientific|FAIL|Sources/SafetyCore/GuardProbe.swift|let rangeCopy = 2.1e1...4.99e2
+drifted-epoch-scientific|FAIL|Sources/SafetyCore/GuardProbe.swift|let epochCopy = 1.199145601e9
 wall-clock-date|FAIL|Sources/SafetyCore/GuardProbe.swift|let stamp = Date()
 wall-clock-date-now|FAIL|Sources/SafetyCore/GuardProbe.swift|let stamp = Date.now
 wall-clock-date-init|FAIL|Sources/SafetyCore/GuardProbe.swift|let make = Date.init
+clock-space-paren|FAIL|Sources/SafetyCore/GuardProbe.swift|let stamp = Date ()
+clock-space-dot-now|FAIL|Sources/SafetyCore/GuardProbe.swift|let stamp = Date .now
+clock-space-inside-parens|FAIL|Sources/SafetyCore/GuardProbe.swift|let stamp = Date (  )
+clock-space-dot-init|FAIL|Sources/SafetyCore/GuardProbe.swift|let make = Date . init
+clock-in-string-interpolation|FAIL|Sources/SafetyCore/GuardProbe.swift|let note = \"stamped \\(Date())\"
+constant-in-string-interpolation|FAIL|Sources/SafetyCore/GuardProbe.swift|let note = \"factor \\(18.0156)\"
 wall-clock-in-string-tail|FAIL|Sources/SafetyCore/GuardProbe.swift|let u = \"https://x\"; let stamp = Date()
+string-then-real-duplicate|FAIL|Sources/SafetyCore/GuardProbe.swift|let s = \"harmless\"; let dup = 18.0156
 comments-only-control|PASS|Sources/SafetyCore/GuardProbe.swift|// 18.0156 and 20...500 and 1199145600 and Date() and Date.now
+block-comment-control|PASS|Sources/SafetyCore/GuardProbe.swift|/* 18.0156 20...500 1199145600 Date() 18.02 501 */
+string-contents-control|PASS|Sources/SafetyCore/GuardProbe.swift|let s = \"18.0156 20...500 1199145600 Date() Date.now 18.02 501\"
+identifier-digits-control|PASS|Sources/SafetyCore/GuardProbe.swift|let sha20 = value500 + hash1199145600
 "
 
 self_test_write() {
@@ -312,11 +415,12 @@ self_test() {
 
         if { [ "$expect" = "FAIL" ] && [ "$status" -eq 0 ]; } ||
            { [ "$expect" = "PASS" ] && [ "$status" -ne 0 ]; }; then
-            printf '  FAIL %-26s expected the guard to %s, it exited %d\n' "$name" "$expect" "$status" >&2
+            printf '  FAIL %-30s expected the guard to %s, it exited %d\n' "$name" "$expect" "$status" >&2
             sed 's/^/         /' "$log" >&2
             bad_cases=$((bad_cases + 1))
         else
-            printf '  ok   %-26s guard %s (exit %d)\n' "$name" "$expect" "$status"
+            printf '  ok   %-30s guard %s (exit %d)\n' "$name" "$expect" "$status"
+            if [ "$EXPLAIN" -eq 1 ]; then sed 's/^/         | /' "$log"; fi
         fi
 
         rm -rf "$tmp"
@@ -328,6 +432,15 @@ EOF
     self_test_structural "missing-clock-exemption" "rm -f \"\$T/$CLOCK_EXEMPT_FILE\"" || bad_cases=$((bad_cases + 1))
     total=$((total + 1))
     self_test_structural "extra-read-in-exemption" "printf 'let extra = Date()\\n' >> \"\$T/$CLOCK_EXEMPT_FILE\"" || bad_cases=$((bad_cases + 1))
+    total=$((total + 1))
+    self_test_structural "spaced-read-in-exemption" "printf 'let extra = Date ()\\n' >> \"\$T/$CLOCK_EXEMPT_FILE\"" || bad_cases=$((bad_cases + 1))
+    total=$((total + 1))
+    # The one thing the value rules cannot see: the canonical range re-spelled
+    # exclusively. It decodes to the same two literals, in the same file, so only
+    # the textual spelling check can catch it.
+    self_test_structural "exclusive-bound-spelling" \
+        "sed -i.bak 's/20\\.\\.\\.500/20..<500/' \"\$T/$CANONICAL_FILE\" && rm -f \"\$T/$CANONICAL_FILE.bak\"" \
+        || bad_cases=$((bad_cases + 1))
     total=$((total + 1))
     self_test_structural "constant-moved-out-of-canonical-file" \
         "sed -i.bak '/18\\.0156/d' \"\$T/$CANONICAL_FILE\" && rm -f \"\$T/$CANONICAL_FILE.bak\" && printf 'let factor = 18.0156\\n' > \"\$T/Sources/SafetyCore/Elsewhere.swift\"" \
@@ -352,12 +465,13 @@ self_test_structural() {
     bash "${BASH_SOURCE[0]}" --root "$tmp" --quiet >"$log" 2>&1 || status=$?
 
     if [ "$status" -eq 0 ]; then
-        printf '  FAIL %-26s expected the guard to FAIL, it exited 0\n' "$name" >&2
+        printf '  FAIL %-30s expected the guard to FAIL, it exited 0\n' "$name" >&2
         sed 's/^/         /' "$log" >&2
         rm -rf "$tmp"
         return 1
     fi
-    printf '  ok   %-26s guard FAIL (exit %d)\n' "$name" "$status"
+    printf '  ok   %-30s guard FAIL (exit %d)\n' "$name" "$status"
+    if [ "$EXPLAIN" -eq 1 ]; then sed 's/^/         | /' "$log"; fi
     rm -rf "$tmp"
     return 0
 }
