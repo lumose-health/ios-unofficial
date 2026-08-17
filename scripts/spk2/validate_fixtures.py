@@ -114,7 +114,7 @@ KNOWN_CORRUPTION_OPS = ("truncate", "xor")
 # README's historical evidence, and a substring search would let a falsified
 # table pass on the strength of that unrelated mention.
 README_COMMIT_ROW = re.compile(
-    r"^\|\s*Commit\s*\|\s*`([0-9a-zA-Z]+)`.*\|\s*$",
+    r"^\|\s*Commit\s*\|\s*`([0-9a-f]{40})`.*\|\s*$",
     re.MULTILINE,
 )
 

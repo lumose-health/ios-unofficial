@@ -30,6 +30,7 @@ import hashlib
 import json
 import sys
 from pathlib import Path
+from typing import Optional, Tuple
 
 # -- NIST P-256 ---------------------------------------------------------------
 
@@ -40,8 +41,11 @@ N = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
 GX = 0x6B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C296
 GY = 0x4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5
 
-# Affine points; None is the point at infinity.
-Point = tuple[int, int] | None
+# Affine points; None is the point at infinity. Spelled with typing.Optional rather
+# than `tuple[int, int] | None`: this alias is evaluated at import time (the
+# `from __future__ import annotations` above only defers annotations), and PEP 604
+# unions raise TypeError before Python 3.10 — including on the stock macOS python3.
+Point = Optional[Tuple[int, int]]
 G: Point = (GX, GY)
 
 POINT_LEN = 65  # uncompressed: 0x04 || X(32) || Y(32)

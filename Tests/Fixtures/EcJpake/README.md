@@ -66,7 +66,7 @@ Before this story the Android repo contained **zero** EC-JPAKE known-answer
 vectors. The only EC-JPAKE test was `JpakeAuthenticatorTest.kt`, with **6**
 `@Test` methods observed at the pinned commit:
 
-```
+```sh
 $ git grep -c '@Test' 59e68104df17614c50173bed954843a5f56e588b \
     -- plugins/shipped/tandem/src/test/java/com/glycemicgpt/mobile/ble/auth/JpakeAuthenticatorTest.kt
 59e6810...:plugins/shipped/tandem/src/test/java/com/glycemicgpt/mobile/ble/auth/JpakeAuthenticatorTest.kt:6
@@ -144,8 +144,11 @@ python3 scripts/spk2/validate_fixtures.py      # gate: structure + stdlib-only r
 ```
 
 Both modes regenerate from the commit pinned in `scripts/spk2/provenance.env`, not
-from the Android checkout's `HEAD`. `ANDROID_REPO` overrides the checkout path
-(default `/Users/devbox/repos/lumose-health/android-unofficial`).
+from the Android checkout's `HEAD`. `ANDROID_REPO` overrides the checkout path;
+unset, `verify_vectors.sh` tries an `android-unofficial` sibling of this repository
+first and then the fallback checkout recorded in that script — it holds the
+candidate list (`ANDROID_REPO_CANDIDATES`) so the paths are stated in exactly one
+place, and it fails listing every location it tried when none is a checkout.
 
 Re-pinning to a newer Android revision is a deliberate, separate act:
 

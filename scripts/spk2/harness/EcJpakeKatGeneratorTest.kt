@@ -13,6 +13,7 @@ import java.io.File
 import java.math.BigInteger
 import java.security.MessageDigest
 import java.security.SecureRandom
+import java.util.Locale
 
 /**
  * SPK-2 known-answer vector generator.
@@ -581,7 +582,7 @@ class EcJpakeKatGeneratorTest {
                 c == '\n' -> out.append("\\n")
                 c == '\r' -> out.append("\\r")
                 c == '\t' -> out.append("\\t")
-                c < ' ' -> out.append(String.format("\\u%04x", c.code))
+                c < ' ' -> out.append(String.format(Locale.ROOT, "\\u%04x", c.code))
                 else -> out.append(c)
             }
         }
@@ -590,7 +591,7 @@ class EcJpakeKatGeneratorTest {
 
     private fun hex(bytes: ByteArray): String {
         val out = StringBuilder(bytes.size * 2)
-        for (b in bytes) out.append(String.format("%02x", b.toInt() and 0xFF))
+        for (b in bytes) out.append(String.format(Locale.ROOT, "%02x", b.toInt() and 0xFF))
         return out.toString()
     }
 

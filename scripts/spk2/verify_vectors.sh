@@ -12,8 +12,12 @@
 #
 # Usage:  bash scripts/spk2/verify_vectors.sh             verify (the gate)
 #         bash scripts/spk2/verify_vectors.sh --update    rewrite the committed fixtures
-# Env:    ANDROID_REPO  path to the android-unofficial checkout
-#                       (default /Users/devbox/repos/lumose-health/android-unofficial)
+# Env:    ANDROID_REPO  path to the android-unofficial checkout. Unset, the checkout
+#                       is resolved from ANDROID_REPO_CANDIDATES below — this script
+#                       is the single source of truth for that list; the README
+#                       describes the order rather than restating the paths. If no
+#                       candidate is a git checkout the script fails and prints every
+#                       location it tried.
 #         ANDROID_SHA   re-pin to a different revision. --update only; in verify mode
 #                       the pin is the committed one, otherwise the gate would prove
 #                       nothing about the recorded provenance. --update rewrites
@@ -30,7 +34,15 @@ case "${1:-}" in
 esac
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
-ANDROID_REPO="${ANDROID_REPO:-/Users/devbox/repos/lumose-health/android-unofficial}"
+
+# Where the read-only Android checkout is looked for when ANDROID_REPO is unset, in
+# order. The side-by-side clone comes first because it is the portable layout; the
+# absolute path after it is this project's long-standing checkout, kept so the bare
+# gate command keeps working from worktrees that are not siblings of it.
+ANDROID_REPO_CANDIDATES=(
+  "$REPO_ROOT/../android-unofficial"
+  "/Users/devbox/repos/lumose-health/android-unofficial"
+)
 
 FIXTURE_DIR="$REPO_ROOT/Tests/Fixtures/EcJpake"
 HARNESS_SRC="$REPO_ROOT/scripts/spk2/harness/EcJpakeKatGeneratorTest.kt"
@@ -42,8 +54,25 @@ GRADLE_TEST_FILTER="*EcJpakeKatGeneratorTest*"
 
 die() { echo "FAIL: $*" >&2; exit 1; }
 
-[ -d "$ANDROID_REPO/.git" ] || [ -f "$ANDROID_REPO/.git" ] \
-  || die "ANDROID_REPO is not a git checkout: $ANDROID_REPO"
+is_git_checkout() { [ -d "$1/.git" ] || [ -f "$1/.git" ]; }
+
+# An explicit ANDROID_REPO is never silently replaced by a candidate: if the path the
+# caller named is not a checkout, that is the error, not "nothing found".
+if [ -n "${ANDROID_REPO:-}" ]; then
+  is_git_checkout "$ANDROID_REPO" \
+    || die "ANDROID_REPO is not a git checkout: $ANDROID_REPO"
+else
+  for candidate in "${ANDROID_REPO_CANDIDATES[@]}"; do
+    if is_git_checkout "$candidate"; then
+      ANDROID_REPO="$(cd -- "$candidate" && pwd)"
+      break
+    fi
+  done
+  [ -n "${ANDROID_REPO:-}" ] || die "no android-unofficial checkout found.
+  Set ANDROID_REPO=<path to the checkout>, or put one at:
+$(printf '    %s\n' "${ANDROID_REPO_CANDIDATES[@]}")"
+fi
+
 [ -f "$HARNESS_SRC" ] || die "harness source not found: $HARNESS_SRC"
 [ -f "$PROVENANCE_FILE" ] || die "provenance pin not found: $PROVENANCE_FILE"
 if [ "$MODE" = "update" ]; then
