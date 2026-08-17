@@ -1,0 +1,47 @@
+{
+  "client_id": "client",
+  "curve": "P-256",
+  "description": "Truncated peer round 1: the client round 1 payload cut to 100 of its 330 bytes, so the second point runs off the end of the stream.",
+  "hash": "SHA-256",
+  "input": {
+    "base_payload": "41040d09bf163c3d6cec130c47eea39a55aef18708c3e3e735fe009acaa4688acfd711ffcce88c93429b7f841efe4c446d5461b2a8a64fe413a562cf76f0658273bb4104eb327d79e40f6c8ebdf5e273476312a04a89a9b087e6f078698e68831d74d0985e7b9f54e652bed2d6e00050bbfe4fe0532bd2631fb318fb6b11b8954ad9f8d420a99a548e03ce1cc3b99a0411e3c7b841ca04f7704b0db57166d6e854bae4a4b941043d8b6a445f758be552f4c355591a010f1bd59e1dfe4e8a4e728ff1b2988ff60de5d47e8641c703f70bc21339ca5249bc82ce3785e51642f293d1488d8885d88b4104e8954580f530b1ecca88bb3abba866021f72684dc36357e9384b6c1ea35db96545a40b5c8f8155ca8acbf560c4a2425839d36d7268f92209bcd968ecbf49b7402065b96a4b15fff14826b0c43e0f17d3cc69a837cf3aaf739ccdd3e6a31ee44730",
+    "call": "readRound1",
+    "corruption": "truncate to the first 100 bytes",
+    "payload": "41040d09bf163c3d6cec130c47eea39a55aef18708c3e3e735fe009acaa4688acfd711ffcce88c93429b7f841efe4c446d5461b2a8a64fe413a562cf76f0658273bb4104eb327d79e40f6c8ebdf5e273476312a04a89a9b087e6f078698e68831d74d098",
+    "role": "server"
+  },
+  "kind": "malformed",
+  "outcome": {
+    "exception_class": "java.lang.RuntimeException",
+    "message": "Unexpected end of stream",
+    "rejected": true
+  },
+  "randomness": {
+    "log": [
+      {
+        "bytes": "e2213ed6a059db90fd27160d129a8519a853cf5eb98fec84b0300924c9b40ce9",
+        "purpose": "getRound1: private scalar x1, createRandomInRange(1, n-1) -> BigInteger(1, bytes)",
+        "role": "client"
+      },
+      {
+        "bytes": "b7184e7abb943431ba0e2c7d4cf462c80a35dce814ce011b153a45b38eef9f3b",
+        "purpose": "getRound1: ZKP nonce v proving x1, createRandomInRange(1, n-1) -> BigInteger(1, bytes)",
+        "role": "client"
+      },
+      {
+        "bytes": "926316f39f09f2394aa8199d31a8af8d7c6be7135d36a0bf353165af0650e97b",
+        "purpose": "getRound1: private scalar x2, createRandomInRange(1, n-1) -> BigInteger(1, bytes)",
+        "role": "client"
+      },
+      {
+        "bytes": "4e4fda5e771550c65258c87d3bf5a016da50ae6e38c4edbabc2e5f0e67ff85b3",
+        "purpose": "getRound1: ZKP nonce v proving x2, createRandomInRange(1, n-1) -> BigInteger(1, bytes)",
+        "role": "client"
+      }
+    ],
+    "scheme": "Deterministic SHA-256 counter stream. Each role's SecureRandom returns the concatenation of SHA-256(seedAscii || be32(i)) for i = 0, 1, 2, ..., consumed sequentially across calls; seedAscii is \"SPK-2/EC-JPAKE/client/v1\" for the client and \"SPK-2/EC-JPAKE/server/v1\" for the server. A port does not need to reimplement this: 'log' below lists, in call order, every byte string SecureRandom.nextBytes returned to EcJpake."
+  },
+  "schema_version": 1,
+  "secret": "313233343536",
+  "server_id": "server"
+}
