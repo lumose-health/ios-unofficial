@@ -738,6 +738,89 @@ self_test_descriptor_literal() {
     printf '        ),\n'
 }
 
+# The descriptor literal for <name>, all on one line — for cases that mutate
+# formatting (where a line break falls) rather than what the array contains.
+self_test_descriptor_literal_oneline() {
+    printf 'DriverDescriptor(identifier: DriverIdentifier("com.glycemicgpt.%s")!, targetName: "%s", displayName: "%s", transport: .inProcess, version: "1.0.0", capabilities: [], verification: .unverified)' \
+        "$1" "$1" "$1"
+}
+
+# Registers <name> in DriverCatalog.entries so its descriptor literal shares a
+# line with the array's closing `]` — proving that a registration is read by
+# ARRAY MEMBERSHIP, not by which line happens to hold the bracket.
+#
+# Walks to the closing bracket rather than assuming the array starts empty:
+# the array this runs against already holds real entries (SimulatedDriver was
+# the first), so a fixture that only knew how to open an empty `[]` would
+# silently no-op the moment a real registration landed — exactly the failure
+# this replaces.
+self_test_add_catalog_entry_sharing_closing_line() {
+    local tmp="$1" name="$2" entry
+    local file="$tmp/$CATALOG_FILE"
+    entry="$tmp/entry-inline.swift"
+    self_test_descriptor_literal_oneline "$name" > "$entry"
+
+    awk -v entryfile="$entry" '
+        function emit_inline(   text) {
+            getline text < entryfile
+            close(entryfile)
+            return text
+        }
+        !done && /static let entries: \[DriverDescriptor\] = \[\]/ {
+            sub(/\[\]/, "[" emit_inline() "]")
+            print
+            done = 1
+            next
+        }
+        !done && /static let entries: \[DriverDescriptor\] = \[$/ {
+            print
+            in_array = 1
+            next
+        }
+        in_array && !done && /^[[:space:]]*\]/ {
+            sub(/\]/, emit_inline() "]")
+            print
+            done = 1
+            in_array = 0
+            next
+        }
+        { print }
+        END { if (!done) { print "self-test: no entries array to register into" > "/dev/stderr"; exit 3 } }
+    ' "$file" > "$file.new"
+    mv "$file.new" "$file"
+}
+
+# Rewrites the `entries` declaration as a computed `var`, which the member
+# scan cannot read (catalog_entries.awk keys on a `let` declaration), so the
+# guard must die with "could not be read" rather than answer "no Drivers".
+#
+# Handles both the empty-array and the opened-multiline shapes, and errors
+# when neither is found, because the `sed` this replaces matched only the
+# empty-array spelling: the moment the first real entry landed in the
+# catalog, that mutation silently no-opped and its case kept failing for an
+# unrelated reason (a Fake target with no entry) instead of the named one.
+self_test_make_catalog_unreadable() {
+    local tmp="$1"
+    local file="$tmp/$CATALOG_FILE"
+    awk '
+        !done && /static let entries: \[DriverDescriptor\] = \[\]/ {
+            sub(/static let entries: \[DriverDescriptor\] = \[\]/, "static var entries: [DriverDescriptor] { [] }")
+            print
+            done = 1
+            next
+        }
+        !done && /static let entries: \[DriverDescriptor\] = \[$/ {
+            sub(/static let entries: \[DriverDescriptor\] = \[/, "static var entries: [DriverDescriptor] { [")
+            print
+            done = 1
+            next
+        }
+        { print }
+        END { if (!done) { print "self-test: no entries declaration to rewrite" > "/dev/stderr"; exit 3 } }
+    ' "$file" > "$file.new"
+    mv "$file.new" "$file"
+}
+
 # Registers <name> in DriverCatalog.entries — the real thing, inside the array.
 #
 # Three shapes, because they are the three the guard has to tell apart:
@@ -925,18 +1008,18 @@ self_test() {
          self_test_add_driver_target "$T" Other; self_test_add_catalog_entry "$T" Other'
     # Where the brackets fall is a formatting choice, not a contract: a
     # descriptor that shares its line with the closing `]` of the entries
-    # array — the whole literal on one line, say — is still a member.
+    # array — the whole literal on one line, say — is still a member. Walks
+    # to the closing bracket rather than assuming the array is empty, since
+    # the tree this runs against already carries a real entry.
     run_case self_test_structural "entry-on-the-arrays-closing-line" PASS \
         'self_test_add_driver_target "$T" Fake;
-         sed -e "s/static let entries: \[DriverDescriptor\] = \[\]/static let entries: [DriverDescriptor] = [DriverDescriptor(identifier: DriverIdentifier(\"com.glycemicgpt.Fake\")!, targetName: \"Fake\", displayName: \"Fake\", transport: .inProcess, version: \"1.0.0\", capabilities: [], verification: .unverified)]/" \
-             "$T/'"$CATALOG_FILE"'" > "$T/catalog.new" && mv "$T/catalog.new" "$T/'"$CATALOG_FILE"'"'
+         self_test_add_catalog_entry_sharing_closing_line "$T" Fake'
     # An entries array the scan cannot read at all must be an error, not an empty
     # answer: "no Drivers are registered" and "the catalog could not be read" have
-    # opposite meanings and the same shape.
+    # opposite meanings and the same shape. The mutation is the ONLY change in
+    # this scratch tree, so the case fails for the named reason and no other.
     run_case self_test_structural "unreadable-entries-array" FAIL \
-        'self_test_add_driver_target "$T" Fake;
-         sed -e "s/static let entries: \[DriverDescriptor\] = \[\]/static var entries: [DriverDescriptor] { [] }/" \
-             "$T/'"$CATALOG_FILE"'" > "$T/catalog.new" && mv "$T/catalog.new" "$T/'"$CATALOG_FILE"'"'
+        'self_test_make_catalog_unreadable "$T"'
     # An entry for a Driver that is not built: the user is told they have a
     # Driver they do not have.
     run_case self_test_structural "catalog-entry-without-driver-target" FAIL \

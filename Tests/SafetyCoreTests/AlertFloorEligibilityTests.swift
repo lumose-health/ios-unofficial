@@ -2,7 +2,7 @@ import Testing
 
 @testable import SafetyCore
 
-/// AC 4: a negative age classifies as Fresh for display only, and is structurally
+/// A negative age classifies as Fresh for display only, and is structurally
 /// unable to arm the alert floor beyond the future-skew tolerance.
 @Suite("AlertFloorEligibility")
 struct AlertFloorEligibilityTests {

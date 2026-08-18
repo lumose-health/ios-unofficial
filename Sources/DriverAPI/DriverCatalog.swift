@@ -16,22 +16,31 @@ import Foundation
 /// one. Nothing here reads a build flag — exclusion happens by removing an entry
 /// and its target together, in one change.
 ///
-/// ## Why it is empty
+/// ## The first entry
 ///
-/// It is empty because no Driver has shipped yet. The mechanism arrives now so
-/// that the first Driver has somewhere to be listed and a guard that notices if
-/// it is not: `scripts/guards/driver_guards.sh` fails when a target under
-/// `Sources/Drivers/` has no entry here, and when an entry names a target the
-/// manifest does not declare.
+/// `SimulatedDriver` is the first Driver to ship, and the first
+/// registration here: `scripts/guards/driver_guards.sh` fails when a target
+/// under `Sources/Drivers/` has no entry here, and when an entry names a
+/// target the manifest does not declare.
 public enum DriverCatalog {
 
-    /// The Drivers in this build. EMPTY until the first Driver ships.
+    /// The Drivers in this build.
     ///
     /// A `let`, not a `var`: the catalog is not mutable at runtime, by anyone,
     /// including tests. A test that needs a Driver builds its own
     /// ``DriverDescriptor`` — it does not add one here, because a catalog a test
     /// can mutate is a catalog production code can mutate.
-    public static let entries: [DriverDescriptor] = []
+    public static let entries: [DriverDescriptor] = [
+        DriverDescriptor(
+            identifier: DriverIdentifier("com.glycemicgpt.simulated")!,
+            targetName: "SimulatedDriver",
+            displayName: "Simulated Driver",
+            transport: .inProcess,
+            version: "1.0.0",
+            capabilities: [.glucoseSource, .insulinSource],
+            verification: .unverified
+        ),
+    ]
 
     /// The entry with this identifier, or `nil`.
     public static func entry(for identifier: DriverIdentifier) -> DriverDescriptor? {

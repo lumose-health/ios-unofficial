@@ -81,6 +81,18 @@ struct DriverRowTests {
         #expect(rows.map(\.id) == DriverCatalog.entries.map(\.identifier))
     }
 
+    /// The catalog stopped being vacuous with `SimulatedDriver`, the first
+    /// shipped driver — this is the descriptor-to-row mapping test, run
+    /// against a real, non-empty catalog rather than an empty one.
+    @Test("The Simulated Driver's row reflects its descriptor")
+    func simulatedDriverRow() throws {
+        let rows = DriverCatalog.rows()
+        let row = try #require(rows.first { $0.name == "Simulated Driver" })
+        #expect(row.transport == .inProcess)
+        #expect(row.verification == .unverified)
+        #expect(row.state == .notActivated, "an untracked Driver rests, per the default rows() mapping")
+    }
+
     /// A Driver the platform is not tracking rests at `notActivated` — not
     /// "unknown", which would be a state the lifecycle does not declare and a
     /// fifth thing for a screen to render.

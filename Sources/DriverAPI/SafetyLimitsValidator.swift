@@ -17,7 +17,7 @@ import SafetyCore
 /// ```
 ///
 /// That compiles, passes every gate, and validates against a bound the user
-/// narrowed an hour ago — which is the behaviour AC 7 exists to forbid. "Asked
+/// narrowed an hour ago — which is the behaviour this contract exists to forbid. "Asked
 /// again on every call" is worth nothing when the thing being asked is free to
 /// answer from a copy it took at start-up.
 ///

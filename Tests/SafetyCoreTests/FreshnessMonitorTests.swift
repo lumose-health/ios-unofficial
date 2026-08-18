@@ -5,9 +5,9 @@ import Testing
 
 /// A scheduler the test drives by hand: tests call `tick()` themselves rather than
 /// waiting on real elapsed time, proving ``FreshnessMonitor`` decays purely from
-/// its tick schedule (AC 3). `@unchecked Sendable` with a lock, mirroring
+/// its tick schedule. `@unchecked Sendable` with a lock, mirroring
 /// `TickingClock` in ClockTests.swift — an established pattern in this test target
-/// for a mutable test double, not the production type AC 3's concurrency
+/// for a mutable test double, not the production type the concurrency
 /// discipline binds.
 final class ManualScheduler: Scheduler, @unchecked Sendable {
     private let lock = NSLock()
@@ -82,8 +82,8 @@ final class ManualScheduler: Scheduler, @unchecked Sendable {
 }
 
 /// A clock whose `now` the test advances explicitly, so a reading's age can grow
-/// with no new reading arriving — the exact scenario AC 3 requires
-/// ``FreshnessMonitor`` to decay under. `@unchecked Sendable` with a lock, same
+/// with no new reading arriving — the exact scenario
+/// ``FreshnessMonitor`` is required to decay under. `@unchecked Sendable` with a lock, same
 /// pattern as `TickingClock` in ClockTests.swift.
 final class AdjustableClock: SafetyCore.Clock, @unchecked Sendable {
     private let lock = NSLock()

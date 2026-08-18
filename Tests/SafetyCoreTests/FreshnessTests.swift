@@ -3,7 +3,7 @@ import Testing
 
 @testable import SafetyCore
 
-/// Boundary pins for the half-open classification rule (AC 1): `age < staleAfter`
+/// Boundary pins for the half-open classification rule: `age < staleAfter`
 /// is Fresh, `staleAfter <= age < tooStaleAfter` is Stale, `age >= tooStaleAfter`
 /// is TooStale — matching Android `Freshness.kt` exactly.
 @Suite("Freshness classification")

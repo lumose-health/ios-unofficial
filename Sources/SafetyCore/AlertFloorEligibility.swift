@@ -1,7 +1,7 @@
 import Foundation
 
 /// The single definition of whether a reading's age is fresh enough to arm the
-/// alert floor (AD-14, SI-5) — epic 2 consumes this instead of writing its own
+/// alert floor (AD-14, SI-5) — the alerting work consumes this instead of writing its own
 /// staleness check.
 ///
 /// Stricter than display freshness (mirrors Android `isFreshForAlertFloor`,
