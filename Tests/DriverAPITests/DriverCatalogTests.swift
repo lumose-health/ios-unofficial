@@ -8,20 +8,35 @@ import Testing
 @Suite("Driver catalog")
 struct DriverCatalogTests {
 
-    @Test("The catalog is empty until the first Driver ships")
-    func catalogIsEmpty() {
-        #expect(DriverCatalog.entries.isEmpty)
-        #expect(DriverCatalog.rows().isEmpty)
+    /// `SimulatedDriver` is the first Driver to ship, and the first
+    /// registration here.
+    @Test("The catalog registers the Simulated Driver, the first Driver to ship")
+    func catalogRegistersSimulatedDriver() throws {
+        #expect(DriverCatalog.entries.count == 1)
+        #expect(DriverCatalog.rows().count == 1)
+        let entry = try #require(DriverCatalog.entries.first)
+        #expect(entry.targetName == "SimulatedDriver")
+        #expect(entry.transport == .inProcess)
+        #expect(entry.verification == .unverified)
+        #expect(entry.capabilities == [.glucoseSource, .insulinSource])
     }
 
-    /// Every lookup must be vacuous on an empty catalog rather than trapping.
-    /// The first Driver arrives into code that already calls these.
-    @Test("Lookups on an empty catalog answer nothing, and do not trap")
-    func lookupsOnAnEmptyCatalog() throws {
-        let identifier = try #require(DriverIdentifier("com.glycemicgpt.tandem"))
-        #expect(DriverCatalog.entry(for: identifier) == nil)
-        for capability in Capability.allCases {
-            #expect(DriverCatalog.entries(providing: capability).isEmpty)
+    /// A lookup for a Driver that is not registered must still be vacuous
+    /// rather than trapping — the catalog is not empty any more, but most
+    /// identifiers and most capabilities still answer nothing.
+    @Test("Lookups answer the Simulated Driver where it is registered, and nothing where it is not")
+    func lookupsMatchOnlyWhatIsRegistered() throws {
+        let unregistered = try #require(DriverIdentifier("com.glycemicgpt.tandem"))
+        #expect(DriverCatalog.entry(for: unregistered) == nil)
+
+        let simulated = try #require(DriverIdentifier("com.glycemicgpt.simulated"))
+        #expect(DriverCatalog.entry(for: simulated)?.targetName == "SimulatedDriver")
+
+        for capability in [Capability.glucoseSource, .insulinSource] {
+            #expect(DriverCatalog.entries(providing: capability).map(\.targetName) == ["SimulatedDriver"])
+        }
+        for capability in Capability.allCases where capability != .glucoseSource && capability != .insulinSource {
+            #expect(DriverCatalog.entries(providing: capability).isEmpty, "\(capability)")
         }
     }
 
@@ -34,26 +49,93 @@ struct DriverCatalogTests {
     /// half that can run before a build and can see the package manifest. Neither
     /// replaces the other: the guard catches a target the manifest declares and
     /// the catalog omits; this catches the tree and the array disagreeing at all.
-    /// It is vacuous today — no Driver has shipped — and stops being vacuous the
-    /// moment the first directory appears under `Sources/Drivers/`.
-    @Test("Every Driver in the tree is a member of the entries array")
+    ///
+    /// This reads each target's declared `name` and `path` from `Package.swift`
+    /// rather than assuming a Driver's DIRECTORY name equals its SPM target
+    /// name — they are not required to match, and for `SimulatedDriver` they do
+    /// not: the target is named `SimulatedDriver` and lives at
+    /// `Sources/Drivers/Simulated/`. `DriverDescriptor/targetName` is defined to
+    /// equal the SPM target name (see its doc comment), so that is what this
+    /// compares against — a directory-basename comparison would fail on a
+    /// perfectly correctly registered Driver.
+    @Test("Every Driver target's manifest declaration is a member of the entries array")
     func everyDriverInTheTreeIsRegistered() throws {
         let driversRoot = DriverAPISource.repositoryRoot
             .appendingPathComponent("Sources")
             .appendingPathComponent("Drivers")
 
-        let contents = (try? FileManager.default.contentsOfDirectory(
-            at: driversRoot,
-            includingPropertiesForKeys: [.isDirectoryKey]
-        )) ?? []
-        let targets = Set(
-            contents
-                .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
-                .map(\.lastPathComponent)
+        let directories = Set(
+            ((try? FileManager.default.contentsOfDirectory(
+                at: driversRoot,
+                includingPropertiesForKeys: [.isDirectoryKey]
+            )) ?? [])
+            .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+            .map(\.lastPathComponent)
         )
-        let registered = Set(DriverCatalog.entries.map(\.targetName))
 
-        #expect(targets == registered, "Driver targets \(targets.sorted()), entries \(registered.sorted())")
+        let manifestTargets = try Self.manifestDriverTargets()
+        let manifestDirectories = Set(manifestTargets.compactMap { $0.path.split(separator: "/").last }.map(String.init))
+        #expect(
+            directories == manifestDirectories,
+            "directories under Sources/Drivers/ \(directories.sorted()), manifest paths name \(manifestDirectories.sorted())"
+        )
+
+        let declaredNames = Set(manifestTargets.map(\.name))
+        let registered = Set(DriverCatalog.entries.map(\.targetName))
+        #expect(declaredNames == registered, "manifest target names \(declaredNames.sorted()), catalog entries \(registered.sorted())")
+    }
+
+    /// `(name, path)` for every `.target(` declared in `Package.swift` under
+    /// `Sources/Drivers/`, read by balancing parentheses over whitespace-
+    /// collapsed text — the same shape `PackageManifestTests` uses to find one
+    /// named target, generalised to find every target's `path` too.
+    private static func manifestDriverTargets() throws -> [(name: String, path: String)] {
+        let manifestURL = DriverAPISource.repositoryRoot.appendingPathComponent("Package.swift")
+        let raw = try String(contentsOf: manifestURL, encoding: .utf8)
+        let collapsed = raw.filter { !$0.isWhitespace }
+
+        var results: [(name: String, path: String)] = []
+        var searchStart = collapsed.startIndex
+        while let head = collapsed.range(of: ".target(", range: searchStart..<collapsed.endIndex) {
+            guard let arguments = balancedArguments(
+                in: collapsed,
+                openParenthesis: collapsed.index(before: head.upperBound)
+            ) else { break }
+            if let name = stringValue(after: "name:", in: arguments),
+               let path = stringValue(after: "path:", in: arguments),
+               path.hasPrefix("Sources/Drivers/") {
+                results.append((name, path))
+            }
+            searchStart = head.upperBound
+        }
+        return results
+    }
+
+    private static func balancedArguments(in text: String, openParenthesis: String.Index) -> Substring? {
+        var depth = 0
+        var index = openParenthesis
+        while index < text.endIndex {
+            switch text[index] {
+            case "(":
+                depth += 1
+            case ")":
+                depth -= 1
+                if depth == 0 { return text[text.index(after: openParenthesis)..<index] }
+            default:
+                break
+            }
+            index = text.index(after: index)
+        }
+        return nil
+    }
+
+    private static func stringValue(after key: String, in text: Substring) -> String? {
+        guard let keyRange = text.range(of: key) else { return nil }
+        let rest = text[keyRange.upperBound...]
+        guard let openQuote = rest.firstIndex(of: "\"") else { return nil }
+        let afterOpen = rest.index(after: openQuote)
+        guard let closeQuote = rest[afterOpen...].firstIndex(of: "\"") else { return nil }
+        return String(rest[afterOpen..<closeQuote])
     }
 
     /// The point of the catalog is that what ships is visible in one file before
@@ -83,7 +165,7 @@ struct DriverCatalogTests {
         let catalog = try DriverAPISource.files()
             .first { $0.path.hasSuffix("Sources/DriverAPI/DriverCatalog.swift") }
         let code = try #require(catalog?.code).filter { !$0.isWhitespace }
-        #expect(code.contains("staticletentries:[DriverDescriptor]=[]"))
+        #expect(code.contains("staticletentries:[DriverDescriptor]=["))
         #expect(code.contains("staticvarentries") == false)
     }
 

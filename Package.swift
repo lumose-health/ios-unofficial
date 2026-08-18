@@ -29,6 +29,7 @@ let package = Package(
     products: [
         .library(name: "SafetyCore", targets: ["SafetyCore"]),
         .library(name: "DriverAPI", targets: ["DriverAPI"]),
+        .library(name: "SimulatedDriver", targets: ["SimulatedDriver"]),
     ],
     targets: [
         // SafetyCore has ZERO dependencies and must keep them (AD-3): it sits at
@@ -56,6 +57,23 @@ let package = Package(
         .testTarget(
             name: "DriverAPITests",
             dependencies: ["DriverAPI", "SafetyCore"],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        // The first Driver: no device, no network, so everything above the
+        // driver boundary is buildable and demonstrable without hardware
+        // (story 1.5). Its dependency list is DriverAPI and SafetyCore only,
+        // the same ceiling every Driver is held to (AD-3), and its directory
+        // sits under Sources/Drivers/ so scripts/guards/driver_guards.sh's
+        // catalog-completeness rule now runs against a real target.
+        .target(
+            name: "SimulatedDriver",
+            dependencies: ["DriverAPI", "SafetyCore"],
+            path: "Sources/Drivers/Simulated",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .testTarget(
+            name: "SimulatedDriverTests",
+            dependencies: ["SimulatedDriver", "DriverAPI", "SafetyCore"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
     ]

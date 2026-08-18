@@ -2,9 +2,9 @@ import Testing
 
 @testable import SafetyCore
 
-/// AC 5: exactly three presentation cases carrying the FR-51 contract. Pins the
+/// Exactly three presentation cases carrying the FR-51 contract. Pins the
 /// literal text and the case mapping, not a rendered UI — no UI target exists
-/// until story 1.13.
+/// yet.
 @Suite("FreshnessBadge")
 struct FreshnessBadgeTests {
 

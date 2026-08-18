@@ -149,14 +149,31 @@ struct PackageManifestTests {
 
     /// Empty scaffolding invites drift: a target directory that exists before it
     /// has a story and an owner accumulates code nobody agreed to. Later targets
-    /// arrive one story at a time — `Drivers/`, `DomainCore/`, `Persistence/` and
-    /// the rest of the Structural Seed are absent until the story that owns them.
+    /// arrive one story at a time — `DomainCore/`, `Persistence/` and the rest of
+    /// the Structural Seed are absent until the story that owns them. `Drivers/`
+    /// arrived with `SimulatedDriver`, the first Driver to ship.
     @Test("Only the declared targets exist under Sources/")
     func onlyDeclaredTargetsAreScaffolded() throws {
         let sources = Self.repositoryRoot.appendingPathComponent("Sources")
         let entries = try FileManager.default.contentsOfDirectory(atPath: sources.path)
             .filter { !$0.hasPrefix(".") }
             .sorted()
-        #expect(entries == ["DriverAPI", "SafetyCore"])
+        #expect(entries == ["DriverAPI", "Drivers", "SafetyCore"])
+    }
+
+    /// `SimulatedDriver` is a Driver target, so it is held to the same ceiling
+    /// every Driver is (AD-3): DriverAPI and SafetyCore, nothing else. Asserted
+    /// EXACTLY, for the same reason ``driverAPIDependsOnSafetyCoreOnly`` is —
+    /// `contains` would pass on a dependency list this target should never have.
+    @Test("The SimulatedDriver target depends on DriverAPI and SafetyCore only")
+    func simulatedDriverDependsOnDriverAPIAndSafetyCoreOnly() throws {
+        let arguments = try #require(
+            Self.targetArguments(named: "SimulatedDriver", in: try Self.manifestSource()),
+            "The manifest declares no `.target` named SimulatedDriver."
+        )
+        #expect(
+            arguments.contains("dependencies:[\"DriverAPI\",\"SafetyCore\"]"),
+            "SimulatedDriver may depend only on DriverAPI and SafetyCore (AD-3); its target declares: \(arguments)"
+        )
     }
 }
