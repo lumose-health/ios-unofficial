@@ -6,6 +6,13 @@ import Testing
 /// app — phone, watch and all drivers. Keeping it at zero is a structural
 /// property of the package, not a style preference, so it is asserted against the
 /// manifest itself rather than trusted to review.
+///
+/// The same reasoning now covers the workspace's one external dependency. GRDB is
+/// the SQL vendor behind `Persistence`, and the value of putting it behind one
+/// target is entirely in nothing else importing it: a screen that builds a query
+/// has moved a storage decision into the UI, and a Driver that gains a database is
+/// a Driver with its own storage path (AD-3). Both are one line in a manifest, so
+/// both are asserted here.
 @Suite("Package manifest")
 struct PackageManifestTests {
 
@@ -56,6 +63,29 @@ struct PackageManifestTests {
         return nil
     }
 
+    /// Every `.target` and `.testTarget` declaration, as `name` and the argument
+    /// slice, so a rule can be asserted about targets this file does not name.
+    /// A target added later is covered without editing the assertion.
+    private static func allTargetDeclarations(in manifest: String) -> [(name: String, arguments: Substring)] {
+        let text = collapsed(manifest)
+        var declarations: [(name: String, arguments: Substring)] = []
+        for keyword in [".target(", ".testTarget("] {
+            var searchStart = text.startIndex
+            while let head = text.range(of: keyword, range: searchStart..<text.endIndex) {
+                searchStart = head.upperBound
+                guard let arguments = balancedArguments(
+                    in: text,
+                    openParenthesis: text.index(before: head.upperBound)
+                ) else { continue }
+                guard let nameRange = arguments.range(of: "name:\""),
+                      let closing = arguments.range(of: "\"", range: nameRange.upperBound..<arguments.endIndex)
+                else { continue }
+                declarations.append((String(arguments[nameRange.upperBound..<closing.lowerBound]), arguments))
+            }
+        }
+        return declarations
+    }
+
     /// The text between `openParenthesis` and the `)` that closes it.
     private static func balancedArguments(in text: String, openParenthesis: String.Index) -> Substring? {
         var depth = 0
@@ -75,13 +105,34 @@ struct PackageManifestTests {
         return nil
     }
 
-    @Test("The package declares no external dependencies at all")
-    func noExternalPackages() throws {
+    /// GRDB is the whole of the workspace's third-party surface. A second package
+    /// is a decision, not a convenience — it is inherited by everything that links
+    /// the target holding it, and it arrives with its own release cadence and its
+    /// own supply chain. Adding one means editing this assertion, in the PR that
+    /// adds it, where a reviewer sees it.
+    @Test("GRDB is the only external package the workspace depends on")
+    func grdbIsTheOnlyExternalPackage() throws {
         let manifest = Self.collapsed(try Self.manifestSource())
+        let declarations = manifest.components(separatedBy: ".package(").count - 1
+        #expect(declarations == 1, "the manifest declares \(declarations) external packages, expected exactly GRDB")
         #expect(
-            !manifest.contains(".package("),
-            "SafetyCore must have zero dependencies (AD-3); the manifest declares an external package."
+            manifest.contains(".package(url:\"https://github.com/groue/GRDB.swift.git\",exact:\"7.11.1\")"),
+            "GRDB must be the official repository, pinned to an exact version (AD-6)."
         )
+    }
+
+    /// A range would let a patch release arrive without anyone reading its
+    /// changelog. The thing behind this dependency is a schema and a migration
+    /// engine over a user's health data; the version it runs is a reviewed choice.
+    @Test("The GRDB pin is exact, not a range")
+    func grdbPinIsExact() throws {
+        let manifest = Self.collapsed(try Self.manifestSource())
+        for looseSpelling in ["from:", "branch:", "revision:", ".upToNextMajor", ".upToNextMinor"] {
+            #expect(
+                !manifest.contains(looseSpelling),
+                "the GRDB dependency must be exact-pinned; the manifest uses \(looseSpelling)."
+            )
+        }
     }
 
     @Test("The SafetyCore target declares an empty dependency list")
@@ -148,17 +199,60 @@ struct PackageManifestTests {
     }
 
     /// Empty scaffolding invites drift: a target directory that exists before it
-    /// has a story and an owner accumulates code nobody agreed to. Later targets
-    /// arrive one story at a time — `DomainCore/`, `Persistence/` and the rest of
-    /// the Structural Seed are absent until the story that owns them. `Drivers/`
-    /// arrived with `SimulatedDriver`, the first Driver to ship.
+    /// has an owner accumulates code nobody agreed to. Later targets arrive one at
+    /// a time — `DomainCore/` and the rest of the Structural Seed are absent until
+    /// the change that owns them. `Drivers/` arrived with `SimulatedDriver`, the
+    /// first Driver to ship, and `Persistence/` with the on-device store.
     @Test("Only the declared targets exist under Sources/")
     func onlyDeclaredTargetsAreScaffolded() throws {
         let sources = Self.repositoryRoot.appendingPathComponent("Sources")
         let entries = try FileManager.default.contentsOfDirectory(atPath: sources.path)
             .filter { !$0.hasPrefix(".") }
             .sorted()
-        #expect(entries == ["DriverAPI", "Drivers", "SafetyCore"])
+        #expect(entries == ["DriverAPI", "Drivers", "Persistence", "SafetyCore"])
+    }
+
+    /// `Persistence` is the only target allowed to see the SQL vendor, and its
+    /// list is asserted EXACTLY for the same reason DriverAPI's is: a `contains`
+    /// check passes on a list that has grown something it should not have.
+    @Test("The Persistence target depends on SafetyCore, DriverAPI and GRDB only")
+    func persistenceDependsOnItsThree() throws {
+        let arguments = try #require(
+            Self.targetArguments(named: "Persistence", in: try Self.manifestSource()),
+            "The manifest declares no `.target` named Persistence."
+        )
+        #expect(
+            arguments.contains(
+                "dependencies:[\"SafetyCore\",\"DriverAPI\",.product(name:\"GRDB\",package:\"GRDB.swift\")]"
+            ),
+            "Persistence may depend only on SafetyCore, DriverAPI and GRDB; its target declares: \(arguments)"
+        )
+    }
+
+    /// Read from the manifest rather than written out, so a target added by a
+    /// later change is covered by this rule without anyone remembering to add it.
+    @Test("No target other than Persistence declares GRDB")
+    func onlyPersistenceDeclaresGRDB() throws {
+        let declarations = Self.allTargetDeclarations(in: try Self.manifestSource())
+        let holders = declarations.filter { $0.arguments.contains("GRDB") }.map(\.name).sorted()
+        #expect(
+            holders == ["Persistence"],
+            "GRDB must stay behind one target; these declare it: \(holders)"
+        )
+    }
+
+    /// The enumeration the two assertions above stand on. A helper that silently
+    /// found no targets would make "no other target declares GRDB" true of an
+    /// empty list, so what it reads is checked against targets this manifest has.
+    @Test("Every declared target is enumerated, tests included")
+    func targetEnumerationReadsTheWholeManifest() throws {
+        let names = Set(Self.allTargetDeclarations(in: try Self.manifestSource()).map(\.name))
+        #expect(names.isSuperset(of: [
+            "SafetyCore", "SafetyCoreTests",
+            "DriverAPI", "DriverAPITests",
+            "SimulatedDriver", "SimulatedDriverTests",
+            "Persistence", "PersistenceTests",
+        ]))
     }
 
     /// `SimulatedDriver` is a Driver target, so it is held to the same ceiling
