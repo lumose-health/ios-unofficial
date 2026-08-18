@@ -96,6 +96,24 @@ struct PackageManifestTests {
         )
     }
 
+    /// `DriverAPI` is the layer every Driver is allowed to see, so a dependency
+    /// added here is one every Driver inherits — including the vendor targets
+    /// AD-3 forbids from acquiring their own storage or network path. The list is
+    /// asserted to be EXACTLY `["SafetyCore"]` rather than to contain it: a
+    /// `contains` check passes on `["SafetyCore", "Persistence"]`, which is the
+    /// edge the rule exists to prevent.
+    @Test("The DriverAPI target depends on SafetyCore and nothing else")
+    func driverAPIDependsOnSafetyCoreOnly() throws {
+        let arguments = try #require(
+            Self.targetArguments(named: "DriverAPI", in: try Self.manifestSource()),
+            "The manifest declares no `.target` named DriverAPI."
+        )
+        #expect(
+            arguments.contains("dependencies:[\"SafetyCore\"]"),
+            "DriverAPI may depend only on SafetyCore (AD-3); its target declares: \(arguments)"
+        )
+    }
+
     // The two assertions above are only as good as the matching underneath them,
     // and both spellings below passed the plain `contains` checks they replace. So
     // the matching is exercised against manifests this repository does not have,
@@ -131,13 +149,14 @@ struct PackageManifestTests {
 
     /// Empty scaffolding invites drift: a target directory that exists before it
     /// has a story and an owner accumulates code nobody agreed to. Later targets
-    /// arrive one story at a time.
-    @Test("Only the SafetyCore target directory exists under Sources/")
-    func onlySafetyCoreIsScaffolded() throws {
+    /// arrive one story at a time — `Drivers/`, `DomainCore/`, `Persistence/` and
+    /// the rest of the Structural Seed are absent until the story that owns them.
+    @Test("Only the declared targets exist under Sources/")
+    func onlyDeclaredTargetsAreScaffolded() throws {
         let sources = Self.repositoryRoot.appendingPathComponent("Sources")
         let entries = try FileManager.default.contentsOfDirectory(atPath: sources.path)
             .filter { !$0.hasPrefix(".") }
             .sorted()
-        #expect(entries == ["SafetyCore"])
+        #expect(entries == ["DriverAPI", "SafetyCore"])
     }
 }

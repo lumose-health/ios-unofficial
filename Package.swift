@@ -2,11 +2,11 @@
 //
 // glycemicgpt-ios-unofficial — package manifest.
 //
-// This manifest grows one target per story (AD-2). Today it declares only
-// SafetyCore, the keystone every later target depends on; DriverAPI, Drivers,
-// DomainCore, UI and the watch target arrive with their own stories. Empty
-// scaffolding is deliberately absent — a directory that exists before it has an
-// owner invites drift.
+// This manifest grows one target per story (AD-2). Today it declares SafetyCore,
+// the keystone every later target depends on, and DriverAPI, the closed set of
+// Capability ports every Driver implements; Drivers, DomainCore, UI and the watch
+// target arrive with their own stories. Empty scaffolding is deliberately absent —
+// a directory that exists before it has an owner invites drift.
 //
 // macOS is present so `swift build` / `swift test` run host-side in CI and on a
 // dev machine without a simulator. iOS 17 / watchOS 10 are the shipping floors.
@@ -28,6 +28,7 @@ let package = Package(
     ],
     products: [
         .library(name: "SafetyCore", targets: ["SafetyCore"]),
+        .library(name: "DriverAPI", targets: ["DriverAPI"]),
     ],
     targets: [
         // SafetyCore has ZERO dependencies and must keep them (AD-3): it sits at
@@ -41,6 +42,20 @@ let package = Package(
         .testTarget(
             name: "SafetyCoreTests",
             dependencies: ["SafetyCore"],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        // DriverAPI depends on SafetyCore and NOTHING else (AD-3). It is the layer
+        // every Driver is allowed to see, so a dependency added here is a
+        // dependency every Driver inherits — including the vendor targets that
+        // must not acquire their own storage or network path.
+        .target(
+            name: "DriverAPI",
+            dependencies: ["SafetyCore"],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .testTarget(
+            name: "DriverAPITests",
+            dependencies: ["DriverAPI", "SafetyCore"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
     ]
