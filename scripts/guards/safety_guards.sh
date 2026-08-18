@@ -37,10 +37,13 @@
 #     the exclusive form silently moves a safety bound by one.
 #
 # Constants — NOT CAUGHT (know this; do not assume the gate has your back here):
-#   * drift that lands OUTSIDE the band — `let f = 15.0`, `let ceiling = 900`.
-#     Band-widening trades this for false positives on unrelated code; the bands
-#     are set where drift actually occurs (rounding and off-by-one), not where it
-#     is theoretically possible.
+#   * drift that lands OUTSIDE the band — `let f = 15.0`, `let staleAfterDrift =
+#     420` (a full round-minute drift on CGM staleAfter; its band only reaches
+#     342...378). Band-widening trades this for false positives on unrelated
+#     code — reaching 420 would mean the CGM band swallowing every integer
+#     between 360 and 420, including ordinary ones like 365. The bands are set
+#     where drift actually occurs (rounding and off-by-one), not where it is
+#     theoretically possible.
 #   * a value never written as a literal: `18.0 + 0.0156`, `factor * 2`, a value
 #     read from a plist, a constant assembled at runtime. Only the first operand
 #     of that example is visible to a literal scan (and it is in the band, so it
@@ -192,6 +195,26 @@ done
 #                      501) without swallowing ordinary small integers.
 #   epoch 1.0e9–1.4e9  any Unix timestamp between 2001 and 2014, which is the
 #                      only reason a number of that magnitude would be typed out.
+#   CGM thresholds ±5% catches an off-by-a-few-seconds drift (355, 890), the
+#                      shape a hand-edited copy of the constant actually takes.
+#                      Narrower than that sounds: it does NOT catch a full
+#                      round-minute drift (420, 840 — see the "NOT CAUGHT"
+#                      example above), and unlike the glucose bounds band it CAN
+#                      flag an unrelated ordinary integer that happens to land
+#                      inside it (e.g. 365) — reaching 420/840 without doing that
+#                      is not possible for a contiguous band centered on 360/900.
+#                      Stored as TimeInterval seconds (360, 900), not
+#                      milliseconds or minutes — one canonical numeric
+#                      representation, per story 1.3's Dev Notes.
+#   alert-floor skew   ±5% (57...63): the hand-edit drift shapes (59, 61) around
+#   ±5%                the 60-second tolerance that gates whether a reading may
+#                      arm the alert floor. Same caveats as the CGM bands: a
+#                      full round-minute drift (120) is outside it, and an
+#                      unrelated ordinary integer landing in 57...63 is flagged.
+#                      The FreshnessMonitor tick clamp (2, 30) is deliberately
+#                      NOT pinned here: those are internal cadence tuning, not a
+#                      cross-target alarm gate, and bands around integers that
+#                      small would swallow ordinary code.
 # ---------------------------------------------------------------------------
 CANONICAL_FILE="Sources/SafetyCore/SafetyConstants.swift"
 CLOCK_EXEMPT_FILE="Sources/SafetyCore/SystemClock.swift"
@@ -202,6 +225,9 @@ CANON_SPEC="mg/dL per mmol/L factor:18.0156:17.5:18.5"
 CANON_SPEC="$CANON_SPEC;glucose lower bound:20:19:21"
 CANON_SPEC="$CANON_SPEC;glucose upper bound:500:475:525"
 CANON_SPEC="$CANON_SPEC;Tandem epoch offset:1199145600:1000000000:1400000000"
+CANON_SPEC="$CANON_SPEC;CGM staleAfter (seconds):360:342:378"
+CANON_SPEC="$CANON_SPEC;CGM tooStaleAfter (seconds):900:855:945"
+CANON_SPEC="$CANON_SPEC;alert-floor max future skew (seconds):60:57:63"
 
 # Every spelling of "read the wall clock". A superset of the three AC 4 names:
 # the extras are the same act under another name, and leaving them out would let
@@ -490,6 +516,16 @@ bare-lower-bound|FAIL|Sources/SafetyCore/GuardProbe.swift|let minGlucose = 20
 bare-upper-bound|FAIL|Sources/SafetyCore/GuardProbe.swift|let maxGlucose = 500
 off-by-one-bound|FAIL|Sources/SafetyCore/GuardProbe.swift|let ceiling = 501
 dup-epoch-underscored|FAIL|Sources/SafetyCore/GuardProbe.swift|let epochCopy = 1_199_145_600
+dup-cgm-stale-after|FAIL|Sources/SafetyCore/GuardProbe.swift|let duplicateStaleAfter = 360
+drifted-cgm-stale-after|FAIL|Sources/SafetyCore/GuardProbe.swift|let staleAfterCopy = 355
+dup-cgm-too-stale-after|FAIL|Sources/SafetyCore/GuardProbe.swift|let duplicateTooStaleAfter = 900
+drifted-cgm-too-stale-after|FAIL|Sources/SafetyCore/GuardProbe.swift|let tooStaleAfterCopy = 890
+dup-alert-floor-skew|FAIL|Sources/SafetyCore/GuardProbe.swift|let duplicateSkew = 60
+drifted-alert-floor-skew|FAIL|Sources/SafetyCore/GuardProbe.swift|let skewCopy = 59
+alert-floor-skew-minute-drift-uncaught|PASS|Sources/SafetyCore/GuardProbe.swift|let skewMinuteDrift = 120
+cgm-stale-after-minute-drift-uncaught|PASS|Sources/SafetyCore/GuardProbe.swift|let staleAfterMinuteDrift = 420
+cgm-too-stale-after-minute-drift-uncaught|PASS|Sources/SafetyCore/GuardProbe.swift|let tooStaleAfterMinuteDrift = 840
+cgm-band-swallows-unrelated-integer|FAIL|Sources/SafetyCore/GuardProbe.swift|let daysInYear = 365
 equivalent-factor-scientific|FAIL|Sources/SafetyCore/GuardProbe.swift|let factorCopy: Double = 1.80156e1
 equivalent-range-scientific|FAIL|Sources/SafetyCore/GuardProbe.swift|let rangeCopy: ClosedRange<Double> = 2e1...5e2
 equivalent-epoch-scientific|FAIL|Sources/SafetyCore/GuardProbe.swift|let epochCopy: TimeInterval = 1.1991456e9
@@ -518,10 +554,10 @@ raw-string-then-real-duplicate|FAIL|Sources/SafetyCore/GuardProbe.swift|let q = 
 raw-string-inner-shorter-delimiter|FAIL|Sources/SafetyCore/GuardProbe.swift|let q = ##\"a \"# b\"##; let dup = 18.0156
 hash-directive-then-constant|FAIL|Sources/SafetyCore/GuardProbe.swift|let x = #line + 20
 unterminated-block-comment|FAIL|Sources/SafetyCore/GuardProbe.swift|/* open
-comments-only-control|PASS|Sources/SafetyCore/GuardProbe.swift|// 18.0156 and 20...500 and 1199145600 and Date() and Date.now
-block-comment-control|PASS|Sources/SafetyCore/GuardProbe.swift|/* 18.0156 20...500 1199145600 Date() 18.02 501 */
-string-contents-control|PASS|Sources/SafetyCore/GuardProbe.swift|let s = \"18.0156 20...500 1199145600 Date() Date.now 18.02 501\"
-raw-string-contents-control|PASS|Sources/SafetyCore/GuardProbe.swift|let s = #\"18.0156 20...500 1199145600 Date() Date.now 18.02 501\"#
+comments-only-control|PASS|Sources/SafetyCore/GuardProbe.swift|// 18.0156 and 20...500 and 1199145600 and 360 and 900 and 60 and Date() and Date.now
+block-comment-control|PASS|Sources/SafetyCore/GuardProbe.swift|/* 18.0156 20...500 1199145600 360 900 60 Date() 18.02 501 */
+string-contents-control|PASS|Sources/SafetyCore/GuardProbe.swift|let s = \"18.0156 20...500 1199145600 360 900 60 Date() Date.now 18.02 501\"
+raw-string-contents-control|PASS|Sources/SafetyCore/GuardProbe.swift|let s = #\"18.0156 20...500 1199145600 360 900 60 Date() Date.now 18.02 501\"#
 raw-string-fewer-hashes-control|PASS|Sources/SafetyCore/GuardProbe.swift|let inert = ##\"inert \\#(Date()) 18.0156\"##
 identifier-digits-control|PASS|Sources/SafetyCore/GuardProbe.swift|let sha20 = value500 + hash1199145600
 "
@@ -692,7 +728,7 @@ EOF
         'let n = """' 'text' '""".count + Int(18.0156)' || bad_cases=$((bad_cases + 1))
     total=$((total + 1))
     self_test_multiline "multiline-contents-control" PASS \
-        'let ml = """' '18.0156 20...500 1199145600 Date() Date.now 18.02 501' '"""' \
+        'let ml = """' '18.0156 20...500 1199145600 360 900 60 Date() Date.now 18.02 501' '"""' \
         || bad_cases=$((bad_cases + 1))
     total=$((total + 1))
     # An unterminated multi-line literal is the one input that could make the

@@ -7,9 +7,10 @@ import Foundation
 /// `scripts/guards/safety_guards.sh` enforces that mechanically: a second code
 /// occurrence anywhere under `Sources/` fails the gate.
 ///
-/// Why so strict: these three values are also duplicated in the Android app and
+/// Why so strict: these values are also duplicated in the Android app and
 /// the backend, on independent release cadences. When copies desync, glucose is
-/// mis-converted or mis-validated — a patient-safety failure, not a cosmetic bug.
+/// mis-converted or mis-validated, or a stale reading is judged by the wrong
+/// clock — a patient-safety failure, not a cosmetic bug.
 /// Android carries the mirror-image guard in
 /// `app/src/test/java/com/glycemicgpt/mobile/contract/SafetyConstantDriftGuardTest.kt`;
 /// the iOS values below were verified against it.
@@ -49,4 +50,29 @@ public enum SafetyConstants {
     /// Adding this offset converts pump time to Unix time; it says nothing about
     /// what "now" is. Current time always comes from a ``Clock`` (AD-14).
     public static let tandemEpochOffset: TimeInterval = 1_199_145_600
+
+    /// Seconds a CGM reading may age before its ``Freshness`` flips from `fresh` to
+    /// `stale` (Android `FreshnessPolicy.CGM`, `Freshness.kt:111`:
+    /// `staleAfterMs = 6 * MINUTE_MS`).
+    ///
+    /// The literal lives here, not beside ``FreshnessThresholds`` or
+    /// ``FreshnessPolicy``, so it stays covered by this file's single-definition-site
+    /// guarantee; ``FreshnessPolicy/cgm`` assembles it into the validated type every
+    /// consumer uses.
+    public static let cgmStaleAfter: TimeInterval = 360
+
+    /// Seconds a CGM reading may age before its ``Freshness`` flips from `stale` to
+    /// `tooStale` (Android `FreshnessPolicy.CGM`, `Freshness.kt:111`:
+    /// `tooStaleAfterMs = 15 * MINUTE_MS`).
+    public static let cgmTooStaleAfter: TimeInterval = 900
+
+    /// Max future-dated skew, in seconds, the alert floor tolerates before
+    /// refusing to treat a reading as fresh (Android
+    /// `ALERT_FLOOR_MAX_FUTURE_SKEW_MS`, `Freshness.kt:59`).
+    ///
+    /// The literal lives here, not in ``AlertFloorEligibility``, for the same
+    /// reason the CGM thresholds above do: it gates whether a reading may arm an
+    /// alarm, it is mirrored in the other targets, and only this file's
+    /// single-definition-site guarantee detects a drifted copy.
+    public static let alertFloorMaxFutureSkew: TimeInterval = 60
 }
