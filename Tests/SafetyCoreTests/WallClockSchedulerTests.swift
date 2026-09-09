@@ -38,8 +38,21 @@ struct WallClockSchedulerTests {
             counter.increment()
         }
 
-        try await Task.sleep(for: .seconds(0.1))
-        #expect(counter.value > 0)
+        // The first tick is WAITED FOR, not assumed to have landed by a deadline.
+        // At a 0.02s interval a fixed 0.1s wait has almost no margin, and on a busy
+        // machine the scheduler's first dispatch can arrive after it — which fails
+        // this test for a reason that has nothing to do with cancellation. Polling
+        // up to a second for a tick that normally arrives in 0.02s keeps the
+        // assertion (it ticked) and drops the assumption (it ticked by then).
+        var ticked = false
+        for _ in 0..<50 {
+            if counter.value > 0 {
+                ticked = true
+                break
+            }
+            try await Task.sleep(for: .seconds(0.02))
+        }
+        #expect(ticked, "the scheduler never ticked, so there is nothing to cancel")
 
         registration.cancel()
 

@@ -2,11 +2,12 @@
 //
 // glycemicgpt-ios-unofficial — package manifest.
 //
-// This manifest grows one target per story (AD-2). Today it declares SafetyCore,
-// the keystone every later target depends on, and DriverAPI, the closed set of
-// Capability ports every Driver implements; Drivers, DomainCore, UI and the watch
-// target arrive with their own stories. Empty scaffolding is deliberately absent —
-// a directory that exists before it has an owner invites drift.
+// This manifest grows one target at a time (AD-2). Today it declares SafetyCore,
+// the keystone every later target depends on; DriverAPI, the closed set of
+// Capability ports every Driver implements; SimulatedDriver, the first Driver;
+// and Persistence, the on-device store. DomainCore, UI and the watch target
+// arrive with their own work. Empty scaffolding is deliberately absent — a
+// directory that exists before it has an owner invites drift.
 //
 // macOS is present so `swift build` / `swift test` run host-side in CI and on a
 // dev machine without a simulator. iOS 17 / watchOS 10 are the shipping floors.
@@ -30,6 +31,21 @@ let package = Package(
         .library(name: "SafetyCore", targets: ["SafetyCore"]),
         .library(name: "DriverAPI", targets: ["DriverAPI"]),
         .library(name: "SimulatedDriver", targets: ["SimulatedDriver"]),
+        .library(name: "Persistence", targets: ["Persistence"]),
+    ],
+    // The workspace's first and only external dependency (AD-6).
+    //
+    // GRDB UNFORKED, on plain SQLite. At-rest protection comes from iOS Data
+    // Protection at `completeUntilFirstUserAuthentication`, not from SQLCipher —
+    // which would mean editing GRDB's own manifest, carrying a fork, and managing
+    // a passphrase for protection the platform already provides hardware-backed.
+    //
+    // Pinned EXACTLY, not by range. A store's schema behaviour is the last place
+    // to accept a version nobody reviewed: a patch release picked up silently is
+    // a migration surprise that reaches a user's health data. Moving the pin is a
+    // deliberate change in a PR, with the gates re-run against the new version.
+    dependencies: [
+        .package(url: "https://github.com/groue/GRDB.swift.git", exact: "7.11.1"),
     ],
     targets: [
         // SafetyCore has ZERO dependencies and must keep them (AD-3): it sits at
@@ -60,8 +76,8 @@ let package = Package(
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         // The first Driver: no device, no network, so everything above the
-        // driver boundary is buildable and demonstrable without hardware
-        // (story 1.5). Its dependency list is DriverAPI and SafetyCore only,
+        // driver boundary is buildable and demonstrable without hardware.
+        // Its dependency list is DriverAPI and SafetyCore only,
         // the same ceiling every Driver is held to (AD-3), and its directory
         // sits under Sources/Drivers/ so scripts/guards/driver_guards.sh's
         // catalog-completeness rule now runs against a real target.
@@ -74,6 +90,20 @@ let package = Package(
         .testTarget(
             name: "SimulatedDriverTests",
             dependencies: ["SimulatedDriver", "DriverAPI", "SafetyCore"],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        // The on-device store, and the ONLY target allowed to see GRDB. Keeping
+        // the SQL vendor behind one target is what makes it replaceable: a
+        // consumer that imports GRDB to build a query has moved storage decisions
+        // into a screen, and the manifest test pins that no other target does.
+        .target(
+            name: "Persistence",
+            dependencies: ["SafetyCore", "DriverAPI", .product(name: "GRDB", package: "GRDB.swift")],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .testTarget(
+            name: "PersistenceTests",
+            dependencies: ["Persistence", "DriverAPI", "SafetyCore"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
     ]

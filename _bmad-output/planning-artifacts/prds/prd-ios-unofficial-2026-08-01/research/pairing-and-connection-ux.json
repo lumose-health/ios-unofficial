@@ -1,0 +1,977 @@
+{
+  "key": "pairing-and-connection-ux",
+  "label": "Pairing UX and connection lifecycle surface",
+  "map": {
+    "subsystem": "Pairing UX and connection lifecycle surface (PairingScreen/PairingViewModel + app-side connection orchestration + BLE runtime-permission flow)",
+    "capabilities": [
+      {
+        "name": "Pairing route + entry/exit navigation",
+        "behavior": "Route id \"pairing\", registered in GlycemicGptNavHost and listed in `spokeRoutes` so the bottom nav bar is hidden while it is shown; the screen renders its own content with no TopAppBar. Reached only from Settings \u2192 Plugins \u2192 pump card: button \"Pair Pump\" (when unpaired) or \"Re-pair\" (when paired), both calling `onNavigateToPairing` \u2192 `navController.navigate(\"pairing\")`. Exit: `LaunchedEffect(connectionState)` fires `onPaired()` when connectionState becomes CONNECTED, wired to `navController.popBackStack()`. There is no explicit back/close button in the screen body \u2014 only the system back gesture. Returning to Settings triggers `LifecycleEventEffect(ON_RESUME) { settingsViewModel.loadState() }`, refreshing paired address, plugin activation and battery-optimization status.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/navigation/NavHost.kt",
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/pairing/PairingScreen.kt",
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/settings/SettingsScreen.kt"
+        ],
+        "edge_cases": [
+          "CONNECTED reached while screen not on top still pops the back stack (LaunchedEffect keyed on state).",
+          "Pairing screen has no top bar/back affordance; only gesture back.",
+          "AUTH_FAILED never navigates away."
+        ]
+      },
+      {
+        "name": "Pairing style dispatch (plugin-driven flow selection)",
+        "behavior": "`PairingProfile(style, advertisedName)` from the active DevicePlugin decides the whole flow. `PairingStyle.CENTRAL_SCAN` (default) \u2192 phone scans, lists devices, user taps one, enters a code (Tandem). `PairingStyle.ADVERTISE_AND_WAIT` \u2192 phone advertises as `advertisedName`, pump connects to it, no scan/no list/no code (Medtronic; advertisedName = \"Mobile 000001\"). PumpConnectionAdapter maps `registry.activePumpPlugin` \u2192 `plugin.pairingProfile`, defaulting to `PairingProfile()` (CENTRAL_SCAN, advertisedName=null) when no pump plugin is active. Header \"Pump Pairing\" (headlineMedium) and the paired-status card render above the style branch for both styles. Switching the active plugin in Settings changes the flow live via the StateFlow.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/plugin/PairingProfile.kt",
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/plugin/adapter/PumpConnectionAdapter.kt",
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/plugin/MedtronicDevicePlugin.kt"
+        ],
+        "edge_cases": [
+          "No plugin activated \u2192 CENTRAL_SCAN default UI, scan() returns emptyFlow (silent no-op, no error shown).",
+          "Screen copy in CENTRAL_SCAN is hard-coded Tandem-specific (\"Scan for nearby Tandem pumps\") even for a non-Tandem central-scan plugin."
+        ]
+      },
+      {
+        "name": "ConnectionState model and producers",
+        "behavior": "`enum ConnectionState { DISCONNECTED, SCANNING, CONNECTING, AUTHENTICATING, AUTH_FAILED, CONNECTED, RECONNECTING }`. Exposed app-wide as `PumpConnectionManager.connectionState`, produced by `PumpConnectionAdapter` = `registry.activePumpPlugin.flatMapLatest { it?.observeConnectionState() ?: flowOf(DISCONNECTED) }.stateIn(scope, Eagerly, DISCONNECTED)` on a Main.immediate scope. Tandem emits DISCONNECTED/CONNECTING/AUTHENTICATING/AUTH_FAILED/CONNECTED/RECONNECTING (never SCANNING). Medtronic emits SCANNING (advertising-for-discovery), CONNECTING (advertising for a session, and pump-connected-pre-auth), AUTHENTICATING, CONNECTED, RECONNECTING, AUTH_FAILED, DISCONNECTED. Consumers: PairingScreen, HomeScreen status row, BleDebugScreen, PumpConnectionService wake-lock watcher, PumpPollingOrchestrator (polls only while CONNECTED), MedtronicReadGateway link gate.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/model/PumpModels.kt",
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/plugin/adapter/PumpConnectionAdapter.kt"
+        ],
+        "edge_cases": [
+          "Deactivating the pump plugin collapses state to DISCONNECTED regardless of the real radio state.",
+          "AUTH_FAILED is a latched terminal state; nothing auto-clears it except a new connect()/pair() or plugin swap."
+        ]
+      },
+      {
+        "name": "Paired-status card (both styles)",
+        "behavior": "Rendered above the style branch when `credentialStore.isPaired()`. Primary-container Card, Row: icon = CheckCircle if connectionState==CONNECTED else Bluetooth; title \"Connected\" if CONNECTED else \"Paired\"; subtitle = paired MAC address (raw, unmasked); trailing OutlinedButton \"Unpair\" with 16.dp LinkOff icon. `isPaired`/`pairedAddress` are plain (non-reactive) getters on the ViewModel reading EncryptedSharedPreferences on each composition \u2014 they do not themselves trigger recomposition, so the card appears/disappears only when some other observed state changes. 16.dp spacer separates it from the flow content below.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/pairing/PairingScreen.kt",
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/pairing/PairingViewModel.kt"
+        ],
+        "edge_cases": [
+          "Non-reactive isPaired can leave a stale card until the next recomposition.",
+          "MAC address is displayed in cleartext in the UI."
+        ]
+      },
+      {
+        "name": "Central-scan screen state machine",
+        "behavior": "`CentralScanContent` picks exactly one child by ordered `when`: (1) connectionState CONNECTING or AUTHENTICATING \u2192 `ConnectingCard`; (2) connectionState AUTH_FAILED **and** selectedPump != null \u2192 `AuthFailedCard` + 16.dp spacer + `PairingCodeInput` (code retained, user can edit and retry); (3) selectedPump != null \u2192 `PairingCodeInput`; (4) else \u2192 `ScanSection`. CONNECTED is never rendered here \u2014 the outer LaunchedEffect pops the screen first. RECONNECTING, SCANNING and DISCONNECTED all fall through to ScanSection, i.e. a Tandem reconnect in progress shows the scan UI with no indication of the reconnect. Selecting a pump calls `selectPump()` which sets selectedPump and stops the scan.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/pairing/PairingScreen.kt"
+        ],
+        "edge_cases": [
+          "AUTH_FAILED with selectedPump==null (e.g. a background reconnect failure) shows the plain scan UI, no error.",
+          "RECONNECTING is invisible on the pairing screen."
+        ]
+      },
+      {
+        "name": "Scan session lifecycle (ViewModel)",
+        "behavior": "`startScan()` cancels any prior scanJob, clears `discoveredPumps`, sets `isScanning=true`, then launches collection of `pumpScanner.scan()` in viewModelScope; the `finally` block sets `isScanning=false` when the flow ends or is cancelled. Each emission upserts into the list keyed by `address`: index found \u2192 replace in place; not found \u2192 append (preserves discovery order). `stopScan()` cancels the job and clears the flag. `selectPump()` stops the scan. `onCleared()` stops the scan and cancels the advertise job. There is no scan timeout at any layer \u2014 scanning runs until the user taps Stop Scan, selects a pump, or leaves the screen.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/pairing/PairingViewModel.kt"
+        ],
+        "edge_cases": [
+          "No scan timeout \u2014 indefinite radio use if the user leaves the screen open (job is cancelled only via onCleared/stop).",
+          "If the underlying scan flow closes with an exception (BLE scan failure), isScanning flips false with no error surfaced to the user."
+        ]
+      },
+      {
+        "name": "Tandem BLE scan implementation",
+        "behavior": "`BleScanner.scan()` is a `callbackFlow`. If `BluetoothManager.adapter?.bluetoothLeScanner` is null it closes the flow immediately (no error surface). ScanFilter = single filter on service UUID `0000fdfb-0000-1000-8000-00805f9b34fb` (TandemProtocol.PUMP_SERVICE_UUID), ScanSettings mode `SCAN_MODE_LOW_LATENCY`, no report-delay, no timeout. A local `seen: MutableSet<String>` of addresses means each device is emitted exactly once \u2014 RSSI is never refreshed after first sight. Emitted `DiscoveredPump(name = device.name ?: \"Tandem Pump\", address, rssi)`. `onScanFailed(errorCode)` closes the flow with `IllegalStateException(\"BLE scan failed: $errorCode\")`. `awaitClose` calls `scanner.stopScan(callback)`. PumpScannerAdapter maps DiscoveredDevice\u2192DiscoveredPump with `rssi ?: 0`.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/connection/BleScanner.kt",
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/plugin/adapter/PumpScannerAdapter.kt"
+        ],
+        "edge_cases": [
+          "RSSI in the list is a one-shot snapshot, never live.",
+          "Scan-failure exception is swallowed by the ViewModel's try/finally; UI just stops showing \"Scanning\u2026\".",
+          "Only devices advertising service 0xFDFB appear; a pump not in pairing mode never advertises."
+        ]
+      },
+      {
+        "name": "Scan section UI (device list, empty state, scan button)",
+        "behavior": "Static blurb: \"Scan for nearby Tandem pumps. Make sure Bluetooth is enabled and your pump is in pairing mode.\" Full-width Button (testTag `scan_button`) with BluetoothSearching icon (20.dp); label toggles \"Scan for Pumps\" / \"Stop Scan\". While scanning: a centered 16.dp CircularProgressIndicator (strokeWidth 2.dp) + \"Scanning...\". When `pumps.isEmpty() && !isScanning`: \"No pumps found. Tap Scan to search.\" Device list is a LazyColumn, 8.dp item spacing; each `PumpCard` is a clickable Card with a primary-tinted Bluetooth icon, name (titleSmall), MAC address (bodySmall, onSurfaceVariant) and right-aligned \"<rssi> dBm\". Tapping a card selects that pump. No sorting, no RSSI-based ordering, no signal-strength bars, no filtering beyond the service-UUID scan filter.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/pairing/PairingScreen.kt"
+        ],
+        "edge_cases": [
+          "List order = discovery order, not signal strength.",
+          "Devices are never aged out of the list once seen."
+        ]
+      },
+      {
+        "name": "BLE scan runtime-permission sequence",
+        "behavior": "`requiredBlePermissions()` returns, on API \u2265 31 (Build.VERSION_CODES.S): `[BLUETOOTH_SCAN, BLUETOOTH_CONNECT]`; below 31: `[ACCESS_FINE_LOCATION]`. Flow: tapping Scan calls `hasPermissions()` (ContextCompat.checkSelfPermission on every element). If all granted \u2192 clear the denial flag and `onStartScan()`. Otherwise `rememberLauncherForActivityResult(RequestMultiplePermissions).launch(requiredBlePermissions())`. In the result callback, `results.values.all { it }` \u2192 clear flag and immediately start the scan; any denial \u2192 set `permissionDenied = true`. There is **no** pre-request rationale screen, no `shouldShowRequestPermissionRationale` check anywhere in the codebase, and no deep link to app settings \u2014 the user is told to enable them manually. Permission state is remembered per-composition only (`var permissionDenied by remember`).",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/pairing/PairingScreen.kt",
+          "android-unofficial/app/src/main/AndroidManifest.xml"
+        ],
+        "edge_cases": [
+          "minSdk is 30, so the ACCESS_FINE_LOCATION branch only ever applies on Android 11.",
+          "Permanent denial (\"Don't ask again\") produces the same card with no settings shortcut.",
+          "Denial state is lost on recomposition scope teardown / navigation."
+        ]
+      },
+      {
+        "name": "Scan permission-denied card",
+        "behavior": "Rendered above the Scan button when `permissionDenied` is true: errorContainer Card, title \"Bluetooth permissions required\" (titleSmall, onErrorContainer), body \"GlycemicGPT needs Bluetooth permissions to scan for and connect to your Tandem pump. Please grant the permissions when prompted, or enable them in your device settings.\" followed by an 8.dp spacer. The Scan button remains enabled and re-launches the system permission dialog on each tap.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/pairing/PairingScreen.kt"
+        ],
+        "edge_cases": [
+          "Card never auto-clears until a successful grant or a fresh check."
+        ]
+      },
+      {
+        "name": "Pairing-code entry UI and validation",
+        "behavior": "`PairingCodeInput` Card: title \"Enter Pairing Code\" (titleMedium), model-specific instruction (bodySmall/onSurfaceVariant), then \"<name> (<address>)\", then an OutlinedTextField labelled \"Pairing Code\" (testTag `pairing_code_field`), `KeyboardType.Text`, `singleLine = true` \u2014 no numeric keypad, no masking, no per-digit boxes. Footer Row: OutlinedButton \"Cancel\" (weight 1f) \u2192 `clearSelection()` (clears selectedPump and code) and Button \"Pair\" (weight 1f, testTag `pair_button`) enabled only when `pairingCode.length >= 6`. `updatePairingCode` truncates to `code.take(16)` (comment: \"up to 16 chars for legacy, 6 digits for modern\"); no character-class filtering, no trimming, no case normalization. `pair()` additionally no-ops if the code is empty. No client-side verification of the code.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/pairing/PairingScreen.kt",
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/pairing/PairingViewModel.kt"
+        ],
+        "edge_cases": [
+          "Codes of length 7\u201310 are accepted and routed to JPAKE; 11\u201316 route to legacy V1 auth (driver-side branch is `code.length <= 10`).",
+          "Whitespace/paste of a longer string is silently truncated at 16 chars."
+        ]
+      },
+      {
+        "name": "Per-model pairing instructions (Tandem)",
+        "behavior": "`TandemPumpModel.fromAdvertisedName(name)` normalizes (trim + collapse whitespace runs) and matches case-insensitively: startsWith \"tslim X2\" or \"t:slim X2\" \u2192 TSLIM_X2 (hasScreen=true); startsWith \"Tandem Mobi\" \u2192 MOBI (hasScreen=false); else UNKNOWN (hasScreen=null). Instruction text: hasScreen==true \u2192 \"Check your pump screen for the pairing code. You must confirm pairing on the pump.\"; ==false \u2192 \"Put your Mobi on the charging pad and double-press the pump button to enter pairing mode. Then enter the 6-digit PIN printed behind the cartridge well on your pump body.\"; ==null \u2192 \"Enter the pairing code from your pump. Check your pump screen or documentation for the code.\" Memoized with `remember(pump.name)`.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/model/TandemPumpModel.kt",
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/pairing/PairingScreen.kt"
+        ],
+        "edge_cases": [
+          "Model detection is by BLE advertised name only; a null/renamed device falls back to the \"Tandem Pump\" default name and UNKNOWN instructions.",
+          "Instruction text is hard-coded Tandem regardless of which central-scan plugin is active."
+        ]
+      },
+      {
+        "name": "CONNECTING / AUTHENTICATING display",
+        "behavior": "`ConnectingCard(state)`: full-width Card, 32.dp padding, centered Column with an indeterminate CircularProgressIndicator, 16.dp spacer, and bodyLarge text \u2014 CONNECTING \u2192 \"Connecting to pump...\", AUTHENTICATING \u2192 \"Authenticating...\", any other state \u2192 \"Working...\". Used identically by both pairing styles. There is no cancel affordance while connecting/authenticating, no elapsed-time or timeout countdown, and no progress detail (e.g. JPAKE round). If the driver's own auth timeout (30 s) fires the state moves to AUTH_FAILED (or back to reconnect), which re-renders the screen.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/pairing/PairingScreen.kt"
+        ],
+        "edge_cases": [
+          "No user-facing cancel during CONNECTING/AUTHENTICATING; the only escape is system back.",
+          "A hung driver that never leaves CONNECTING leaves the spinner up indefinitely (no UI-level timeout)."
+        ]
+      },
+      {
+        "name": "AUTH_FAILED display and retry (central-scan)",
+        "behavior": "`AuthFailedCard`: errorContainer Card, title \"Pairing failed\", body \"The pump rejected the pairing attempt. Please verify the code and try again.\" It is rendered above a live `PairingCodeInput` pre-filled with the previously entered code, so \"Pair\" re-runs `connectionManager.connect(address, code)` with the same or an edited code. The card's own `onRetry` parameter is bound to `onPair` but the card itself renders no button. Cancel clears both the selection and the code, returning to the scan list. This branch requires `selectedPump != null`; an AUTH_FAILED that arrives with no selection (background reconnect failure) shows nothing.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/pairing/PairingScreen.kt"
+        ],
+        "edge_cases": [
+          "The error copy is generic \u2014 it does not distinguish wrong code from bond loss, encryption failure, or zero-response detection, all of which set AUTH_FAILED in the Tandem driver."
+        ]
+      },
+      {
+        "name": "Advertise-and-wait: idle / \"Before you start\" state",
+        "behavior": "`AdvertiseIdleContent` always shows a Card (testTag `single_peer_instruction`) titled \"Before you start\": \"A pump pairs with only one phone at a time. If this pump is currently paired with the manufacturer's official app, remove it there first or it will not connect here.\" Then, if a fault is present, a `FaultCard`; then, if permissions were denied, the advertise-specific denial card; then a full-width Button (testTag `start_pairing_button`) with a 20.dp Bluetooth icon whose label is \"Try Again\" when a fault is set, otherwise \"Start Pairing\". Tapping it runs the advertise permission check and, if satisfied, `viewModel.startAdvertising()`.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/pairing/PairingScreen.kt"
+        ],
+        "edge_cases": [
+          "Faults persist in the idle state until the next `beginAdvertising()` clears `_fault`, so \"Try Again\" is the only way to clear the message."
+        ]
+      },
+      {
+        "name": "Advertise runtime-permission sequence (deliberate pre-31 decision)",
+        "behavior": "`requiredAdvertisePermissions()` returns on API \u2265 31: `[BLUETOOTH_ADVERTISE, BLUETOOTH_CONNECT]`; below 31 it returns an **empty array**. Documented reason in-code: pre-Android-12 advertising uses the auto-granted legacy BLUETOOTH/BLUETOOTH_ADMIN install-time permissions, and ACCESS_FINE_LOCATION is a *scanning* requirement, not an advertising one \u2014 \"requesting it here would pop a needless dialog that, if denied, blocks pairing even though advertising would work.\" With an empty array `all{}` is vacuously true, so pre-31 devices start advertising immediately with no dialog. BLUETOOTH_ADVERTISE is declared only in the Medtronic plugin module manifest (`plugins/shipped/medtronic/src/main/AndroidManifest.xml`, `tools:targetApi=\"s\"`) and merged into the app manifest; the host app requests it at runtime.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/pairing/PairingScreen.kt",
+          "android-unofficial/plugins/shipped/medtronic/src/main/AndroidManifest.xml"
+        ],
+        "edge_cases": [
+          "Empty permission array on API 30 also means `launcher.launch(emptyArray())` would never be reached; the granted-branch always wins.",
+          "Advertise permissions live in a plugin manifest, so an app build without the Medtronic module lacks BLUETOOTH_ADVERTISE entirely."
+        ]
+      },
+      {
+        "name": "Advertise permission-denied card",
+        "behavior": "Distinct copy from the scan variant: errorContainer Card, title \"Bluetooth permissions required\", body \"GlycemicGPT needs Bluetooth permissions to make your phone discoverable to the pump. Please grant the permissions when prompted, or enable them in your device settings.\", 8.dp spacer, then the Start Pairing/Try Again button. Set when `results.values.all { it }` is false in the RequestMultiplePermissions callback; cleared when a subsequent check or grant succeeds.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/pairing/PairingScreen.kt"
+        ],
+        "edge_cases": [
+          "No settings deep link, same as the scan variant."
+        ]
+      },
+      {
+        "name": "Advertise-and-wait: waiting state card",
+        "behavior": "`AdvertisingCard` (testTag `advertising_status`): centered Row with a 16.dp/2.dp-stroke CircularProgressIndicator and titleSmall \"Waiting for your pump\"; body text \u2014 when advertisedName != null: \"Your phone is now discoverable as \\\"<name>\\\". On your pump, open the pairing menu (Add/Pair new device) and select \\\"<name>\\\" to connect.\"; else the generic \"Your phone is now discoverable. On your pump, open the pairing menu and select this phone to connect.\" If `fault == BOUND_ELSEWHERE`, an error-coloured line (testTag `pairing_fault`) with that fault's message is appended after a 12.dp spacer while the spinner keeps running. Footer: full-width OutlinedButton \"Cancel\" (testTag `cancel_advertising_button`) \u2192 `stopAdvertising()`.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/pairing/PairingScreen.kt"
+        ],
+        "edge_cases": [
+          "No countdown shown even though the driver arms a 60 s BOUND_ELSEWHERE timer.",
+          "Waiting persists indefinitely until Cancel or a pump connects."
+        ]
+      },
+      {
+        "name": "Advertise-and-wait phase routing rule (documented decision)",
+        "behavior": "`terminalFault = fault != null && fault != PairingFault.BOUND_ELSEWHERE`. Routing `when`: (1) CONNECTING or AUTHENTICATING \u2192 ConnectingCard; (2) connectionState == SCANNING **or** (`isAdvertising && !terminalFault && connectionState == DISCONNECTED`) \u2192 AdvertisingCard; (3) else \u2192 AdvertiseIdleContent. Stated rationale in-code: the phase is driven off the manager's connection state, not the advertise job's liveness, because \"the scan flow stays open across terminal faults and a completed handshake, so it can't be the source of truth\"; only TERMINAL faults route to idle so they surface a message + Try Again \"instead of an endless 'Waiting' spinner\", while BOUND_ELSEWHERE means \"still advertising, nothing has connected yet\" and stays in the waiting state where Cancel is shown.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/pairing/PairingScreen.kt"
+        ],
+        "edge_cases": [
+          "AUTH_FAILED (a terminal fault) routes to the idle content, where the FaultCard + Try Again appear.",
+          "RECONNECTING for an advertise-and-wait pump also lands in idle content."
+        ]
+      },
+      {
+        "name": "PairingFault taxonomy and user-facing messages",
+        "behavior": "`enum PairingFault { PERIPHERAL_UNSUPPORTED, ADVERTISE_FAILED, HANDSHAKE_TIMEOUT, AUTH_FAILED, BOUND_ELSEWHERE }`, only ever non-null for advertise-and-wait plugins (central-scan plugins hard-code null). `faultMessage()`: PERIPHERAL_UNSUPPORTED \u2192 \"This phone can't act as a Bluetooth accessory, so it can't pair with this pump. A different phone may be required.\"; ADVERTISE_FAILED \u2192 \"Couldn't start Bluetooth advertising. Close other Bluetooth apps and try again.\"; HANDSHAKE_TIMEOUT \u2192 \"The pump connected but the secure handshake timed out. Try again.\"; AUTH_FAILED \u2192 \"The pump rejected the secure handshake. Try again.\"; BOUND_ELSEWHERE \u2192 \"No pump has connected yet. If this pump is still paired with the manufacturer's official app, remove it there first.\" `FaultCard` wraps the message with header \"Pairing did not complete\" in an errorContainer Card (testTag `pairing_fault`). Mapped 1:1 from `MedtronicConnectionFault` (BOUND_ELSEWHERE_SUSPECTED \u2192 BOUND_ELSEWHERE).",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/plugin/PairingFault.kt",
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/pairing/PairingScreen.kt",
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/plugin/MedtronicDevicePlugin.kt"
+        ],
+        "edge_cases": [
+          "Two different composables carry testTag `pairing_fault` (inline text in the waiting card, and the FaultCard)."
+        ]
+      },
+      {
+        "name": "Advertise job lifecycle and isAdvertising flag ownership",
+        "behavior": "`startAdvertising()` cancels the previous advertiseJob, sets `_isAdvertising = true`, then launches `pumpScanner.scan().collect { }` \u2014 collection alone keeps advertising alive; emissions signal that a pump connected, after which the connection manager owns the lifecycle. The `finally` block resets the flag **only** when `coroutineContext[Job]?.isCancelled != true`, so a stale cancelled job can never clobber newer state \u2014 cancellation callers (`stopAdvertising()`, a superseding `startAdvertising()`) own the flag themselves. A device that cannot advertise closes the flow immediately, so `isAdvertising` flips back to false and `pairingFault` reports PERIPHERAL_UNSUPPORTED. `stopAdvertising()` cancels the job and sets the flag false; it deliberately does not touch the foreground service because the service is only started once a session forms.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/pairing/PairingViewModel.kt",
+          "android-unofficial/app/src/test/java/com/glycemicgpt/mobile/presentation/pairing/PairingViewModelTest.kt"
+        ],
+        "edge_cases": [
+          "Re-pair for an already-paired Medtronic pump always goes through scan() \u2192 FIRST_PAIR advertising; the plugin's `forceFirstPair` config key is unreachable from the pairing UI.",
+          "onCleared() cancels the advertise job, so navigating away silently stops advertising."
+        ]
+      },
+      {
+        "name": "Foreground-service coupling to session formation (documented decision)",
+        "behavior": "`PairingViewModel.init` collects `connectionState` and calls `PumpConnectionService.start(appContext)` whenever the state is in `SESSION_LIVE_OR_FORMING = {CONNECTING, AUTHENTICATING, CONNECTED}`. Documented reason: starting the service on the \"Start Pairing\" tap and stopping it when advertising can't even begin (a phone that can't act as a BLE peripheral, where `scan()` closes immediately) crashes with `ForegroundServiceDidNotStartInTime` \u2014 the service is torn down before it can promote itself. So the service starts only once a pump is actually connecting/connected, so polling is ready and survives navigation away, and is stopped on unpair. Explicitly noted as safe and idempotent for Tandem, whose `pair()` already calls `PumpConnectionService.start()` at its own connection point.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/pairing/PairingViewModel.kt",
+          "android-unofficial/app/src/test/java/com/glycemicgpt/mobile/presentation/pairing/PairingViewModelTest.kt"
+        ],
+        "edge_cases": [
+          "Advertising that ends without a session never starts or stops the service (asserted by tests).",
+          "The service is also started from GlycemicGptApp.onCreate and BootCompletedReceiver whenever `pumpCredentialStore.isPaired()`, and from SettingsViewModel.loadState() on every Settings open while paired."
+        ]
+      },
+      {
+        "name": "Unpair from the pairing screen",
+        "behavior": "`PairingViewModel.unpair()` \u2192 `connectionManager.unpair()` (adapter \u2192 `activePumpPlugin.asPumpStatus().unpair()` \u2192 driver-level unpair: clear credentials + remove OS bond + disconnect), then `PumpConnectionService.stop(appContext)`, then clears `selectedPump` and `pairingCode`. This is the *full* unpair path. There is no confirmation dialog on the pairing screen \u2014 the Unpair button acts immediately.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/pairing/PairingViewModel.kt",
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/plugin/adapter/PumpConnectionAdapter.kt"
+        ],
+        "edge_cases": [
+          "If no pump plugin is active, `unpair()` silently no-ops (null-safe chain) while the service is still stopped.",
+          "No confirmation \u2014 a mis-tap immediately drops the pairing and the BLE bond."
+        ]
+      },
+      {
+        "name": "Unpair from Settings (divergent, weaker path)",
+        "behavior": "Settings pump card \u2192 \"Unpair\" opens an AlertDialog: title \"Unpair Pump\", text \"Are you sure you want to unpair this pump? You will need to re-pair to resume data collection.\", confirm \"Unpair\" (error-coloured TextButton), dismiss \"Cancel\". Confirming calls `SettingsViewModel.unpair()`, which **only** does `pumpCredentialStore.clearPairing()` and updates the UI state (`isPumpPaired=false`, `pairedPumpAddress=null`). It does not call `connectionManager.unpair()`, does not remove the BLE bond, does not disconnect, and does not stop `PumpConnectionService` \u2014 unlike the pairing-screen path. `SettingsViewModel.logout()` does stop the service.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/settings/SettingsViewModel.kt",
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/settings/SettingsScreen.kt"
+        ],
+        "edge_cases": [
+          "Settings unpair leaves a live BLE session, a running foreground service, and a stale OS bond; the driver may keep reconnecting until it fails credential lookup.",
+          "The two unpair entry points have materially different effects \u2014 a port must decide which is canonical."
+        ]
+      },
+      {
+        "name": "Settings pump card (pairing status + entry points)",
+        "behavior": "Rendered whenever `state.activePumpPluginId != null` (registry resolves the active PUMP_STATUS/INSULIN_SOURCE plugin generically \u2014 no vendor hard-coding). Row: Bluetooth icon if paired else BluetoothDisabled (24.dp, primary tint); title = active plugin name or \"Insulin Pump\"; subtitle = \"Paired: <address>\" or \"Not paired\". Below, plugin-contributed InfoText notes only (testTag `pump_settings_notes`) \u2014 Medtronic contributes \"A MiniMed pump pairs with only one phone at a time. Remove the pump from the official Medtronic app before pairing it here.\"; Tandem contributes an empty descriptor. Actions: paired \u2192 Row of \"Re-pair\" (testTag `repair_button`) and error-coloured \"Unpair\" (testTag `unpair_button`); unpaired \u2192 full-width \"Pair Pump\" (testTag `pair_pump_button`). Metadata and descriptor reads are each wrapped in `catch (Throwable)` so a misbehaving plugin degrades rather than crashes settings.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/settings/SettingsScreen.kt",
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/settings/SettingsViewModel.kt"
+        ],
+        "edge_cases": [
+          "Descriptor is reduced to InfoText items only (`infoNotesOnly()`); interactive plugin settings never render on the pump card.",
+          "No pump plugin active \u2192 no pump card at all, so there is no way to reach the pairing screen."
+        ]
+      },
+      {
+        "name": "Tandem connect + authentication state machine",
+        "behavior": "`connect(address, code?)` (resetCounters=true) cancels pending reconnects, closes the passive autoConnect GATT, sets CONNECTING, clears queues/assemblers/pending requests, stores `pendingPairingCode`, and calls `device.connectGatt(context, false, cb, TRANSPORT_LE)`. On GATT connect: `refresh()` the service cache (reflection), `requestConnectionPriority(HIGH)`, `requestMtu(185)`. On MTU success \u2192 `discoverServices()`; failure \u2192 close + DISCONNECTED. On services discovered: enable CCCD on AUTHORIZATION (7B83FFF9\u2026), set AUTHENTICATING, start auth, then enqueue the remaining 5 notification CCCDs. Auth branch: `code.length <= 10` \u2192 JPAKE (CONFIRMATION if reconnect and a saved derived secret exists, else BOOTSTRAP 5 round trips); longer \u2192 legacy V1 challenge. Success \u2192 `onAuthSuccess()`: save pairing + JPAKE secret/nonce, send init opcodes, and after `POST_AUTH_SETTLE_MS = 500` set CONNECTED (only if still AUTHENTICATING).",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/connection/BleConnectionManager.kt",
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/protocol/TandemProtocol.kt"
+        ],
+        "edge_cases": [
+          "Missing code (no pending code and none stored) \u2192 immediate AUTH_FAILED.",
+          "JPAKE round-3 or round-4 failure clears saved JPAKE credentials so the next attempt falls back to BOOTSTRAP (requires pump pairing mode).",
+          "Auth handshake timeout `AUTH_TIMEOUT_MS = 30_000`: if a prior successful session existed, it disconnects and lets the reconnect path run; otherwise sets AUTH_FAILED."
+        ]
+      },
+      {
+        "name": "Tandem reconnect policy (two-phase, indefinite)",
+        "behavior": "`scheduleReconnect()` sets RECONNECTING and picks a delay under `autoConnectLock`. FAST phase: `reconnectAttempt = min(attempt+1, 10)`; delay = `min(1000 * 2^min(attempt,5), 32_000)` ms \u2192 1 s, 2 s, 4 s, 8 s, 16 s, 32 s\u2026 After `MAX_FAST_RECONNECT_ATTEMPTS = 10` (~5 min) it switches to SLOW: opens a passive `connectGatt(autoConnect=true)` handled by the kernel BLE stack and retries every `SLOW_RECONNECT_INTERVAL_MS = 120_000` ms **indefinitely** \u2014 stated rationale: \"The pump is a medical device \u2014 if the user hasn't explicitly unpaired, we should always try to reconnect.\" The autoConnect callback, on a successful kernel-level reconnect, closes itself and calls `connectInternal(..., resetCounters=false)`. `onAuthSuccess()` resets attempt counters and returns to FAST. `autoReconnectIfPaired()` forces FAST and reconnects with `pairingCode = null` (JPAKE confirmation mode).",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/connection/BleConnectionManager.kt"
+        ],
+        "edge_cases": [
+          "`consecutiveReconnectFailures` is capped at `MAX_CONSECUTIVE_RECONNECT_FAILURES = 100` and used for logging only \u2014 it never stops the loop.",
+          "autoConnect GATT is closed on every explicit connect and reopened on each slow-phase schedule."
+        ]
+      },
+      {
+        "name": "Tandem bond-loss / AUTH_FAILED heuristics (safety-relevant)",
+        "behavior": "On GATT disconnect, `wasConnected` = state was CONNECTED or AUTHENTICATING. Status `0x13` (CONN_TERMINATE_PEER_USER) before CONNECTED: if `hadSuccessfulSession` it is treated as idle-timeout and reconnection continues; else `rapidDisconnectCount++` and at `MAX_RAPID_DISCONNECTS = 3` \u2192 stop auto-reconnect, AUTH_FAILED. Status `0x05` (INSUFFICIENT_AUTHENTICATION) before CONNECTED \u2192 remove bond, AUTH_FAILED immediately. Status `0x08` (INSUFFICIENT_ENCRYPTION): if never fully connected and no prior session \u2192 remove bond + AUTH_FAILED; otherwise the bond is **never** removed (explicit: removing it would force a manual re-pair with the pump in pairing mode) and `encryptionFailureCount` accumulates to `MAX_ENCRYPTION_FAILURES = 20` before reporting AUTH_FAILED with the bond preserved. Reaching CONNECTED with zero notifications `MAX_ZERO_RESPONSE_CONNECTIONS = 3` times \u2192 remove bond + AUTH_FAILED.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/connection/BleConnectionManager.kt"
+        ],
+        "edge_cases": [
+          "`hadSuccessfulSession` is reset only by user-initiated disconnect()/unpair(), deliberately surviving reconnect cycles.",
+          "All of these paths surface to the user only as the generic \"Pairing failed\" copy."
+        ]
+      },
+      {
+        "name": "Tandem unpair and bond removal",
+        "behavior": "`BleConnectionManager.unpair()`: read the stored address, `disconnect()` (autoReconnect=false, hadSuccessfulSession=false, cancel reconnect/auth/settle jobs, clear queues + pending requests, close GATT, state DISCONNECTED), `credentialStore.clearPairing()` (clears the entire encrypted prefs file including JPAKE secret/nonce), then `removeBond(address)` via reflection on the hidden `BluetoothDevice.removeBond()` (only when bondState == BOND_BONDED; failures logged at WARN), then cancel the autoConnect GATT. `refreshGattCache()` uses the same reflection trick on `BluetoothGatt.refresh()` at every connect to avoid stale cached characteristics silently dropping notifications.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/connection/BleConnectionManager.kt"
+        ],
+        "edge_cases": [
+          "Both reflection calls are hidden-API dependent and fail soft (logged, ignored)."
+        ]
+      },
+      {
+        "name": "Medtronic advertise-and-wait connection state machine",
+        "behavior": "All lifecycle mutation is posted onto a single `SerialWorker` (HandlerThread \"medtronic-sake\"). `startSession(forceFirstPair)`: if `!peripheral.isSupported()` set fault PERIPHERAL_UNSUPPORTED + DISCONNECTED; else `advertisingModeFor(isPaired, forceFirstPair)` (RECONNECT only when paired and not forced) and `beginAdvertising(mode, CONNECTING)`. `scan()` (the pairing-UI path) advertises FIRST_PAIR with state SCANNING, sets autoReconnect=false, and on `awaitClose` tears down only if still SCANNING. `onCentralConnected` cancels the pairing-wait timer, clears fault, stops advertising (single-peer), and moves SCANNING/CONNECTING/RECONNECTING \u2192 CONNECTING, emitting a DiscoveredDevice. `onSakeSubscribed` \u2192 AUTHENTICATING + arm auth timeout + drive SAKE. Handshake complete \u2192 save pairing (address, localName as the \"code\" slot) + CONNECTED. Disconnect while autoReconnect && paired \u2192 RECONNECTING + re-advertise RECONNECT; else teardown to DISCONNECTED.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/connection/MedtronicBleConnectionManager.kt",
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/connection/SakeHandshakeDriver.kt"
+        ],
+        "edge_cases": [
+          "AUTH_FAILED is latched: the ensuing disconnect must not reset it or start a reconnect loop against a pump that just rejected us.",
+          "SAKE has no pairing code; the credential store's code slot records the advertised identity instead."
+        ]
+      },
+      {
+        "name": "Medtronic timers, advertising parameters and UUIDs",
+        "behavior": "`DEFAULT_HANDSHAKE_TIMEOUT_MS = 30_000` (six 20-byte SAKE round trips); on expiry while AUTHENTICATING \u2192 fault HANDSHAKE_TIMEOUT, state AUTH_FAILED, autoReconnect=false, stop advertising. `DEFAULT_PAIRING_WAIT_MS = 60_000`, armed only for FIRST_PAIR advertising; if still CONNECTING or SCANNING when it fires \u2192 fault BOUND_ELSEWHERE_SUSPECTED (state unchanged). RECONNECT mode waits indefinitely because the pump scans infrequently. Advertising: FIRST_PAIR = service `0xFE82` at `ADVERTISE_MODE_BALANCED`; RECONNECT = `0xFE81` at `ADVERTISE_MODE_LOW_LATENCY`; both connectable, timeout 0 (until stopped), `ADVERTISE_TX_POWER_MEDIUM`, device name excluded (31-byte budget), TX power included, name carried in manufacturer data under company id `0x01F9`. `DEFAULT_LOCAL_NAME = \"Mobile 000001\"` (must match `Mobile .{0,7}`). GATT server (Device Info + SAKE) is opened and its services registered before advertising starts.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/connection/MedtronicBleConnectionManager.kt",
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/connection/AndroidMedtronicPeripheral.kt",
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/protocol/MedtronicProtocol.kt"
+        ],
+        "edge_cases": [
+          "Advertised name is a hard-coded constant \u2014 two phones running the app advertise the same name (TODO: per-install identity).",
+          "SAKE characteristic UUID uses the Medtronic vendor base (\u2026-0000-1000-0000-009132591325) with short code 0xFE82; an earlier SIG-based form left the pump unable to find the characteristic (issue #844).",
+          "`isSupported()` requires adapter enabled + `isMultipleAdvertisementSupported` + a non-null advertiser."
+        ]
+      },
+      {
+        "name": "Medtronic unpair / disconnect / shutdown semantics",
+        "behavior": "`disconnect()`: autoReconnect=false + teardown(DISCONNECTED, fault=null) \u2014 stops advertising, closes the GATT server, drops the SAKE session, keeps the pairing. `unpair()`: resolve address from stored pairing or the connected peer, autoReconnect=false, teardown, `credentialStore.clearPairing()`, then best-effort `peripheral.removeBond(address)` (reflection on the hidden `removeBond()`). `close()` (only from `Plugin.shutdown()`) runs teardown synchronously on the caller thread \u2014 because a posted teardown could be dropped as the worker stops \u2014 then stops the worker and cancels the scope; the manager is unusable afterwards. `onActivated()` calls `reconnectIfPaired()`; `onDeactivated()` calls `disconnect()` (deliberately not `close()`, so reactivating reconnects without re-pairing).",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/connection/MedtronicBleConnectionManager.kt",
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/plugin/MedtronicDevicePlugin.kt"
+        ],
+        "edge_cases": [
+          "`reconnectIfPaired()` is a no-op when nothing is paired.",
+          "Tandem's equivalent hooks are `onActivated \u2192 autoReconnectIfPaired()` and `onDeactivated \u2192 disconnect()`."
+        ]
+      },
+      {
+        "name": "Pairing credential persistence",
+        "behavior": "`PumpCredentialStore` implements `PumpCredentialProvider` over `EncryptedSharedPreferences` file \"pump_credentials\", master key `MasterKeys.AES256_GCM_SPEC`, key scheme `AES256_SIV`, value scheme `AES256_GCM`. Keys: `paired_pump_address`, `pairing_code`, `paired_at` (epoch millis, written on savePairing, never read), `jpake_derived_secret`, `jpake_server_nonce` (hex strings). `isPaired()` = address != null. `savePairing(address, code)` writes address + code + timestamp. `clearJpakeCredentials()` removes only the two JPAKE keys (used when confirmation mode is rejected, so the next attempt bootstraps). `clearPairing()` calls `prefs.edit().clear()` \u2014 wiping everything including JPAKE material.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/data/local/PumpCredentialStore.kt"
+        ],
+        "edge_cases": [
+          "A single store is shared by all pump plugins \u2014 pairing a second driver overwrites the first driver's address/code.",
+          "Medtronic stores the advertised local name in the `pairing_code` slot."
+        ]
+      },
+      {
+        "name": "PumpConnectionService: foreground service + wake-lock policy",
+        "behavior": "Channel `pump_connection` (\"Pump Connection\", IMPORTANCE_LOW, no badge), NOTIFICATION_ID 1, ongoing + silent, small icon `stat_sys_data_bluetooth`, `START_STICKY`. `onStartCommand` calls `startForeground` from the cached floor status, then (once per lifecycle) starts polling + backend sync, calls `connectionManager.autoReconnectIfPaired()`, and registers receivers. Wake-lock watcher on connectionState: CONNECTED \u2192 PARTIAL_WAKE_LOCK tagged \"GlycemicGPT:PumpBleConnection\" with `WAKE_LOCK_TIMEOUT_MS = 20 min` plus a renewal loop every `WAKE_LOCK_RENEW_MS = 15 min`; RECONNECTING/CONNECTING/AUTHENTICATING \u2192 shorter `RECONNECT_WAKE_LOCK_TIMEOUT_MS = 2 min` (covers 32 s max backoff + GATT + JPAKE); anything else \u2192 release. Battery receiver: `pct < 15` sets `pollingOrchestrator.phoneBatteryLow`; `pct < 5` releases the wake lock; recovery re-acquires the state-appropriate lock.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/service/PumpConnectionService.kt"
+        ],
+        "edge_cases": [
+          "Wake lock is `setReferenceCounted(false)`; re-acquire simply refreshes the timeout.",
+          "Critical-battery release can silently stop the 15 s keep-alive polls (pump drops idle BLE links at ~30 s)."
+        ]
+      },
+      {
+        "name": "Bluetooth adapter state watcher \u2192 auto-reconnect",
+        "behavior": "PumpConnectionService registers an exported receiver for `BluetoothAdapter.ACTION_STATE_CHANGED`. On `STATE_ON` it calls `connectionManager.autoReconnectIfPaired()` (Tandem: reset to FAST phase and reconnect with a null pairing code, i.e. JPAKE confirmation mode; Medtronic: `reconnectIfPaired()` \u2192 RECONNECT-mode advertising). On `STATE_OFF`/`STATE_TURNING_OFF` it only logs \u2014 GATT callbacks handle the disconnection. The battery receiver is registered `RECEIVER_NOT_EXPORTED`; the Bluetooth receiver `RECEIVER_EXPORTED`. Both are unregistered in `onDestroy` with IllegalArgumentException swallowed.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/service/PumpConnectionService.kt"
+        ],
+        "edge_cases": [
+          "Turning Bluetooth off produces no user-facing pairing/connection message beyond the Home status icon flipping to DISCONNECTED."
+        ]
+      },
+      {
+        "name": "Foreground-notification honesty text (alert-floor coupling)",
+        "behavior": "Content title is always `pump_service_notification_title` = \"Connected to pump\". Content text is derived from `AlertFloorStatus`: ServerActive \u2192 \"Reading pump data in background\"; FloorWatching \u2192 \"Server alerts paused \u2014 this phone is watching for lows and highs\" when a backend is configured, else \"This phone is watching for lows and highs\" (BLE-only mode must not imply a server exists); FloorNotWatching \u2192 \"Alerts degraded \u2014 this phone is NOT watching for lows or highs\". The last status is cached in `lastFloorStatus` (seeded pessimistically in `onCreate`) so redundant service starts \u2014 e.g. every Settings open while paired \u2014 cannot overwrite an honest \"NOT watching\" with the default copy. The watcher catches non-cancellation exceptions and freezes the text rather than killing the pump service.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/service/PumpConnectionService.kt",
+          "android-unofficial/app/src/main/res/values/strings.xml"
+        ],
+        "edge_cases": [
+          "Title says \"Connected to pump\" even while DISCONNECTED/RECONNECTING.",
+          "Status text is always on the silent low-importance channel \u2014 never an alarm."
+        ]
+      },
+      {
+        "name": "Home-screen connection status surface",
+        "behavior": "`ConnectionSyncRow` (testTag `connection_status`) renders a 16.dp icon + optional label per state: CONNECTED \u2192 BluetoothConnected, primary tint, a11y \"Pump connected\", no label; CONNECTING/AUTHENTICATING \u2192 BluetoothSearching, tertiary, \"Connecting...\"; RECONNECTING \u2192 Bluetooth, tertiary, \"Reconnecting...\"; SCANNING \u2192 BluetoothSearching, tertiary, \"Scanning...\"; AUTH_FAILED \u2192 BluetoothDisabled, error, \"Pairing failed\"; DISCONNECTED \u2192 BluetoothDisabled, error, no label. Below the cards, DISCONNECTED additionally shows \"Pair your pump in Settings to start\"; CONNECTED with no CGM reading shows \"Loading pump data...\" in tertiary. `HomeViewModel.connectionState` is `pumpDriver.observeConnectionState().stateIn(WhileSubscribed(5000), DISCONNECTED)`.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/home/HomeScreen.kt",
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/home/HomeViewModel.kt"
+        ],
+        "edge_cases": [
+          "AUTH_FAILED on Home is not tappable \u2014 there is no shortcut to re-pair from the status row.",
+          "CONNECTED/DISCONNECTED carry no text label, only icon + contentDescription."
+        ]
+      },
+      {
+        "name": "Plugin activation gate on the pairing surface",
+        "behavior": "`PluginRegistry.updateStateFlows()` sets `activePumpPlugin` to the first active plugin declaring PUMP_STATUS or INSULIN_SOURCE, cast to DevicePlugin. There is **no default activation**: `initialize()` creates plugins from compile-time factories (skipping any with a mismatched `PLUGIN_API_VERSION` or disabled by the feature gate) then `restoreActivePlugins()` only restores IDs previously persisted per capability. Activation is mutually exclusive for SINGLE_INSTANCE capabilities: the new plugin is activated first (slot never empty), preferences are written, then the conflicting plugin is deactivated (its `onDeactivated()` disconnects). Shipped plugin ids: `com.glycemicgpt.tandem`, `com.glycemicgpt.medtronic`. Settings \"Available Plugins\" is the only place to switch drivers.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/plugin/PluginRegistry.kt",
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/plugin/adapter/PumpConnectionAdapter.kt"
+        ],
+        "edge_cases": [
+          "Fresh install with no plugin activated: no pump card in Settings, hence no route to the pairing screen at all.",
+          "Switching drivers while paired leaves the other driver's credentials in the shared store."
+        ]
+      },
+      {
+        "name": "Declared BLE-related manifest permissions and platform floor",
+        "behavior": "App manifest declares `BLUETOOTH_CONNECT`; `BLUETOOTH_SCAN` with `usesPermissionFlags=\"neverForLocation\"` (`tools:targetApi=\"s\"`); `ACCESS_FINE_LOCATION` and `ACCESS_COARSE_LOCATION` both with `android:maxSdkVersion=\"30\"`; `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_CONNECTED_DEVICE`, `FOREGROUND_SERVICE_DATA_SYNC`, `POST_NOTIFICATIONS`, `WAKE_LOCK`, `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`, `RECEIVE_BOOT_COMPLETED`. `uses-feature android.hardware.bluetooth_le` is `required=\"true\"`. `BLUETOOTH_ADVERTISE` comes only from the Medtronic plugin module manifest via merge. Build config: compileSdk 35, minSdk 30, targetSdk 35. ACCESS_COARSE_LOCATION is declared but never requested at runtime.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/app/src/main/AndroidManifest.xml",
+          "android-unofficial/plugins/shipped/medtronic/src/main/AndroidManifest.xml",
+          "android-unofficial/app/build.gradle.kts"
+        ],
+        "edge_cases": [
+          "minSdk 30 means the location-permission branch only applies on Android 11."
+        ]
+      },
+      {
+        "name": "Adjacent permission surfaces reached from the pairing journey",
+        "behavior": "POST_NOTIFICATIONS: Settings \u2192 Notifications shows `NotificationStatusCard` with a live `checkSelfPermission` (pre-33 always granted), re-checked on `ON_RESUME`. \"Enable\" launches `Settings.ACTION_APP_NOTIFICATION_SETTINGS` with `EXTRA_APP_PACKAGE` \u2014 it does **not** use the runtime permission launcher \u2014 falling back to a long Toast on ActivityNotFoundException/SecurityException. Copy when denied: \"Disabled -- alerts will not appear on your phone\". Battery optimization: when `isPumpPaired && isBatteryOptimized`, Settings shows a warning card \"Battery Optimization Active\" / \"Android may stop the pump connection when the screen is off. Disable battery optimization for reliable overnight monitoring.\" whose action fires `Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` with `package:` URI; status is re-read via `PowerManager.isIgnoringBatteryOptimizations`.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/settings/SettingsScreen.kt",
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/settings/SettingsViewModel.kt"
+        ],
+        "edge_cases": [
+          "Onboarding (WELCOME/FEATURES/DISCLAIMER/SERVER/LOGIN, 5 pages) contains no BLE permission or pairing step \u2014 pairing is entirely a post-onboarding Settings action."
+        ]
+      },
+      {
+        "name": "Documented user-facing pairing behavior (shipped docs)",
+        "behavior": "`docs/troubleshooting/cant-pair-pump.md`: prerequisites (Bluetooth on, Location enabled on Android 11, pump in pairing mode \u2014 Tandem t:slim X2 Options \u2192 Bluetooth Settings \u2192 Pair Device, code times out \"after a couple of minutes\", pump within a couple of metres); \"app must be scanning before the pump starts advertising\"; Tandem allows one Bluetooth connection at a time; requires Android 11+ (API 30+); battery-optimization guidance including Samsung \"Sleeping apps\"; Mobi is documented as unverified against physical hardware. `docs/daily-use/connecting-medtronic-pump.md`: explicitly BETA and read-only, single-peer removal from MiniMed Mobile required first, advertise-and-wait named \"Mobile 000001\", 5-step flow, and the four fault messages with remedies; \"Once paired, the pump is remembered \u2014 GlycemicGPT reconnects on its own.\"",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/docs/troubleshooting/cant-pair-pump.md",
+          "android-unofficial/docs/daily-use/connecting-medtronic-pump.md"
+        ],
+        "edge_cases": [
+          "The troubleshooting doc claims the app \"shows two fields during pairing -- one for the pump's code, one to confirm\"; the shipped UI has a single code field. Doc/code drift."
+        ]
+      }
+    ],
+    "safety_critical": [
+      "BLE bond removal decisions (Tandem BleConnectionManager.onConnectionStateChange): status 0x05 before CONNECTED, status 0x08 with no prior successful session, and 3 consecutive zero-response connections all call removeBond() + latch AUTH_FAILED. A wrong removal forces a manual re-pair with the pump physically in pairing mode, so the app stops reading glucose/insulin until the user notices. The explicit counter-rule \u2014 never remove the bond when hadSuccessfulSession is true, because transient sleep/wake encryption renegotiation resolves itself \u2014 is load-bearing and must be ported exactly.",
+      "Indefinite reconnection is a deliberate safety decision: after MAX_FAST_RECONNECT_ATTEMPTS = 10 (~5 min of 1\u201332 s exponential backoff) the Tandem driver switches to SLOW phase (every 120 s + passive autoConnect GATT) and retries forever unless the user unpairs. Stated reason: \"The pump is a medical device.\" Any port that gives up after N attempts silently stops glucose monitoring.",
+      "AUTH_FAILED is a latched terminal state in both drivers with only generic user copy (\"Pairing failed\" / \"The pump rejected the pairing attempt\"). Bond loss, stale encryption keys, a pump that ignores requests, and a mistyped code are indistinguishable to the user, so a patient can be left with no data and no actionable message.",
+      "PumpConnectionService wake-lock and battery thresholds directly gate whether BLE keep-alive polling (15 s cadence; pump drops idle links at ~30 s) survives screen-off. Releasing the wake lock below 5% battery and reducing polling below 15% can silently stop data flow and therefore stop the on-phone alert floor from seeing new readings.",
+      "Foreground-notification honesty text is the only backgrounded surface that states whether anything is watching for lows/highs. lastFloorStatus caching exists specifically so redundant service starts cannot replace \"Alerts degraded \u2014 this phone is NOT watching for lows or highs\" with all-is-well copy. Losing that guarantee in a port would produce a false safety claim.",
+      "Settings unpair (SettingsViewModel.unpair) clears credentials only \u2014 it leaves a live BLE session, a running foreground service, and the OS bond intact, unlike the pairing-screen unpair. A user who \"unpairs\" from Settings may believe the pump is disconnected while the app keeps a session; conversely the driver may keep reconnecting with no stored credentials.",
+      "Single-peer constraint for both vendors: pairing here requires removing the pump from the manufacturer's official app. If a user pairs GlycemicGPT while relying on the official app for alerts, they can lose the vendor's alerting. This is surfaced in the Medtronic pairing screen, the Medtronic settings note, and both docs.",
+      "Medtronic pairing is BETA / read-only and not validated against live pumps for several paths (TODO markers on the 60 s BOUND_ELSEWHERE window, the hard-coded advertised name, and live re-confirmation of the SAKE characteristic UUID after issue #844). The driver declares no PUMP_CONTROL capability and never writes to the pump.",
+      "Pairing credentials (address, pairing code, JPAKE derived secret and server nonce) live in one shared EncryptedSharedPreferences file (AES256_SIV keys / AES256_GCM values). clearPairing() wipes the whole file. The MAC address is displayed unmasked in both the pairing screen and Settings.",
+      "Hidden-API reflection is used for BluetoothDevice.removeBond() (both drivers) and BluetoothGatt.refresh() (Tandem). Both fail soft with a WARN log; a silent failure of refresh() can cause notifications to be dropped from a stale GATT cache, which presents as a connected pump delivering no data."
+    ],
+    "notes": "Coverage is complete for the stated scope at uniform depth: the whole of presentation/pairing (PairingScreen.kt 775 lines, PairingViewModel.kt 188 lines, PairingViewModelTest.kt), the connection orchestration it drives (PumpConnectionAdapter, PumpScannerAdapter, PumpConnectionManager/PumpScanner/DevicePlugin contracts, PluginRegistry activation, PumpConnectionService, GlycemicGptApp/BootCompletedReceiver auto-start), both shipped driver state machines (Tandem BleConnectionManager + BleScanner; Medtronic MedtronicBleConnectionManager + AndroidMedtronicPeripheral + SakeHandshakeDriver), the credential store, and every runtime-permission path.\n\nDeliberate scope calls: I covered the two driver state machines at the level needed to reproduce the states/timers/thresholds the UI renders, not their wire protocols (JPAKE/SAKE crypto, packetization, history parsing) \u2014 those belong to a BLE-protocol pass. PumpPollingOrchestrator is referenced only where it gates on ConnectionState (polls only while CONNECTED; INTERVAL_FAST_MS 15_000, LOW_BATTERY_MULTIPLIER 3).\n\nThree concrete divergences a Swift port must resolve rather than copy blindly: (1) two unpair paths with different effects (pairing screen = full teardown + bond removal + service stop; Settings = credential clear only); (2) the Medtronic `forceFirstPair` config key is defined on the plugin but unreachable from the pairing UI, so every Medtronic re-pair advertises FIRST_PAIR via scan(); (3) the troubleshooting doc describes a two-field pairing-code entry that the shipped UI does not have.\n\nThere are no ADRs on pairing; the load-bearing decisions are captured as in-code comments and I have quoted their stated reasons verbatim where they exist (foreground-service start point, advertise-permission omission pre-API-31, terminal-vs-BOUND_ELSEWHERE phase routing, never-remove-bond-after-successful-session, indefinite reconnect).\n\nThere is no pairing or connection-management surface on the Wear module \u2014 the watch only renders forwarded monitoring status.",
+    "external_dependencies": [
+      "androidx.security.crypto (EncryptedSharedPreferences / MasterKeys) \u2014 pairing credential storage",
+      "Hilt / Dagger (@HiltViewModel, @AndroidEntryPoint, SingletonComponent multibindings for PluginFactory)",
+      "Jetpack Compose Material3 + androidx.activity.compose.rememberLauncherForActivityResult / ActivityResultContracts.RequestMultiplePermissions",
+      "androidx.navigation.compose (NavHost, popBackStack)",
+      "kotlinx.coroutines Flow/StateFlow/callbackFlow (scan and advertise as cold flows)",
+      "Timber (logging; WARN+ is Sentry-eligible, which drives several deliberate log-level choices around MAC addresses)",
+      "org.openminimed.sake (JavaSake KeyDatabase / Constants.KEYDB_PUMP_EXTRACTED) \u2014 Medtronic SAKE handshake crypto",
+      "Android platform BLE: BluetoothLeScanner, BluetoothGatt, BluetoothGattServer, BluetoothLeAdvertiser",
+      "Hidden Android APIs via reflection: BluetoothDevice.removeBond(), BluetoothGatt.refresh()",
+      "Protocol knowledge derived from jwoglom/pumpX2 (MIT, no runtime dependency) and OpenMinimed JavaPumpConnector (GPL-3.0, used with permission)"
+    ],
+    "permissions_and_platform_apis": [
+      "BLUETOOTH_SCAN (API 31+, usesPermissionFlags=neverForLocation) \u2014 requested at runtime before scanning",
+      "BLUETOOTH_CONNECT (all levels) \u2014 requested at runtime with SCAN and with ADVERTISE",
+      "BLUETOOTH_ADVERTISE (API 31+, declared in the Medtronic plugin manifest, merged) \u2014 requested at runtime before advertise-and-wait pairing",
+      "ACCESS_FINE_LOCATION (maxSdkVersion 30) \u2014 requested at runtime only on Android 11 as the pre-12 scan permission",
+      "ACCESS_COARSE_LOCATION (maxSdkVersion 30) \u2014 declared but never requested",
+      "POST_NOTIFICATIONS \u2014 checked in Settings; the UI deep-links to ACTION_APP_NOTIFICATION_SETTINGS rather than using the runtime launcher",
+      "FOREGROUND_SERVICE, FOREGROUND_SERVICE_CONNECTED_DEVICE, FOREGROUND_SERVICE_DATA_SYNC \u2014 PumpConnectionService",
+      "WAKE_LOCK \u2014 PARTIAL_WAKE_LOCK held while connected/reconnecting",
+      "REQUEST_IGNORE_BATTERY_OPTIMIZATIONS + Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS intent",
+      "RECEIVE_BOOT_COMPLETED \u2014 BootCompletedReceiver restarts the pump service when paired",
+      "uses-feature android.hardware.bluetooth_le required=true",
+      "BroadcastReceiver for BluetoothAdapter.ACTION_STATE_CHANGED (RECEIVER_EXPORTED) and Intent.ACTION_BATTERY_CHANGED (RECEIVER_NOT_EXPORTED)",
+      "PowerManager.isIgnoringBatteryOptimizations / newWakeLock",
+      "No shouldShowRequestPermissionRationale and no ACTION_APPLICATION_DETAILS_SETTINGS anywhere \u2014 there is no rationale screen and no settings shortcut for BLE permissions"
+    ]
+  },
+  "port": {
+    "subsystem": "Pairing UX and connection lifecycle surface (PairingScreen/PairingViewModel, app-side connection orchestration, BLE runtime-permission flow, both shipped driver connection state machines) \u2014 iOS 18+/watchOS 11+ Swift port analysis",
+    "ports_cleanly": [
+      {
+        "capability": "Pairing route + entry/exit navigation",
+        "ios_approach": "SwiftUI NavigationStack with a `.pairing` path value pushed from Settings \u2192 pump card (\"Pair Pump\" / \"Re-pair\"). Android's `spokeRoutes` bottom-nav suppression maps to pushing the pairing view onto a stack inside the tab (hides the tab bar) or presenting it as a full-screen cover. The `LaunchedEffect(connectionState) { onPaired() }` auto-pop maps to `.onChange(of: connectionState) { if $0 == .connected { path.removeLast() } }` \u2014 identical semantics, including popping when the screen is not on top. Settings' `LifecycleEventEffect(ON_RESUME) { loadState() }` maps to `.onAppear` plus a `scenePhase == .active` observer. Unlike Android, iOS renders a system back chevron by default; keep it (strict parity on \"no back affordance\" is a regression on iOS, not a feature)."
+      },
+      {
+        "capability": "Pairing style dispatch (driver-selected flow)",
+        "ios_approach": "`PairingProfile(style:advertisedName:)` becomes a Swift struct returned by each compile-time-linked driver module conforming to a `DeviceDriver` protocol. `PairingStyle` stays a two-case enum (`.centralScan`, `.advertiseAndWait`). The `registry.activePumpPlugin` StateFlow becomes an `@Published var activeDriver: (any DeviceDriver)?` on an `@Observable` DriverRegistry; the pairing view switches on `activeDriver?.pairingProfile ?? .init()` so swapping drivers in Settings still changes the flow live. No default active driver \u2192 `.centralScan` default UI with a no-op scan, same silent behaviour. The hard-coded Tandem copy in the central-scan branch must move into the driver's profile (`scanBlurb`, `codeInstructions`) \u2014 a straight fix carried by the same struct."
+      },
+      {
+        "capability": "ConnectionState model and producers",
+        "ios_approach": "`enum ConnectionState { disconnected, scanning, connecting, authenticating, authFailed, connected, reconnecting }` \u2014 a direct Swift enum. `PumpConnectionAdapter`'s `flatMapLatest` over the active driver becomes an `@Observable` `ConnectionCoordinator` holding `private(set) var state` fed from the active driver's `AsyncStream<ConnectionState>` (or a Combine `switchToLatest`), started eagerly on `@MainActor`. Same consumers: pairing view, home status row, BLE debug view, polling orchestrator gate, read gateway link gate. Same edge cases preserved: deactivating the driver collapses to `.disconnected`; `.authFailed` stays latched until a new `connect()`/`pair()` or driver swap."
+      },
+      {
+        "capability": "Central-scan screen state machine (ordered branch selection)",
+        "ios_approach": "A computed `enum CentralScanPhase` on the view model reproducing the ordered `when`: (1) `.connecting`/`.authenticating` \u2192 ConnectingCard; (2) `.authFailed` && selectedPump != nil \u2192 AuthFailedCard + code input with the code retained; (3) selectedPump != nil \u2192 code input; (4) else scan section. `.connected` is never rendered (outer auto-pop wins). Keep the documented fall-through: `.reconnecting`, `.scanning`, `.disconnected` all render the scan section. Recommend surfacing `.reconnecting` (currently invisible) as an ios_requirement rather than replicating the gap."
+      },
+      {
+        "capability": "Scan session lifecycle (start/stop/select/teardown, upsert by identity)",
+        "ios_approach": "`startScan()` cancels the prior `Task`, clears `discoveredPumps`, sets `isScanning = true`, and iterates the driver's `AsyncStream<DiscoveredPump>`; a `defer` block restores `isScanning = false` on completion or cancellation \u2014 exact 1:1 with the Kotlin try/finally. Upsert keyed by device identity (now `CBPeripheral.identifier`, see Tandem scan entry) preserving discovery order. `stopScan()` cancels; `selectPump()` stops the scan; `deinit`/`.onDisappear` stops scan and advertising. Swift structured concurrency gives the same cancellation semantics as `viewModelScope`."
+      },
+      {
+        "capability": "Pairing-code entry UI and validation",
+        "ios_approach": "SwiftUI `Card` + `TextField(\"Pairing Code\")` with `.accessibilityIdentifier(\"pairing_code_field\")`. Preserve exactly: `.take(16)` truncation in the setter, Pair enabled only at `count >= 6`, `pair()` no-ops on empty, no character-class filtering / trimming / case normalisation, no client-side verification. Cancel clears selection + code. Keep `KeyboardType.Text` equivalent (`.default`, not `.numberPad`) \u2014 the 11\u201316-char legacy V1 branch requires non-numeric input, so a numeric keypad would silently break legacy pairing. Add `.textInputAutocapitalization(.never)` and `.autocorrectionDisabled()`, which Android got for free from the platform."
+      },
+      {
+        "capability": "Per-model pairing instructions (Tandem t:slim X2 / Mobi / unknown)",
+        "ios_approach": "`TandemPumpModel.fromAdvertisedName(_:)` ports verbatim (trim, collapse whitespace runs, case-insensitive `hasPrefix` on \"tslim X2\" / \"t:slim X2\" / \"Tandem Mobi\"). The name source is `advertisementData[CBAdvertisementDataLocalNameKey] as? String ?? peripheral.name` \u2014 Core Bluetooth surfaces the advertised local name in `didDiscover`, so detection fidelity is preserved. Three instruction strings port verbatim (hasScreen true/false/nil). Memoise with a stored property on the selected-pump model instead of `remember(pump.name)`."
+      },
+      {
+        "capability": "AUTH_FAILED display and retry (central-scan)",
+        "ios_approach": "Error-tinted card (\"Pairing failed\" / \"The pump rejected the pairing attempt. Please verify the code and try again.\") rendered above a live code field pre-filled with the previous code, so Pair re-runs `connect(identity:code:)`. Cancel clears selection and code. The `onRetry` parameter that renders no button should be dropped rather than ported. Preserve the `selectedPump != nil` guard, but pair it with the new background-failure surface named in ios_requirements so an unattended reconnect failure is no longer silent."
+      },
+      {
+        "capability": "Advertise-and-wait idle / \"Before you start\" single-peer card",
+        "ios_approach": "Static card (`single_peer_instruction`) with the unchanged single-peer copy, then optional FaultCard, then optional permission-denied card, then a full-width button labelled \"Try Again\" when a fault is set else \"Start Pairing\". Fault persists in idle until the next start clears it. Pure SwiftUI; no platform constraint. The copy is more important on iOS, not less: with no way to remove a stale bond programmatically, removing the pump from the vendor app first is the only reliable path."
+      },
+      {
+        "capability": "Advertise-and-wait phase routing rule (terminal-fault vs BOUND_ELSEWHERE)",
+        "ios_approach": "Port the documented rule unchanged: `terminalFault = fault != nil && fault != .boundElsewhere`; route (1) `.connecting`/`.authenticating` \u2192 ConnectingCard, (2) `.scanning` || (isAdvertising && !terminalFault && state == .disconnected) \u2192 AdvertisingCard, (3) else idle. The stated rationale \u2014 drive phase off connection state, not advertise-job liveness \u2014 holds on iOS for the same reason (`CBPeripheralManager.isAdvertising` stays true across a completed handshake). `.authFailed` and `.reconnecting` still land in idle content."
+      },
+      {
+        "capability": "Advertise-and-wait waiting-state card (spinner, discoverable-as copy, cancel)",
+        "ios_approach": "ProgressView + \"Waiting for your pump\" + name-specific or generic discoverable copy; inline error line when fault == .boundElsewhere while the spinner runs; full-width Cancel that stops advertising. All SwiftUI. Two substantive copy changes required by the platform: the advertised name must reflect what iOS actually broadcasts (`CBAdvertisementDataLocalNameKey`), and the card must state that the app has to stay in the foreground with the screen on while waiting, because background advertising is not visible to the pump."
+      },
+      {
+        "capability": "Medtronic session timers and GATT service topology",
+        "ios_approach": "30 s handshake timeout, 60 s FIRST_PAIR pairing-wait window (armed only for first pair; RECONNECT waits indefinitely), and both fault transitions port as plain Swift `Task.sleep` timers on the driver actor. GATT server topology ports directly: `CBMutableService(type: CBUUID(string:\"0000FE82-0000-1000-0000-009132591325\"))`-family characteristics registered via `peripheralManager.add(_:)` \u2192 `peripheralManagerDidAddService`, awaiting completion before advertising, exactly mirroring the Android one-at-a-time `addService`/`onServiceAdded` queue. All UUIDs (vendor-base SAKE characteristic, vendor 0x0900 Device Info service, SIG DIS characteristic UUIDs) are expressible as full 128-bit CBUUIDs."
+      },
+      {
+        "capability": "Bluetooth adapter state watcher \u2192 auto-reconnect",
+        "ios_approach": "`centralManagerDidUpdateState(_:)` replaces the exported `ACTION_STATE_CHANGED` receiver and is strictly better: no receiver registration, no export surface, no unregister-in-onDestroy. `.poweredOn` triggers `autoReconnectIfPaired()`; `.poweredOff`/`.resetting` log only and let disconnect callbacks handle teardown; `.unauthorized` drives the permission-denied surface; `.unsupported` means Simulator or non-BLE hardware. Delivered in background under the `bluetooth-central` background mode. Mirror with `peripheralManagerDidUpdateState` for the advertise-and-wait driver."
+      },
+      {
+        "capability": "Home-screen connection status surface",
+        "ios_approach": "`ConnectionSyncRow` ports as a SwiftUI view keyed on the same seven states with SF Symbols substituting the Material icons and identical labels and accessibility strings. `HomeViewModel.connectionState` (`stateIn(WhileSubscribed(5000))`) maps to an `@Observable` view model subscribing to the coordinator while the view is on screen. Sub-card copy (\"Pair your pump in Settings to start\" on disconnected; \"Loading pump data...\" on connected-with-no-reading) ports verbatim. Recommend making the `.authFailed` state tappable to the pairing route (an ios_requirement), since Android's non-tappable dead end is a usability defect rather than a behaviour to preserve."
+      },
+      {
+        "capability": "Settings pump card (status + entry points)",
+        "ios_approach": "Renders whenever a pump-capable driver is active, resolved generically from the compile-time driver registry (no vendor hard-coding). Row with paired/unpaired symbol, driver display name, paired/not-paired subtitle; driver-contributed informational notes only (Medtronic's single-peer note; Tandem's empty descriptor); Re-pair + Unpair when paired, Pair Pump when unpaired. The `catch (Throwable)` degradation guards around metadata/descriptor reads become `Result`-returning driver accessors \u2014 cheaper on iOS because compile-time linking removes the misbehaving-plugin class of failure entirely. Only substantive change: the subtitle shows the stable pump identity, not a MAC."
+      },
+      {
+        "capability": "No pairing or connection-management surface on the watch",
+        "ios_approach": "The Wear module has no pairing UI and the watchOS app must match: no pairing view, no scan list, no code entry, no unpair, and no CBCentralManager instance on the watch. The watch renders forwarded monitoring status only. Connection state reaches the watch as part of the existing forwarded status payload over WatchConnectivity (`updateApplicationContext` for latest-wins state, `transferCurrentComplicationUserInfo` for Smart Stack refresh). Keeping BLE off the watch also avoids watchOS's much tighter background-BLE budget."
+      },
+      {
+        "capability": "Shipped user-facing pairing documentation",
+        "ios_approach": "`docs/troubleshooting/cant-pair-pump.md` and `docs/daily-use/connecting-medtronic-pump.md` port as content rewrites: drop the Android 11 location-permission prerequisite (iOS needs no location for BLE), drop battery-optimization/Samsung sleeping-apps guidance, and add iOS-specific sections for Settings \u2192 Bluetooth \u2192 Forget This Device, force-quit-disables-background-monitoring, and Low Power Mode. Fix the documented drift while porting: the shipped UI has one pairing-code field, not two. Both docs must state the fork-and-build TestFlight 90-day rebuild cadence where it affects continuity of monitoring."
+      }
+    ],
+    "needs_redesign": [
+      {
+        "capability": "Device identity: MAC address as the pairing/reconnect/storage key",
+        "why": "Core Bluetooth never exposes a Bluetooth device address. The only identifier is `CBPeripheral.identifier`, a UUID that is stable per (peripheral, app installation, device) but is not the MAC, is not portable across devices or reinstalls, and can change for a non-bonded peripheral rotating its resolvable private address. Every layer keys on address today: `discoveredPumps` upsert, `selectPump`, `connect(address, code)`, `PumpCredentialStore.paired_pump_address`, `removeBond(address)`, and the two UI surfaces that print it. Verified upside: JPAKE consumes only the pairing code, so no crypto input depends on the address.",
+        "options": [
+          "Replace the address with `CBPeripheral.identifier.uuidString` everywhere and re-acquire the peripheral via `retrievePeripherals(withIdentifiers:)` instead of scanning.",
+          "Store a composite identity record (CB identifier + last advertised local name + last-seen timestamp) so a changed identifier can be recovered by a name-matched rescan.",
+          "Key on advertised name/serial parsed from advertisement data and treat the CB identifier as a cache."
+        ],
+        "recommendation": "Introduce a `PumpIdentity` value type (opaque stable id + display name) that replaces `String address` through the whole stack. Persist the CB identifier as the primary key and the last advertised local name as a recovery fallback; on a failed `retrievePeripherals`, fall back to a service-filtered scan matching the stored name. Never print the raw identifier in the UI \u2014 show the pump's name and model, which is more useful than the MAC ever was and removes the cleartext-device-id exposure."
+      },
+      {
+        "capability": "Tandem BLE scan implementation (BleScanner callbackFlow)",
+        "why": "Android's ScanFilter/ScanSettings/ScanCallback triple maps onto a single `scanForPeripherals(withServices:options:)` call with a `CBCentralManagerDelegate`, but four properties change: there is no `onScanFailed(errorCode)` \u2014 failures surface as `CBManagerState` transitions or simply no results; `SCAN_MODE_LOW_LATENCY` has no analogue (iOS controls duty cycle); the local `seen` set that emits each device once and freezes RSSI is unnecessary because `CBCentralManagerScanOptionAllowDuplicatesKey: true` delivers live RSSI; and background scanning requires the explicit service UUID (which the code already has) with duplicates ignored and results coalesced.",
+        "options": [
+          "Foreground: scan with allowDuplicates true for live RSSI and device aging; background: scan without it.",
+          "Port the one-shot `seen` set literally for behavioural parity and accept frozen RSSI."
+        ],
+        "recommendation": "Scan `withServices: [CBUUID(string: \"FDFB\")]` (Tandem PUMP_SERVICE_UUID), allowDuplicates in the foreground only, and upsert by CB identifier with a fresh RSSI and last-seen timestamp on every callback. Age entries out of the list after ~10 s without a sighting. Map `CBManagerState` (.poweredOff, .unauthorized, .unsupported, .resetting) to distinct user-visible messages \u2014 this closes the Android gap where a scan failure silently just stopped showing \"Scanning\u2026\"."
+      },
+      {
+        "capability": "Scan section UI (device list, RSSI display, empty state)",
+        "why": "Two inputs change: there is no MAC to render as the secondary line, and RSSI is now live rather than a one-shot snapshot, which makes both the frozen-value and never-aged-out behaviours pointless to reproduce.",
+        "options": [
+          "Show name + a signal-strength indicator and drop the identifier line entirely.",
+          "Show name + a truncated CB identifier to preserve the two-line layout.",
+          "Show name + detected Tandem model (t:slim X2 / Mobi / Unknown) as the secondary line."
+        ],
+        "recommendation": "Secondary line = detected pump model, trailing = live signal-strength glyph plus dBm. Sort by RSSI descending with a stable tiebreak on first-seen, and age out devices unseen for 10 s. Keep the blurb, the Scan/Stop toggle with its accessibility identifier, and the \"No pumps found. Tap Scan to search.\" empty state. Move the Tandem-specific blurb text into the driver's PairingProfile so a future central-scan driver is not mislabelled."
+      },
+      {
+        "capability": "BLE runtime-permission sequence (scan and advertise paths merged)",
+        "why": "iOS has exactly one Bluetooth permission covering both central and peripheral roles, backed by `NSBluetoothAlwaysUsageDescription`. There is no multi-permission request contract, no per-role split, no location requirement at any OS version, and no `shouldShowRequestPermissionRationale`. The prompt is triggered implicitly by the first CBCentralManager/CBPeripheralManager operation that needs it \u2014 you cannot request it on a button tap independently of starting BLE work. Critically, iOS never re-prompts after a denial, so Android's \"Scan button remains enabled and re-launches the dialog on each tap\" is dead code on iOS. Conversely iOS gives what Android deliberately omitted: `UIApplication.openSettingsURLString` deep-links straight to the app's settings pane.",
+        "options": [
+          "Instantiate the managers lazily on the first Scan/Start Pairing tap so the prompt appears in context.",
+          "Instantiate at app launch and pre-authorise before the user reaches pairing.",
+          "Add a pre-permission rationale screen ahead of the system prompt."
+        ],
+        "recommendation": "Lazily instantiate on the first Scan / Start Pairing tap, preceded by a short in-app rationale sheet that names why Bluetooth is needed (Android has none, but iOS's one-shot prompt makes a lost grant unrecoverable in-app). Read `CBManager.authorization` (.notDetermined/.restricted/.denied/.allowedAlways) to drive state. On `.denied` or `.restricted`, replace both Android denial cards with one card carrying an \"Open Settings\" button. Delete the API-31 branch, the ACCESS_FINE_LOCATION branch, and the deliberate pre-31 empty-advertise-permission-array decision \u2014 none has an iOS analogue."
+      },
+      {
+        "capability": "Permission-denied cards (separate scan and advertise variants)",
+        "why": "The two error cards exist only because Android requests two different permission sets. With one iOS permission there is one denial state, and the denial is effectively terminal in-app rather than retryable per tap.",
+        "options": [
+          "Keep two cards with role-specific copy for text parity.",
+          "Collapse to one card with a role-neutral message plus an Open Settings action."
+        ],
+        "recommendation": "One card: title \"Bluetooth permission required\", body naming both roles (\"GlycemicGPT needs Bluetooth to find your pump and to let your pump find this phone\"), and a primary \"Open Settings\" button using `UIApplication.openSettingsURLString`. Re-evaluate `CBManager.authorization` on `scenePhase == .active` so the card clears automatically when the user returns from Settings \u2014 Android's card never auto-cleared."
+      },
+      {
+        "capability": "Paired-status card (identity display and reactivity)",
+        "why": "Two independent changes. The subtitle currently renders the raw MAC, which does not exist on iOS. And `isPaired`/`pairedAddress` are non-reactive getters reading EncryptedSharedPreferences on each composition, so the card can go stale \u2014 SwiftUI would make this worse, not better, because it recomposes less predictably than Compose.",
+        "options": [
+          "Port the non-reactive getters as computed properties and accept staleness.",
+          "Make pairing state an observed property backed by an actor-isolated Keychain read cached in memory."
+        ],
+        "recommendation": "Make it reactive: `@Observable` view model publishing `pairingRecord: PairedPump?`, refreshed on pair, unpair, and driver swap. Card shows checkmark/Bluetooth symbol, \"Connected\"/\"Paired\", and pump name + model as the subtitle (no identifier). Keep the trailing Unpair button, but see the unpair entries \u2014 on iOS it must open a confirmation and then a Forget-in-Settings instruction."
+      },
+      {
+        "capability": "CONNECTING / AUTHENTICATING display and the absence of a cancel affordance",
+        "why": "On Android a hung driver leaves a spinner up but the OS GATT connect eventually errors. On iOS `centralManager.connect(peripheral, options:)` has no timeout at all by design \u2014 a pending connection stays pending indefinitely, in the foreground and the background. Shipping Android's \"no cancel, no timeout, no elapsed time\" UI on iOS produces a genuinely unrecoverable screen whose only escape is force-quitting the app, which additionally disables background reconnection.",
+        "options": [
+          "Add a Cancel button that calls `cancelPeripheralConnection`.",
+          "Add a UI-level timeout that transitions to a retry state.",
+          "Both."
+        ],
+        "recommendation": "Both. Keep the card's visual design and its three strings (\"Connecting to pump...\", \"Authenticating...\", \"Working...\"), add a Cancel that calls `cancelPeripheralConnection(_:)` and returns to the scan/idle state, and add a 45 s UI watchdog (longer than the driver's 30 s AUTH_TIMEOUT so the driver's own transition wins when it fires) that surfaces a retry. Do not add a cancel that silently leaves the pending connect alive."
+      },
+      {
+        "capability": "Tandem connect + authentication state machine (GATT setup sequence)",
+        "why": "The Android sequence \u2014 `connectGatt(TRANSPORT_LE)` \u2192 `refresh()` \u2192 `requestConnectionPriority(HIGH)` \u2192 `requestMtu(185)` \u2192 `discoverServices()` \u2192 enable AUTHORIZATION CCCD \u2192 auth \u2192 enqueue five more CCCDs \u2192 500 ms settle \u2192 CONNECTED \u2014 contains four steps with no iOS API. Transport selection is implicit (CB is LE-only), cache refresh does not exist (see impossible), connection-priority requests do not exist (the peripheral requests parameters, not the central), and MTU is negotiated automatically at ~185 with `maximumWriteValueLength(for:)` reporting the result. CCCD writes become `setNotifyValue(true, for:)`.",
+        "options": [
+          "Port the sequence minus the four unavailable steps and keep the ordering and settle delay.",
+          "Restructure around async/await with `withCheckedThrowingContinuation` per GATT step."
+        ],
+        "recommendation": "Implement the driver as a Swift actor exposing `connect(identity:code:) async throws`, wrapping each CB delegate callback in a continuation so the ordering (authorization CCCD first, auth, then the remaining five subscriptions) is expressed as straight-line code. Preserve verbatim: the `code.count <= 10` JPAKE-vs-legacy-V1 branch, JPAKE CONFIRMATION when a saved derived secret exists else 5-round BOOTSTRAP, the 30 s AUTH_TIMEOUT_MS, the POST_AUTH_SETTLE_MS = 500 delay before `.connected`, the guard that only promotes to `.connected` if still `.authenticating`, immediate `.authFailed` when no code is available, and clearing saved JPAKE credentials on a round-3/round-4 failure. Assert the negotiated MTU is >= the protocol's minimum and fail loudly if not, since you can no longer request it."
+      },
+      {
+        "capability": "Tandem reconnect policy (two-phase indefinite backoff)",
+        "why": "The FAST phase (10 attempts, 1/2/4/8/16/32 s capped) then SLOW phase (passive autoConnect GATT + 120 s retries, forever) exists to work around Android's lack of a durable pending connection. iOS provides that primitive natively: `connect(peripheral)` with no timeout is a kernel-serviced pending connection that costs the app nothing, survives backgrounding, and \u2014 with state restoration \u2014 survives app termination and device reboot. Reimplementing the backoff on top of it would be strictly worse: more radio churn, more wakeups, no benefit.",
+        "options": [
+          "Port the two-phase schedule literally on top of connect/cancel cycles.",
+          "Replace both phases with a single permanent pending connect, retried only on hard errors.",
+          "Hybrid: pending connect plus a low-frequency watchdog rescan."
+        ],
+        "recommendation": "Replace both phases with one permanent pending `connect(peripheral)` re-armed on every `didDisconnectPeripheral` and on `centralManagerDidUpdateState == .poweredOn`, with no attempt cap and no give-up condition. This preserves the load-bearing safety property \u2014 \"the pump is a medical device; if the user hasn't explicitly unpaired, always try to reconnect\" \u2014 and strengthens it. Keep `.reconnecting` as the reported state whenever a pending connect is outstanding and the app is not connected. Keep the counters for diagnostics only, as Android does with `consecutiveReconnectFailures`. Explicitly forbid any give-up-after-N logic in code review."
+      },
+      {
+        "capability": "Tandem bond-loss / AUTH_FAILED detection heuristics",
+        "why": "Every trigger is a raw GATT/HCI status byte that Core Bluetooth does not expose: 0x13 CONN_TERMINATE_PEER_USER, 0x05 INSUFFICIENT_AUTHENTICATION, 0x08 INSUFFICIENT_ENCRYPTION. iOS surfaces `CBError` cases instead \u2014 notably `.peerRemovedPairingInformation` (the peripheral forgot us \u2014 the single most useful signal, with no Android equivalent), `.encryptionTimedOut`, `.connectionTimeout`, `.peripheralDisconnected`, `.connectionFailed`, `.unknownDevice`. The counter thresholds and the counter-rule are portable; the discriminators are not.",
+        "options": [
+          "Map CBError cases to the existing three heuristics as closely as possible.",
+          "Rebuild detection around CBError plus behavioural signals (rapid disconnect timing, zero-notification counting), which is device-observable and does not depend on status bytes."
+        ],
+        "recommendation": "Rebuild on CBError plus behaviour. Preserve exactly: `hadSuccessfulSession` semantics (reset only by user-initiated disconnect/unpair, deliberately surviving reconnect cycles), the never-latch-authFailed-when-hadSuccessfulSession counter-rule, MAX_RAPID_DISCONNECTS = 3 for pre-connected rapid disconnects, MAX_ENCRYPTION_FAILURES = 20 accumulation before reporting, and MAX_ZERO_RESPONSE_CONNECTIONS = 3 for connected-but-silent links. Map `.peerRemovedPairingInformation` directly to a new, specific user-facing state \u2014 it is unambiguous and deserves its own message and its own remediation flow, unlike the generic \"Pairing failed\"."
+      },
+      {
+        "capability": "PairingFault taxonomy and user-facing messages",
+        "why": "Two of five faults change meaning on iOS and two new failure modes exist that Android cannot produce. PERIPHERAL_UNSUPPORTED currently means \"no multi-advertisement support\"; every iPhone since the 4S supports the peripheral role, so on iOS it can only mean the Simulator or a `.unsupported`/`.unauthorized` CBManagerState. ADVERTISE_FAILED maps to `peripheralManagerDidStartAdvertising(_:error:)`. New iOS-only faults: background advertising is invisible to a non-Apple peripheral, and the peripheral removed our pairing information.",
+        "options": [
+          "Keep the five cases and re-point their triggers.",
+          "Extend the enum with iOS-specific cases and specific remediation copy."
+        ],
+        "recommendation": "Keep all five with their existing copy (BOUND_ELSEWHERE's single-peer message is if anything more important on iOS) and add three: `.pairingInfoRemovedByPump` \u2192 \"Your pump no longer recognises this phone. Open iOS Settings \u2192 Bluetooth, tap the \u24d8 next to your pump, choose Forget This Device, then pair again here.\"; `.backgroundAdvertisingNotVisible` \u2192 \"Keep this screen open while your pump connects \u2014 iPhone can only be discovered by your pump while the app is on screen.\"; `.bluetoothUnavailable` carrying the CBManagerState reason. Also fix the duplicated `pairing_fault` accessibility identifier while porting \u2014 give the inline waiting-card line and the FaultCard distinct identifiers."
+      },
+      {
+        "capability": "Advertise job lifecycle and isAdvertising flag ownership",
+        "why": "Android models advertising as \"collect a cold Flow; collection keeps advertising alive\", with a subtle finally-block rule that only a non-cancelled job may reset the flag. Core Bluetooth models it as explicit imperative state: `startAdvertising(_:)` / `stopAdvertising()` with an authoritative `isAdvertising` property and a start callback. The whole flag-ownership hazard disappears.",
+        "options": [
+          "Preserve the AsyncStream-collection idiom for symmetry with the scan path.",
+          "Use CBPeripheralManager's own state as the single source of truth."
+        ],
+        "recommendation": "Use `CBPeripheralManager.isAdvertising` as the source of truth and drive UI from it plus `peripheralManagerDidStartAdvertising(_:error:)`. Keep the driver-facing API shape (`startAdvertising()` / `stopAdvertising()` on the pairing view model) so the phase-routing rule ports unchanged. Retain the documented decision that stopping advertising does not tear down any session-scoped background work, since the session-formation coupling is what owns that. Also resolve the noted Android gap: expose Medtronic's `forceFirstPair` from the re-pair entry point rather than always advertising FIRST_PAIR."
+      },
+      {
+        "capability": "Medtronic advertise-and-wait connection state machine (peripheral-role lifecycle)",
+        "why": "The state machine itself is portable, but its earliest input is not. Android's `onCentralConnected` fires on a GATT-server connection-state callback and is what cancels the pairing-wait timer, clears the fault, stops advertising, and moves SCANNING/CONNECTING/RECONNECTING \u2192 CONNECTING. CBPeripheralManager has no did-connect callback at all: the first observable signal that a central attached is a read/write/subscribe (`peripheralManager(_:didReceiveRead:)` for the Device Info service, or `didSubscribeTo` for SAKE). Separately, the SerialWorker HandlerThread maps to a Swift actor.",
+        "options": [
+          "Treat the first Device Info read request as the connect signal.",
+          "Treat SAKE CCCD subscription as both the connect and the authenticate signal, collapsing a state.",
+          "Use `centralManager.registerForConnectionEvents` (central role only \u2014 does not apply here)."
+        ],
+        "recommendation": "Treat the first `didReceiveRead` on the vendor 0x0900 Device Info service as the connect signal (the pump reads DIS during discovery), with `didSubscribeTo` on the SAKE characteristic as the fallback and the authenticate trigger. Port the rest verbatim onto a driver actor: advertising-mode selection (RECONNECT only when paired and not forced), fault clearing on connect, stop-advertising-on-connect for single-peer, the latched `.authFailed` that must not reset on the ensuing disconnect and must not start a reconnect loop, and the disconnect-while-autoReconnect-and-paired \u2192 `.reconnecting` + re-advertise path."
+      },
+      {
+        "capability": "Medtronic unpair / disconnect / shutdown / activation semantics",
+        "why": "Three Android mechanisms have no iOS counterpart. `removeBond()` is impossible (see impossible list). `close()`'s synchronous-teardown-on-the-caller-thread trick exists because a posted teardown could be dropped as a HandlerThread stops \u2014 Swift actors and structured cancellation make this a non-issue. `onActivated`/`onDeactivated` are runtime-plugin lifecycle hooks; with compile-time-linked modules the hooks become explicit enable/disable calls from the driver registry.",
+        "options": [
+          "Port the three-tier disconnect/unpair/close distinction literally.",
+          "Collapse close() into disconnect() plus actor cancellation."
+        ],
+        "recommendation": "Keep `disconnect()` (autoReconnect off, teardown, keep the pairing) and `unpair()` (teardown, clear credentials, then instruct the user to Forget This Device) as distinct. Replace `close()` with actor deinit plus explicit `shutdown() async`. Keep the deliberate asymmetry that deactivating a driver calls disconnect and not shutdown, so re-enabling reconnects without re-pairing. Keep `reconnectIfPaired()` as a no-op when nothing is paired."
+      },
+      {
+        "capability": "Pairing credential persistence (EncryptedSharedPreferences \u2192 Keychain)",
+        "why": "There is no EncryptedSharedPreferences on iOS, and the accessibility class is a safety decision, not a formality: the app must read pairing credentials to reconnect while the device is locked in the background, so `kSecAttrAccessibleWhenUnlocked` would silently break overnight reconnection \u2014 precisely the scenario this app exists for. The existing store also has a real defect worth fixing in the port: one shared store means pairing a second driver overwrites the first driver's record.",
+        "options": [
+          "Keychain generic-password items, one per key, `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`.",
+          "A single Codable pairing record encrypted with a CryptoKit key held in the Keychain and stored in a Data-Protection-class file.",
+          "SQLCipher/encrypted store shared with the rest of the app's persistence."
+        ],
+        "recommendation": "Keychain generic-password items with `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` (device-only prevents the pairing secret syncing to iCloud Keychain or restoring onto another device, where it would be useless and a liability). Namespace every key by driver id: `<driverId>.pairedPumpIdentity`, `.pairingCode`, `.pairedAt`, `.jpakeDerivedSecret`, `.jpakeServerNonce`. Preserve `clearJpakeCredentials()` removing only the two JPAKE keys and `clearPairing()` removing the whole namespace \u2014 but only that driver's namespace, fixing the cross-driver clobber. Medtronic continues to store its advertised local name in the code slot."
+      },
+      {
+        "capability": "Unpair semantics \u2014 reconciling the two divergent Android paths",
+        "why": "Android has two unpair entry points with materially different effects: the pairing screen does a full teardown (driver unpair, credential clear, OS bond removal, foreground service stop) while Settings clears credentials only, leaving a live BLE session, a running service, and a stale OS bond. This is a latent safety defect on Android and would be worse on iOS, where an orphaned pending connection persists in the OS and the bond can never be removed by the app at all.",
+        "options": [
+          "Make Settings call the full path and keep both entry points.",
+          "Remove one entry point.",
+          "Keep both but require confirmation on each."
+        ],
+        "recommendation": "One canonical `unpair()`: cancel the pending connection, `cancelPeripheralConnection`, stop advertising, clear that driver's Keychain namespace, end any Live Activity, reset `hadSuccessfulSession`, and then present a blocking instruction sheet telling the user to complete the removal in iOS Settings \u2192 Bluetooth \u2192 Forget This Device, with an Open Settings button. Both entry points invoke it. Add the Settings confirmation dialog copy to the pairing screen too \u2014 Android's pairing-screen Unpair acts immediately on a mis-tap, which on iOS costs a manual Settings trip to recover."
+      },
+      {
+        "capability": "Driver activation gate on the pairing surface",
+        "why": "Already-decided architectural change: iOS forbids dynamic code loading, so `PluginRegistry` with compile-time factories, `PLUGIN_API_VERSION` matching, and persisted per-capability activation becomes a compile-time-linked Swift module registry. `PLUGIN_API_VERSION` mismatch is unrepresentable (the compiler enforces it). The load-bearing runtime behaviours are the single-instance mutual exclusion and the no-default-activation rule.",
+        "options": [
+          "Static array of driver types with a persisted selected-driver id in UserDefaults.",
+          "Swift Package trait / build-flag gating per driver plus a runtime selector."
+        ],
+        "recommendation": "A static `[any DeviceDriver.Type]` registry with an `@Observable` selector persisting the chosen driver id. Preserve exactly: no default activation on a fresh install, mutually-exclusive single-instance selection with the new driver enabled before the old one is disabled (the slot is never empty), and disabling calls the old driver's disconnect. Preserve the consequence that with no driver selected there is no pump card and therefore no route to pairing \u2014 but add an ios_requirement to make that state discoverable rather than a dead end. Fix the noted defect: selecting a different driver must not leave the previous driver's credentials in a shared store (solved by the namespacing above)."
+      },
+      {
+        "capability": "Declared BLE permissions and platform floor (manifest \u2192 Info.plist/entitlements)",
+        "why": "Nothing in the Android manifest transfers by name. `BLUETOOTH_SCAN`/`BLUETOOTH_CONNECT`/`BLUETOOTH_ADVERTISE`/`ACCESS_FINE_LOCATION`/`ACCESS_COARSE_LOCATION` collapse to one usage string; foreground-service permissions and WAKE_LOCK have no counterpart; battery-optimization and boot-completed have no counterpart; `uses-feature bluetooth_le required=true` has no App-Store-style device-capability filter that matters given the fork-and-build model. And unlike Android, the plugin-manifest-merge trick that put BLUETOOTH_ADVERTISE only in the Medtronic module has no equivalent \u2014 Info.plist is per-app.",
+        "options": [
+          "One Info.plist covering both roles for all builds.",
+          "Build-configuration-specific Info.plist entries per enabled driver set."
+        ],
+        "recommendation": "One app Info.plist declaring `NSBluetoothAlwaysUsageDescription`, `UIBackgroundModes = [bluetooth-central, bluetooth-peripheral]`, `BGTaskSchedulerPermittedIdentifiers`, and `NSSupportsLiveActivities`; entitlements for `com.apple.developer.usernotifications.time-sensitive` and the App Group + Keychain sharing group the watch extension needs. Do not attempt per-driver Info.plist gating \u2014 declaring `bluetooth-peripheral` unconditionally is harmless and the fork-and-build model has no App Review that would question it. Set the deployment floor at iOS 17 or later so Live Activities, `.timeSensitive` notifications, and Smart Stack are all available unconditionally."
+      },
+      {
+        "capability": "Adjacent permission surfaces on the pairing journey (notifications, background execution health)",
+        "why": "The notification half ports well: `UNUserNotificationCenter.requestAuthorization` is a real runtime prompt, which is better than Android's deep-link-only approach, and `getNotificationSettings` gives live status re-checkable on scenePhase. The battery half does not port: iOS has no per-app battery-optimization exemption, no `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` intent, and no Doze/Sleeping-Apps equivalent to warn about. The genuine iOS threats to continuous monitoring are different: the user force-quitting the app (which permanently disables Core Bluetooth state-restoration relaunch until the app is opened again), Low Power Mode, and Background App Refresh being off.",
+        "options": [
+          "Port the battery card as a Low Power Mode warning.",
+          "Replace it with a composite 'Background monitoring health' card covering force-quit, Low Power Mode, Background App Refresh, notification authorization, and Bluetooth authorization."
+        ],
+        "recommendation": "Build a single 'Background monitoring health' card in Settings, shown whenever a pump is paired, that checks and explains: notification authorization (with in-app request), `ProcessInfo.processInfo.isLowPowerModeEnabled`, `UIApplication.shared.backgroundRefreshStatus`, `CBManager.authorization`, and whether the app was last relaunched by state restoration versus manually. It must carry an explicit, permanent warning that force-quitting the app from the App Switcher stops background pump monitoring until the app is opened again \u2014 the single most consequential iOS-only failure mode in this subsystem, with no Android analogue and no programmatic mitigation."
+      },
+      {
+        "capability": "Simulator-untestable BLE surface (engineering, affects the whole subsystem)",
+        "why": "Core Bluetooth does not exist in the iOS Simulator \u2014 CBCentralManager reports `.unsupported` and CBPeripheralManager cannot advertise. The lead developer has no iPhone and no Apple Watch. That means literally every capability in this subsystem is unverifiable by the primary developer without an architectural affordance, and Daniel's single Tandem t:slim X2 gives no Medtronic coverage at all.",
+        "options": [
+          "Physical-hardware-only validation via the maintainer.",
+          "A protocol-boundary fake driver behind the same `DeviceDriver` interface, driving the full pairing UI and state machine in the Simulator.",
+          "A record/replay harness capturing real CB delegate traffic on hardware and replaying it in Simulator tests."
+        ],
+        "recommendation": "All three, in that order of investment. Define the BLE seam so that everything above `CBCentralManager`/`CBPeripheralManager` is testable: a `BluetoothTransport` protocol with a real CB implementation and a scriptable fake. Ship a debug-build simulated driver that can be scripted to produce every ConnectionState, every PairingFault, wrong-code rejection, pairing-info-removed, handshake timeout, and background-disconnect \u2014 so the pairing UX, phase routing, and reconnect policy are fully exercisable in the Simulator. Add record/replay for the Tandem JPAKE and Medtronic SAKE sequences so a hardware session becomes a permanent regression test."
+      }
+    ],
+    "impossible": [
+      {
+        "capability": "Programmatic removal of the OS Bluetooth bond (removeBond via reflection, both drivers)",
+        "why": "iOS provides no public or private API to remove a Bluetooth pairing from the app. Bond removal is exclusively a user action in Settings \u2192 Bluetooth \u2192 \u24d8 \u2192 Forget This Device. This is not a missing convenience: three of the Tandem driver's safety-relevant recovery paths (status 0x05 before connect, status 0x08 with no prior session, three consecutive zero-response connections) and both drivers' unpair paths call removeBond, and a stale bond is exactly what blocks a successful re-pair. Android's hidden-API reflection has no analogue \u2014 and private-API use would additionally be caught by App Store Connect's static analysis on TestFlight upload, breaking the fork-and-build distribution model.",
+        "closest_alternative": "Detect the condition and hand the user an explicit, non-dismissible guided remediation: a sheet stating the pump no longer trusts this phone, with numbered steps for Settings \u2192 Bluetooth \u2192 \u24d8 \u2192 Forget This Device and an Open Settings button, then a Retry Pairing action that verifies recovery. `CBError.peerRemovedPairingInformation` makes the most important case reliably detectable \u2014 better than Android's status-byte guessing. Preserve the load-bearing counter-rule in the new form: never show the forget-device instruction when `hadSuccessfulSession` is true, because transient encryption renegotiation across sleep/wake resolves itself and a needless forget forces a physical re-pair."
+      },
+      {
+        "capability": "GATT service-cache invalidation (BluetoothGatt.refresh())",
+        "why": "Android calls `refresh()` by reflection on every connect specifically to prevent a stale cached characteristic table from silently dropping notifications \u2014 a failure mode that presents as a connected pump delivering no data. iOS caches discovered services and characteristics per bonded peripheral and exposes no way to flush that cache. The only invalidation paths are the peripheral sending a GATT Service Changed indication or the user forgetting the device.",
+        "closest_alternative": "Handle `peripheral(_:didModifyServices:)` and re-run discovery for the invalidated services, and re-discover services on every fresh connection rather than caching handles in app memory. Then detect the symptom rather than pre-empt it: reuse the existing MAX_ZERO_RESPONSE_CONNECTIONS = 3 heuristic \u2014 reaching `.connected` three times with zero notifications received \u2014 and route it to the guided Forget This Device flow above. This turns an invisible silent-data-loss failure into an actionable one, which is arguably better than Android's fail-soft `refresh()` that logs a WARN and continues."
+      },
+      {
+        "capability": "Medtronic advertising payload parity (manufacturer data 0x01F9, TX-power inclusion, advertise-interval mode)",
+        "why": "`CBPeripheralManager.startAdvertising(_:)` accepts exactly two keys: `CBAdvertisementDataLocalNameKey` and `CBAdvertisementDataServiceUUIDsKey`. Manufacturer-specific data cannot be advertised from iOS at all. The Android implementation deliberately carries the \"Mobile NNNNNN\" name as manufacturer data (0x00 + ASCII name + 0x00) under company id 0x01F9 with `setIncludeDeviceName(false)`, mirroring the proven JavaPumpConnector advertisement that the pump's matcher was reverse-engineered against. iOS also gives no control over advertising interval (the BALANCED-for-first-pair vs LOW_LATENCY-for-reconnect distinction, which exists because the paired pump scans infrequently) and no control over TX-power inclusion.",
+        "closest_alternative": "Advertise the SAKE service UUID (0xFE82 first-pair / 0xFE81 reconnect) plus the name via `CBAdvertisementDataLocalNameKey`, which iOS emits as the standard GAP Complete Local Name AD type, and validate on real hardware whether the pump's `Mobile .{0,7}` matcher reads the GAP local name or only the manufacturer-data copy. If it reads only manufacturer data, Medtronic pairing cannot be implemented on iOS by any means available to a third-party app. This is unverifiable without a physical MiniMed pump, which neither the lead developer nor the maintainer has."
+      },
+      {
+        "capability": "Background BLE advertising visible to a non-Apple peripheral (Medtronic RECONNECT-mode indefinite wait)",
+        "why": "Apple documents that when an app advertising via CBPeripheralManager moves to the background, the local name is removed from the advertisement entirely and all service UUIDs are relocated to a special 'overflow' area that can only be discovered by another iOS device explicitly scanning for those exact UUIDs. A Medtronic pump is not an iOS device and cannot read the overflow area. Medtronic's entire reconnection model is 'advertise in RECONNECT mode indefinitely because the pump scans infrequently' \u2014 which requires the phone to be discoverable for hours while the user is not looking at their phone. That is precisely the condition iOS makes impossible.",
+        "closest_alternative": "Foreground-only Medtronic pairing and foreground-only Medtronic reconnection: the user must open the app and keep the pairing screen on screen for the pump to find the phone. An already-established Medtronic link does survive backgrounding (the `bluetooth-peripheral` background mode keeps GATT-server reads, writes, and notifications alive), so the degradation is specifically at re-establishment after any drop. There is no workaround. This makes the documented Medtronic promise \"Once paired, the pump is remembered \u2014 GlycemicGPT reconnects on its own\" false on iOS, and the docs and in-app copy must say so."
+      },
+      {
+        "capability": "Foreground service (PumpConnectionService) as an execution construct",
+        "why": "iOS has no foreground services, no `startForeground`, no `START_STICKY`, no service restart semantics, and no user-visible ongoing notification that guarantees process survival. There is no object corresponding to PumpConnectionService, so its documented decision \u2014 start the service only once the connection state enters {CONNECTING, AUTHENTICATING, CONNECTED} to avoid `ForegroundServiceDidNotStartInTime` when a phone cannot advertise \u2014 describes a problem that does not exist on iOS.",
+        "closest_alternative": "The `bluetooth-central` and `bluetooth-peripheral` UIBackgroundModes plus CBCentralManager/CBPeripheralManager state preservation and restoration (`CBCentralManagerOptionRestoreIdentifierKey`) give the actual capability the service existed to provide: an indefinite BLE link maintained in the background, with the app relaunched into the background on connect, disconnect, scan match, or characteristic notification, and `willRestoreState` called before the manager reports its state. Restoration resumes Core Bluetooth work only \u2014 it cannot resume arbitrary background processing, so any non-BLE work the service did (backend sync, polling scheduling) must be re-established from within the CB delegate callbacks or scheduled via BGTaskScheduler. Keep the state-based trigger point as the moment to start a Live Activity and register background work."
+      },
+      {
+        "capability": "Wake locks and battery-threshold wake-lock policy (PARTIAL_WAKE_LOCK, 20 min timeout, 15 min renewal, 2 min reconnect lock, release below 5%)",
+        "why": "iOS exposes no wake-lock API of any kind. `UIApplication.isIdleTimerDisabled` only prevents screen dimming in the foreground and does nothing for background CPU. There is no way to hold the AP awake, no `setReferenceCounted`, no renewal loop, and no way to trade battery for reliability. The entire policy \u2014 including the safety-relevant coupling where releasing the lock below 5% battery can silently stop 15 s keep-alive polling against a pump that drops idle links at ~30 s \u2014 has no iOS surface to express.",
+        "closest_alternative": "Rely on Core Bluetooth background mode, which keeps a connected link alive without any app-held resource and wakes the app on incoming notifications \u2014 removing the need for a wake lock for the connection itself. What is genuinely lost is app-scheduled periodic work while backgrounded: iOS will not reliably run a 15 s timer in the background. Restructure keep-alive to be pump-driven (subscribe to a characteristic the pump notifies on) rather than phone-timer-driven wherever the protocol allows, and use BGAppRefreshTask only as an opportunistic watchdog, never as the mechanism data flow depends on. Retain `ProcessInfo.isLowPowerModeEnabled` and `UIDevice.batteryLevel` as inputs to polling cadence, dropping the wake-lock release thresholds entirely."
+      },
+      {
+        "capability": "Permanently visible ongoing notification carrying the alert-floor honesty text",
+        "why": "The Android foreground-service notification is unconditional, permanent, silent, low-importance, undismissable, and always present while the service runs \u2014 and it is the only backgrounded surface stating whether anything is watching for lows and highs, with `lastFloorStatus` caching existing specifically so a redundant service start cannot overwrite \"Alerts degraded \u2014 this phone is NOT watching for lows or highs\" with reassuring copy. iOS has no undismissable persistent notification. Live Activities, the closest construct, are user-dismissable, end after roughly 8 hours of active display, and are removed from the Lock Screen after roughly 12 hours; a standard UNNotification is dismissable and does not persist.",
+        "closest_alternative": "A three-part substitute that preserves the safety property without claiming permanence: (1) a Live Activity on the Lock Screen and Dynamic Island showing pump connection state and alert-floor status while paired, restarted whenever the app runs and its `staleDate` passes; (2) an unconditional in-app status banner on Home carrying the same three floor strings, which is not time-limited; (3) a repeating local notification at `.timeSensitive` interruption level whenever the floor status is FloorNotWatching, so a degraded state cannot go silently unobserved after the Live Activity expires. Whatever is built must never state or imply that alerts are active when the floor status is unknown or degraded \u2014 port the pessimistic-seed and cache-don't-overwrite rules to the new surfaces verbatim."
+      },
+      {
+        "capability": "Guaranteed app relaunch after user termination (START_STICKY + RECEIVE_BOOT_COMPLETED equivalence)",
+        "why": "Android's service is START_STICKY and BootCompletedReceiver restarts it after reboot whenever a pump is paired. On iOS, CB state restoration does relaunch the app into the background after a device reboot once the user unlocks and a matching Bluetooth event occurs \u2014 so the reboot case is covered. What is not covered: if the user force-quits the app from the App Switcher, iOS deliberately suppresses all Core Bluetooth relaunch for that app until the user manually opens it again. No entitlement, background mode, or API changes this.",
+        "closest_alternative": "Configure CBCentralManager and CBPeripheralManager with restore identifiers so reboot and system-eviction relaunch work, and implement `willRestoreState` to re-adopt restored peripherals and re-arm the pending connection. For force-quit there is no technical mitigation \u2014 the only honest response is disclosure: a prominent, permanent statement in Settings, in onboarding, and in the docs that swiping the app away in the App Switcher stops background pump monitoring, plus a detection heuristic (long gap since last successful background wake) that surfaces a Time Sensitive notification the next time the app does run."
+      }
+    ],
+    "ios_requirements": [
+      "The app must let a user reach a dedicated pairing flow from Settings via a pump card that shows current pairing status, offering Pair Pump when unpaired and Re-pair when paired, and must return the user to Settings automatically once the pump reaches the connected state.",
+      "The pairing flow presented must be determined by the active pump driver, supporting both a phone-scans-and-user-enters-a-code flow and a phone-is-discoverable-and-waits flow, and must change live when the user selects a different driver in Settings.",
+      "All pairing screen copy, blurbs, and code-entry instructions must be supplied by the active driver rather than hard-coded to one vendor, so a driver is never described with another vendor's instructions.",
+      "The app must expose a single connection state with the seven states disconnected, scanning, connecting, authenticating, authFailed, connected, and reconnecting, consumed identically by the pairing flow, the home status row, the debug view, the polling gate, and the read gateway.",
+      "During a scan the user must see nearby pumps identified by name and detected model with a live-updating signal strength, ordered strongest-first, with devices removed from the list when they stop advertising, and must be able to stop the scan at any time.",
+      "A scan must stop automatically after a bounded period of no user interaction so the radio is not left running indefinitely when the user leaves the pairing screen open.",
+      "When a scan cannot start, the user must be told which specific condition prevents it \u2014 Bluetooth turned off, Bluetooth permission denied, or Bluetooth unavailable on this device \u2014 rather than the scan silently ending.",
+      "The user must be able to enter a pairing code of 6 to 16 characters with no character-class restriction, no truncation below 16, and no auto-correction or auto-capitalisation, and must be able to edit and resubmit that code after a rejection without re-selecting the pump.",
+      "The user must be told, before the system Bluetooth prompt appears, why the app needs Bluetooth, and if permission is denied must be given a one-tap route into the app's iOS Settings pane, with the denial state clearing automatically when they return with permission granted.",
+      "While the app is connecting or authenticating the user must be able to cancel and return to the previous step, and the app must surface a retry path if the attempt has not resolved within a bounded time.",
+      "When pairing is rejected, the user must be shown which category of failure occurred \u2014 wrong or expired code, pump no longer trusts this phone, secure handshake timed out, pump already paired to another phone, or Bluetooth unavailable \u2014 not a single generic failure message.",
+      "When the pump has removed its pairing information for this phone, the app must present step-by-step instructions to forget the device in iOS Settings and then retry pairing, and must verify recovery afterwards.",
+      "The app must never present the forget-device instruction, or treat a disconnection as a trust failure, when a successful authenticated session has previously been established with that pump and the user has not unpaired.",
+      "Once paired, the app must attempt to reconnect to the pump indefinitely, with no attempt limit and no give-up condition, until the user explicitly unpairs.",
+      "The app must maintain and re-establish the pump connection while backgrounded and while the device is locked, and must resume that connection automatically after the app is evicted by the system or after the device reboots and is unlocked.",
+      "The app must clearly and permanently inform the user that force-quitting the app from the App Switcher stops background pump monitoring until the app is opened again, and must notify the user if a prolonged gap in background activity is detected.",
+      "The user must be able to see current pump connection status from outside the app while paired, on the Lock Screen and Dynamic Island, including whether the phone is currently watching for lows and highs.",
+      "When the app is not watching for lows and highs, that degraded state must be communicated on a surface that does not expire, and the app must never display reassuring alert-status copy when the true status is degraded or unknown.",
+      "For a driver that requires the phone to be discoverable to the pump, the flow must tell the user that the app must remain open and on screen while waiting, and must state that reconnection after a drop also requires reopening the app.",
+      "The user must be warned before pairing that a pump connects to only one phone at a time and that the pump must be removed from the manufacturer's official app first, on both the pairing screen and the Settings pump card.",
+      "Unpairing must have one behaviour regardless of where it is initiated: cancel the connection, stop any advertising, erase that driver's stored credentials, end any external status display, and then instruct the user to complete removal in iOS Settings.",
+      "Unpairing must require an explicit confirmation before it takes effect.",
+      "Pairing credentials must be readable by the app while the device is locked so overnight reconnection works, must not leave the device, and must not be restored onto a different device.",
+      "Credentials for one pump driver must be isolated from every other driver, so selecting a different driver never overwrites or exposes another driver's pairing.",
+      "The app must never display a raw device identifier as the user-facing name of a paired pump; it must identify the pump by name and model.",
+      "A failed reconnection or authentication that occurs while the user is not on the pairing screen must be surfaced to the user rather than being silently absorbed.",
+      "The connection status shown on the home screen must be tappable when pairing has failed, taking the user directly to the pairing flow.",
+      "The app must present a background-monitoring health check in Settings covering notification authorization, Bluetooth authorization, Low Power Mode, Background App Refresh, and force-quit status, with a route to resolve each.",
+      "A maintainer must be able to exercise every pairing state, every failure mode, and the full reconnection lifecycle in the iOS Simulator through a simulated pump driver, without Bluetooth hardware.",
+      "A maintainer must be able to capture a real pairing and reconnection session on physical hardware and replay it as an automated regression test.",
+      "The watch app must expose no pairing, scanning, code entry, or unpairing capability, and must display forwarded pump connection status only.",
+      "The app must state in-product and in documentation which pump drivers are validated against physical hardware on iOS and which are unvalidated, and must not present an unvalidated driver as production-ready."
+    ],
+    "risks": [
+      {
+        "risk": "Medtronic advertise-and-wait pairing may be entirely unimplementable on iOS. The pump's advertiser matcher was reverse-engineered against an advertisement carrying the 'Mobile NNNNNN' name in manufacturer data under company 0x01F9, and iOS cannot advertise manufacturer data at all. If the pump does not also accept the GAP Complete Local Name that iOS emits, there is no workaround available to a third-party app, and the parity goal of 'every supported device' cannot be met.",
+        "severity": "critical",
+        "mitigation": "Treat this as a spike that must run before any Medtronic iOS work is scheduled: build a minimal CBPeripheralManager advertising the 0xFE82 service plus a local name and test against a physical MiniMed pump. Neither the lead developer nor Daniel has one, so sourcing hardware or a community tester is a prerequisite. Sequence Tandem first and gate Medtronic on the spike result."
+      },
+      {
+        "risk": "Even if Medtronic first-pair works, Medtronic reconnection after any disconnect requires the app to be in the foreground with the screen on, because iOS strips the local name and hides service UUIDs in an iOS-only overflow area when advertising in the background. The shipped promise that the pump reconnects on its own is false on iOS, and a Medtronic user loses monitoring silently whenever the app is not open.",
+        "severity": "critical",
+        "mitigation": "If Medtronic ships on iOS at all, it must ship with explicit in-app and documented disclosure of foreground-only reconnection, a persistent reconnect-needed notification when a paired Medtronic pump has been disconnected past a threshold, and a clear statement that the driver is not suitable as a sole monitoring path."
+      },
+      {
+        "risk": "Bond removal is impossible on iOS, so all three Tandem trust-failure recovery paths become manual user procedures. A user who does not follow the Settings \u2192 Forget This Device instruction is left permanently unable to re-pair, with no data and a screen that keeps saying pairing failed.",
+        "severity": "high",
+        "mitigation": "Make the remediation flow blocking and instrumented: detect `CBError.peerRemovedPairingInformation` and the three-zero-response condition, present numbered steps with an Open Settings deep link, and verify recovery by attempting a fresh connection afterwards. Add a Time Sensitive notification if the condition persists past a threshold so the user is not waiting on a screen they never open."
+      },
+      {
+        "risk": "Porting the Tandem two-phase backoff literally onto iOS would replace a strictly better native primitive (an indefinite, kernel-serviced pending connection that costs the app nothing and survives termination) with connect/cancel churn that drains battery and can miss reconnection windows while the app is suspended.",
+        "severity": "high",
+        "mitigation": "Explicitly specify the pending-connect model in the architecture and add a code-review rule forbidding attempt caps, give-up conditions, and app-scheduled reconnect timers in the connection layer. Preserve the counters for diagnostics only, exactly as Android does with consecutiveReconnectFailures."
+      },
+      {
+        "risk": "The alert-floor honesty text loses its permanence guarantee. Live Activities are user-dismissable and expire after roughly 8 hours active and 12 hours on the Lock Screen, so a degraded 'NOT watching for lows or highs' state can silently disappear from every out-of-app surface overnight \u2014 the exact window the app exists to cover.",
+        "severity": "high",
+        "mitigation": "Do not rely on the Live Activity alone. Pair it with a non-expiring in-app banner and a repeating Time Sensitive local notification whenever the floor status is degraded, and port the pessimistic-seed and never-overwrite-an-honest-degraded-status rules to every new surface."
+      },
+      {
+        "risk": "Critical Alerts entitlement is effectively unobtainable under the fork-and-build distribution model. `com.apple.developer.usernotifications.critical-alerts` requires per-Team-ID approval from Apple, and every user builds under their own Apple Developer account. A pairing or connection failure therefore cannot break through Focus or a silenced ringer.",
+        "severity": "high",
+        "mitigation": "Design for `.timeSensitive` interruption level, which requires only an entitlement any developer can enable with no approval, and document plainly that alerts respect Do Not Disturb and the ringer switch. Do not build any flow that assumes critical alerts are available."
+      },
+      {
+        "risk": "The entire subsystem is unverifiable by the lead developer. Core Bluetooth is absent from the Simulator, he has no iPhone and no Apple Watch, and the single hardware validator has a Tandem pump only. Regressions in pairing, reconnection, and bond-loss handling could ship undetected.",
+        "severity": "high",
+        "mitigation": "Make the BLE seam a first-class architectural requirement: a transport protocol with a scriptable fake driver that can produce every connection state and every fault in the Simulator, plus record/replay of real hardware sessions as regression fixtures. Treat any code path only reachable through real CB objects as needing an explicit hardware sign-off checklist item."
+      },
+      {
+        "risk": "Choosing the wrong Keychain accessibility class silently breaks overnight reconnection. `kSecAttrAccessibleWhenUnlocked` would make pairing credentials unreadable while the device is locked, so background reconnects would fail in exactly the scenario that matters most, and would fail quietly rather than visibly.",
+        "severity": "high",
+        "mitigation": "Mandate `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` for all pairing credentials, add a unit test asserting the attribute on every stored item, and add a hardware test step that locks the device, disconnects the pump, and verifies reconnection while locked."
+      },
+      {
+        "risk": "The MAC-to-CBPeripheral.identifier substitution can fail to round-trip. The identifier is not stable across app reinstalls or across devices, and can change for a peripheral that is not yet bonded, which would present as a pump that was paired yesterday being unfindable today.",
+        "severity": "medium",
+        "mitigation": "Store a composite identity (CB identifier plus last advertised local name plus last-seen time) and, when `retrievePeripherals(withIdentifiers:)` returns nothing, fall back to a service-filtered scan that matches the stored name and re-binds the identity silently. Cover this with an explicit reinstall-and-recover test on hardware."
+      },
+      {
+        "risk": "Force-quit permanently disables Core Bluetooth relaunch for the app until it is manually reopened. Users routinely swipe apps away, and this failure mode is invisible: the app simply stops monitoring with no notification, no badge, and no system indication.",
+        "severity": "medium",
+        "mitigation": "Disclose it prominently in onboarding, Settings, and the docs; record the last successful background wake and surface a Time Sensitive catch-up notification when the app next runs after an anomalous gap; keep the Live Activity present while paired so its disappearance is itself a visible signal."
+      },
+      {
+        "risk": "TestFlight builds expire after 90 days, so under the fork-and-build model every user must re-run the pipeline quarterly or the monitoring app stops launching. Pairing state survives, but the app does not.",
+        "severity": "medium",
+        "mitigation": "Warn in-app starting roughly two weeks before build expiry with the exact rebuild steps, and document the expiry cadence alongside the pairing instructions so users do not discover it during a monitoring gap. Consider a scheduled GitHub Actions workflow in the fork template that rebuilds and uploads automatically."
+      },
+      {
+        "risk": "The lost ability to request MTU 185 and high connection priority means the Tandem link runs at whatever parameters iOS negotiates. If the negotiated MTU is smaller than the protocol's packetisation assumes, or the connection interval is longer than the pump's idle timeout tolerates, symptoms will look like protocol bugs rather than link-configuration issues.",
+        "severity": "medium",
+        "mitigation": "Read `maximumWriteValueLength(for:)` after connection and assert it meets the protocol minimum, failing loudly with a diagnostic rather than proceeding. Log negotiated link parameters in the debug view so a hardware validator can report them, and confirm keep-alive cadence against the pump's roughly 30-second idle-link drop on real hardware."
+      },
+      {
+        "risk": "The two divergent Android unpair paths, if ported as-is, are worse on iOS: the weaker Settings path would leave an orphaned pending connection registered with the OS, a Live Activity running, and a bond that the app can never remove, while the user believes the pump is disconnected.",
+        "severity": "medium",
+        "mitigation": "Specify one canonical unpair operation invoked from both entry points, with confirmation and the Forget This Device follow-through, and add a test asserting that after unpair there is no pending connection, no advertising, no stored credentials, and no active Live Activity."
+      }
+    ],
+    "questions_for_pm": [
+      "Given that Medtronic advertise-and-wait pairing on iOS cannot reproduce the manufacturer-data advertisement the pump's matcher was reverse-engineered against, and that even in the best case iOS makes background re-advertising invisible to the pump \u2014 meaning Medtronic reconnection would require the user to open the app and keep it on screen \u2014 does iOS ship Medtronic at all? The options are: (a) ship it as an explicitly foreground-only, manually-reconnected BETA driver with prominent disclosure, accepting that it is not a safe sole monitoring path; (b) hold Medtronic off iOS until the GAP-local-name spike passes on physical hardware, and ship Tandem-only in the interim; or (c) drop Medtronic from iOS permanently and state that device parity with Android is not achievable on this platform. This is a scope and patient-safety-communication decision that cannot be resolved from the Android repo or from Apple's platform rules."
+    ]
+  }
+}

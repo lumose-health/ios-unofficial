@@ -1,0 +1,1019 @@
+{
+  "key": "pump-driver-api",
+  "label": "Pump driver API and safety model",
+  "map": {
+    "subsystem": "Pump driver API and safety model (`plugins/pump-driver-api` = Gradle module `:pump-driver-api`, namespace `com.glycemicgpt.mobile.pump.api`) plus the `plugins/example` reference driver, and the platform-side enforcement in `:app` that the API contracts depend on (PluginRegistry, PluginEventBusImpl, RestrictedPluginContext, DexPluginLoader, SafetyLimitsStore, legacy adapters).",
+    "capabilities": [
+      {
+        "name": "Plugin base interface + lifecycle contract",
+        "behavior": "`interface Plugin`: vals `metadata: PluginMetadata`, `capabilities: Set<PluginCapability>`; methods `initialize(PluginContext)`, `shutdown()`, `onActivated()`, `onDeactivated()`, `settingsDescriptor(): PluginSettingsDescriptor`, `observeDashboardCards(): Flow<List<DashboardCardDescriptor>>`, `<T: PluginCapabilityInterface> getCapability(KClass<T>): T?`, plus two defaulted members: `observeDetailScreen(cardId): Flow<DetailScreenDescriptor>?` (default null) and `onDetailAction(cardId, actionKey)` (default no-op). Documented order: initialize once after factory creation (store context, no heavy work); onActivated when user selects it (start polling/auto-reconnect); onDeactivated when replaced/deactivated (stop work, KEEP credentials/settings); shutdown on destroy (release everything). Threading: lifecycle methods run on main thread and are serialized per-plugin by the registry lock; capability methods may be invoked from background dispatchers; settingsDescriptor/observeDashboardCards may be called on the UI thread.",
+        "user_visible": false,
+        "key_files": [
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/plugin/Plugin.kt",
+          "docs/dev/plugin-architecture.md"
+        ],
+        "edge_cases": [
+          "initialize() throws -> plugin skipped entirely, never appears in available list, settings store entry removed",
+          "onActivated() throws -> activation fails, plugin stays inactive, Result.failure returned",
+          "onDeactivated() throws -> logged, deactivation continues anyway",
+          "shutdown() throws -> logged; registry only calls shutdown() on runtime-plugin removal, never for compile-time plugins"
+        ]
+      },
+      {
+        "name": "DevicePlugin (hardware) extension",
+        "behavior": "`interface DevicePlugin : Plugin` adds `observeConnectionState(): StateFlow<ConnectionState>`; `connect(address: String, config: Map<String,String> = emptyMap())`; `disconnect()`; `scan(): Flow<DiscoveredDevice>`; and two defaulted members: `val pairingProfile: PairingProfile` (default `PairingProfile()` = CENTRAL_SCAN, advertisedName null) and `observePairingFault(): Flow<PairingFault?>` (default `flowOf(null)`). Contract in KDoc: connect MUST enforce a timeout, typically 30 seconds, and must not block indefinitely; disconnect must be a safe no-op when not connected; scan's flow completes when scanning ends (typically a timeout) and collectors cancel to stop early. `config` is a free-form string map; the platform adapter passes `\"pairingCode\"` (Tandem) and drivers may define their own (Medtronic reads `config[\"forceFirstPair\"].toBoolean()`).",
+        "user_visible": true,
+        "key_files": [
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/plugin/DevicePlugin.kt",
+          "plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/plugin/TandemDevicePlugin.kt",
+          "plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/plugin/MedtronicDevicePlugin.kt"
+        ],
+        "edge_cases": [
+          "The 30s connect timeout is a documented convention only \u2014 nothing in the API enforces it",
+          "Medtronic ignores `address` entirely (phone is the peripheral); scan() emits a DiscoveredDevice only when a pump connects inbound"
+        ]
+      },
+      {
+        "name": "ConnectionState machine",
+        "behavior": "`enum ConnectionState { DISCONNECTED, SCANNING, CONNECTING, AUTHENTICATING, AUTH_FAILED, CONNECTED, RECONNECTING }` (declared in PumpModels.kt). Nominal central-scan path: DISCONNECTED -> SCANNING (scan()) -> CONNECTING (connect()) -> AUTHENTICATING -> CONNECTED; auth rejection -> AUTH_FAILED; link loss from CONNECTED -> RECONNECTING -> CONNECTING/CONNECTED, or -> DISCONNECTED on give-up/explicit disconnect(). The enum itself encodes no transition table \u2014 each driver's connection manager owns transitions; the API only guarantees the state names and that the flow is a StateFlow (always has a current value). Advertise-and-wait plugins may never emit SCANNING and can stall without any transition at all, which is exactly why PairingFault exists as a parallel channel.",
+        "user_visible": true,
+        "key_files": [
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/model/PumpModels.kt"
+        ],
+        "edge_cases": [
+          "AUTH_FAILED is terminal-ish: no automatic path back without a new connect()",
+          "PumpDriverAdapter/PumpConnectionAdapter substitute DISCONNECTED whenever there is no active pump plugin"
+        ]
+      },
+      {
+        "name": "PluginCapability enum and cardinality rules",
+        "behavior": "Seven values: GLUCOSE_SOURCE, INSULIN_SOURCE, PUMP_STATUS, BGM_SOURCE, CALIBRATION_TARGET, DATA_SYNC, BOLUS_CATEGORY_PROVIDER. `SINGLE_INSTANCE = {GLUCOSE_SOURCE, INSULIN_SOURCE, PUMP_STATUS, CALIBRATION_TARGET, BOLUS_CATEGORY_PROVIDER}` (max 1 active each); `MULTI_INSTANCE = {BGM_SOURCE, DATA_SYNC}` (many active). A companion `init` block runs `check(SINGLE_INSTANCE + MULTI_INSTANCE == entries.toSet())` and throws at class-load time listing any capability missing from both sets \u2014 an exhaustiveness guard that must be reproduced in Swift (e.g. a unit test or static assertion, since Swift has no enum-companion init). Capability declaration is purely the `Set<PluginCapability>` a plugin returns; the platform never introspects the driver otherwise. DATA_SYNC has NO capability interface yet \u2014 reserved, currently not implementable.",
+        "user_visible": false,
+        "key_files": [
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/plugin/PluginCapability.kt"
+        ],
+        "edge_cases": [
+          "A plugin can declare a capability and return null from getCapability for it (the demo plugin does exactly this for DATA_SYNC) \u2014 declaration and implementation are not cross-checked"
+        ]
+      },
+      {
+        "name": "Typed capability lookup (getCapability + as* helpers)",
+        "behavior": "`PluginCapabilityInterface` is an empty marker; every capability interface extends it. Lookup is `getCapability(type: KClass<T>): T?`, implemented in each driver as a `when(type)` over `GlucoseSource::class`/`InsulinSource::class`/`PumpStatus::class`/`BgmSource::class`/`CalibrationTarget::class`/`BolusCategoryProvider::class` returning `delegate as? T`, else null. Six extension functions on Plugin provide the sugar: `asGlucoseSource()`, `asInsulinSource()`, `asPumpStatus()`, `asBgmSource()`, `asCalibrationTarget()`, `asBolusCategoryProvider()`. Canonical implementation pattern: capability delegates are constructed in the plugin's constructor or `initialize()` as thin adapters over the BLE layer, keeping the plugin class limited to lifecycle + UI descriptors.",
+        "user_visible": false,
+        "key_files": [
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/plugin/PluginCapabilityInterface.kt",
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/plugin/Plugin.kt"
+        ],
+        "edge_cases": [
+          "Kotlin KClass dispatch relies on unchecked casts (`@Suppress(\"UNCHECKED_CAST\")`); a Swift port needs a protocol-witness/type-keyed map instead",
+          "Requesting a capability the plugin declared but did not implement returns null, not an error"
+        ]
+      },
+      {
+        "name": "PluginMetadata and PLUGIN_API_VERSION",
+        "behavior": "`const val PLUGIN_API_VERSION = 5` in PluginMetadata.kt. Documented history in the same comment: v3 renamed `BasalReading.controlIqMode` -> `activityMode` (PumpActivityMode enum); v4 added `BolusEvent.category` + the BolusCategoryProvider capability; v5 added the `getFullHistoryLogs()` overload to PumpDriver and PumpStatus. `data class PluginMetadata(id, name, version, apiVersion, description=\"\", author=\"\", iconResName: String?=null, protocolName: String?=null)`. Convention: `protocolName` + `version` render as e.g. \"Tandem v1.0.0\"; the plugin `version` doubles as the BLE-protocol version \u2014 there is deliberately no separate protocol-versioning infrastructure. Plugin IDs are reverse-domain and must match `^[a-zA-Z][a-zA-Z0-9._-]{1,127}$`. Bump the API version for breaking changes to Plugin/DevicePlugin, capability interfaces, PluginContext params, PluginEvent variants, SettingDescriptor/CardElement variants; additive changes do not require a bump.",
+        "user_visible": false,
+        "key_files": [
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/plugin/PluginMetadata.kt",
+          "docs/dev/plugin-architecture.md"
+        ],
+        "edge_cases": [
+          "docs/dev/plugin-architecture.md is stale: it says PLUGIN_API_VERSION is `2` (and the example README/plugin.json say `1`) while code says 5. The example plugin's META-INF/plugin.json declares apiVersion 1 and would therefore be REJECTED by DexPluginLoader today, even though DemoGlucometerFactory's Kotlin metadata uses PLUGIN_API_VERSION."
+        ]
+      },
+      {
+        "name": "PluginFactory and dual discovery",
+        "behavior": "`interface PluginFactory { val metadata: PluginMetadata; fun create(context: PluginContext): Plugin }`. Metadata must be available before instantiation so Settings can list plugins without creating them. Two discovery paths: (a) compile-time \u2014 factory is `@Singleton class X @Inject constructor(...)` bound via Hilt `@Binds @IntoSet` into `Set<PluginFactory>`, may inject dependencies (TandemPluginFactory injects BleConnectionManager, TandemBleDriver, BleScanner, TandemHistoryLogParser); (b) runtime \u2014 factory needs a public no-arg constructor and is instantiated reflectively from a sideloaded DEX JAR; it cannot use DI. The platform, not the factory, calls `plugin.initialize(context)` \u2014 `create()` receives the context but is expected to just build the instance. Tandem/Medtronic share one `METADATA` val between plugin and factory to avoid drift.",
+        "user_visible": false,
+        "key_files": [
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/plugin/PluginFactory.kt",
+          "plugins/example/src/main/java/com/example/glycemicgpt/plugin/DemoGlucometerFactory.kt",
+          "plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/plugin/TandemPluginFactory.kt"
+        ],
+        "edge_cases": [
+          "PluginRegistry calls both `factory.create(ctx)` and `plugin.initialize(ctx)` with the SAME context instance"
+        ]
+      },
+      {
+        "name": "PluginContext (driver-facing platform services)",
+        "behavior": "`class PluginContext(androidContext: Context, pluginId: String, settingsStore: PluginSettingsStore, credentialProvider: PumpCredentialProvider, debugLogger: DebugLogger, eventBus: PluginEventBus, safetyLimits: StateFlow<SafetyLimits>, apiVersion: Int)`. `safetyLimits` is explicitly documented as a read-only constraint plugins must respect; drivers must read `.value` on every validation pass so backend updates apply immediately (rather than caching it at initialize()). `apiVersion` is always set to the platform's PLUGIN_API_VERSION. For compile-time plugins `androidContext` is the full Application context; for runtime plugins it is a restricted ContextWrapper (see sandbox capability). PluginContext is a plain class (not data class) \u2014 no equality/copy semantics relied upon.",
+        "user_visible": false,
+        "key_files": [
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/plugin/PluginContext.kt",
+          "app/src/main/java/com/glycemicgpt/mobile/plugin/PluginRegistry.kt"
+        ],
+        "edge_cases": [
+          "The StateFlow instance is shared across all plugins \u2014 the registry mutates one `_safetyLimits` MutableStateFlow"
+        ]
+      },
+      {
+        "name": "PluginSettingsStore (driver-facing key-value settings)",
+        "behavior": "Interface with paired getters/setters for four types, each getter taking a default: `getString(key, default=\"\")/putString`, `getBoolean(key, default=false)/putBoolean`, `getInt(key, default=0)/putInt`, `getFloat(key, default=0f)/putFloat`, plus `remove(key)`. Implementation `PluginSettingsStoreImpl` is backed by `SharedPreferences(\"plugin_settings_$pluginId\", MODE_PRIVATE)` and writes with `.apply()` (async commit; documented to callers as immediate/synchronous). Documented behaviors: settings survive deactivation and app updates, are namespaced per plugin ID, and are wiped on app uninstall; removing a runtime plugin explicitly calls `context.deleteSharedPreferences(\"plugin_settings_$pluginId\")`. KDoc directs sensitive credentials to PumpCredentialProvider instead. The platform auto-persists values for Toggle/Slider/Dropdown/TextInput settings; ActionButton clicks are surfaced by the platform writing a timestamp to the button's key.",
+        "user_visible": false,
+        "key_files": [
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/plugin/PluginSettingsStore.kt",
+          "app/src/main/java/com/glycemicgpt/mobile/plugin/PluginSettingsStoreImpl.kt"
+        ],
+        "edge_cases": [
+          "No type migration: reading a key with the wrong typed getter throws ClassCastException from SharedPreferences",
+          "Demo plugin uses the settings store as an ad-hoc IPC channel for detail-screen text input (reads KEY_DETAIL_BG_VALUE, then clears it)"
+        ]
+      },
+      {
+        "name": "PumpCredentialProvider (driver-facing secret storage)",
+        "behavior": "Interface: `getPairedAddress(): String?`, `getPairingCode(): String?`, `isPaired(): Boolean`, `savePairing(address, pairingCode)`, `clearPairing()`, `saveJpakeCredentials(derivedSecretHex, serverNonceHex)`, `getJpakeDerivedSecret(): String?`, `getJpakeServerNonce(): String?`, `clearJpakeCredentials()`. Compile-time plugins get the app-wide implementation backed by EncryptedSharedPreferences. Runtime plugins get `ScopedCredentialProvider`, an isolated plain `SharedPreferences(\"plugin_creds_${sanitizeId(pluginId)}\")` with keys `paired_address`, `pairing_code`, `jpake_derived_secret`, `jpake_server_nonce`; `sanitizeId` replaces `[^a-zA-Z0-9._-]` with `_` (deliberately preserving dots/hyphens/underscores so `com.foo.bar-baz` and `com.foo.bar.baz` stay distinct). `isPaired()` is defined as `prefs.contains(paired_address)`.",
+        "user_visible": false,
+        "key_files": [
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/pump/PumpCredentialProvider.kt",
+          "app/src/main/java/com/glycemicgpt/mobile/plugin/RestrictedPluginContext.kt"
+        ],
+        "edge_cases": [
+          "Documented decision: runtime plugins deliberately use UNencrypted SharedPreferences because they cannot access AndroidX Security; stated revisit trigger is 'if the threat model changes to include adversarial plugins, migration to EncryptedSharedPreferences is required'",
+          "Credentials readable via run-as on rooted/debug devices \u2014 accepted under the current trust model"
+        ]
+      },
+      {
+        "name": "DebugLogger (BLE packet tracing)",
+        "behavior": "Interface with a nested `enum Direction { TX, RX }` and two methods: `logPacket(direction, opcode: Int, opcodeName: String, txId: Int, cargoHex: String, cargoSize: Int, parsedValue: String? = null, error: String? = null)` and `updateLastPacket(opcode, direction, parsedValue = null, error = null)` (for late-arriving parse results/errors on an already-logged packet). Security requirement in KDoc: implementations MUST retain raw packet data (cargoHex, parsedValue) only in debug/development builds and MUST never persist it to unencrypted storage, because these fields carry glucose readings, insulin doses and device identifiers. `HexUtils.toSpacedHex()` (`ByteArray.joinToString(\" \") { \"%02x\".format(it.toInt() and 0xFF) }`) produces the canonical lowercase space-separated hex string used for cargoHex.",
+        "user_visible": false,
+        "key_files": [
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/pump/DebugLogger.kt",
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/pump/HexUtils.kt"
+        ],
+        "edge_cases": [
+          "Runtime plugins get full unrestricted access to debugLogger"
+        ]
+      },
+      {
+        "name": "SafetyLimits value type and hard bounds",
+        "behavior": "`data class SafetyLimits(minGlucoseMgDl: Int = 20, maxGlucoseMgDl: Int = 500, maxBasalRateMilliunits: Int = 15_000, maxBolusDoseMilliunits: Int = 25_000)`. Constants: DEFAULT_MIN_GLUCOSE=20, DEFAULT_MAX_GLUCOSE=500, DEFAULT_MAX_BASAL_MILLIUNITS=15_000 (15 U/hr, Tandem hardware max), DEFAULT_MAX_BOLUS_MILLIUNITS=25_000 (25 U single dose); the four ABSOLUTE_* constants are aliases of the DEFAULT_* values, so today defaults == absolute ceilings. The `init` block throws IllegalArgumentException unless: minGlucoseMgDl >= 20; maxGlucoseMgDl <= 500; minGlucoseMgDl < maxGlucoseMgDl; maxBasalRateMilliunits in 1..15_000; maxBolusDoseMilliunits in 1..25_000. Backend/user configuration may only NARROW the range, never widen it. Basal/bolus limits are in milliunits (integer); BolusEvent/BasalReading carry Float units \u2014 a \u00d71000 scale difference the port must preserve.",
+        "user_visible": false,
+        "key_files": [
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/pump/SafetyLimits.kt",
+          "plugins/pump-driver-api/src/test/java/com/glycemicgpt/mobile/domain/pump/SafetyLimitsTest.kt",
+          "docs/contract/safety-constants.md"
+        ],
+        "edge_cases": [
+          "min==max is rejected (strict <)",
+          "19, -1, 501, basal 0 or 15_001, bolus 0 or 25_001 all throw",
+          "Documented revisit trigger: absolute bounds are Tandem-derived; OmniPod/Medtronic hardware with different physical limits may require revisiting the constants"
+        ]
+      },
+      {
+        "name": "SafetyLimits.safeOf() lenient factory",
+        "behavior": "`safeOf(min=20, max=500, basal=15_000, bolus=25_000): SafetyLimits` clamps instead of throwing, for untrusted/backend input where a crash is worse than clamped values. Order matters: `clampedMin = min.coerceIn(20, 499)` (ABSOLUTE_MAX_GLUCOSE - 1); `clampedMax = max.coerceIn(clampedMin + 1, 500)`; `clampedBasal = basal.coerceIn(1, 15_000)`; `clampedBolus = bolus.coerceIn(1, 25_000)`. Consequence encoded in tests: `safeOf(min=450, max=300)` yields (450, 451) \u2014 the min wins and the max is pushed up, it does NOT swap them. `safeOf(bolus=0)` yields 1. The strict constructor is intentionally kept for programmatic callers; safeOf is the only path used for external data.",
+        "user_visible": false,
+        "key_files": [
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/pump/SafetyLimits.kt",
+          "plugins/pump-driver-api/src/test/java/com/glycemicgpt/mobile/domain/pump/SafetyLimitsTest.kt"
+        ],
+        "edge_cases": [
+          "safeOf can silently produce a 1 mg/dL-wide valid window (450..451) from nonsensical config \u2014 no warning is logged"
+        ]
+      },
+      {
+        "name": "SafetyLimitsStore (backend sync + staleness)",
+        "behavior": "`SharedPreferences(\"safety_limits\")` with keys min_glucose, max_glucose, max_basal, max_bolus, last_fetched_ms; each getter falls back to the corresponding SafetyLimits DEFAULT_*. `updateAll(min,max,basal,bolus)` runs values through `SafetyLimits.safeOf(...)` BEFORE persisting (so even direct property reads are safe) and writes all five keys plus `System.currentTimeMillis()` in one `.commit()` (synchronous). `clear()` commits a full wipe (called on logout). `isStale(maxAgeMs = STALE_THRESHOLD_MS)` where `STALE_THRESHOLD_MS = 3_600_000L` (1 hour) returns `now - lastFetchedMs > maxAge`. `toSafetyLimits()` re-clamps via safeOf. Explicit rule in KDoc: the mobile app NEVER allows local override of safety limits \u2014 only updateAll from backend sync. `PluginRegistry.refreshSafetyLimits()` re-reads the store, pushes the new value into the shared StateFlow, and publishes SafetyLimitsChanged.",
+        "user_visible": false,
+        "key_files": [
+          "app/src/main/java/com/glycemicgpt/mobile/data/local/SafetyLimitsStore.kt",
+          "app/src/main/java/com/glycemicgpt/mobile/plugin/PluginRegistry.kt"
+        ],
+        "edge_cases": [
+          "lastFetchedMs defaults to 0 so a never-synced install is always stale",
+          "Nothing blocks readings when limits are stale \u2014 staleness is informational at this layer"
+        ]
+      },
+      {
+        "name": "CgmReading model and validation",
+        "behavior": "`data class CgmReading(glucoseMgDl: Int, trendArrow: CgmTrend, timestamp: Instant)` with `init { require(glucoseMgDl in MIN_MG_DL..MAX_MG_DL) }` where `MIN_MG_DL = 20`, `MAX_MG_DL = 500` \u2014 constructing an out-of-range reading throws IllegalArgumentException, so the type itself is a validity proof. Storage unit is mg/dL everywhere; mmol/L is display-only (\u00f7 18.0156, round last) and lives outside this module. `enum CgmTrend { DOUBLE_UP, SINGLE_UP, FORTY_FIVE_UP, FLAT, FORTY_FIVE_DOWN, SINGLE_DOWN, DOUBLE_DOWN, UNKNOWN }` \u2014 8 values, no numeric mapping in the SDK; each driver maps its own wire encoding. There is no staleness field on the reading: freshness is derived from `timestamp` by consumers.",
+        "user_visible": true,
+        "key_files": [
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/model/PumpModels.kt",
+          "docs/contract/safety-constants.md"
+        ],
+        "edge_cases": [
+          "A throwing constructor means a parser that fails to pre-filter will crash the coroutine rather than drop the record \u2014 extract* implementations must filter before constructing",
+          "20..500 is duplicated across ~15 sites and guarded by app/src/test/.../SafetyConstantDriftGuardTest.kt; plugins/example is a documented exclusion from that guard"
+        ]
+      },
+      {
+        "name": "BgmReading model and validation",
+        "behavior": "`data class BgmReading(glucoseMgDl: Int, timestamp: Instant, meterName: String? = null)` with `init { require(glucoseMgDl in 20..500) }` \u2014 the bound is an inline literal here, not a reference to SafetyLimits or CgmReading constants (a known duplication site listed in the cross-repo drift doc). `meterName` is free-form and used for display/provenance (the demo sets \"Demo Glucometer\" and \"Demo Glucometer (manual)\"). No trend arrow \u2014 fingersticks are point measurements. BGM_SOURCE is multi-instance so multiple meters can be active at once and readings from different meters are distinguished only by `meterName` and the publishing `pluginId` on the event.",
+        "user_visible": true,
+        "key_files": [
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/model/BgmReading.kt"
+        ],
+        "edge_cases": [
+          "Validation is against the hardcoded 20..500, NOT against the user's narrower configured SafetyLimits \u2014 narrowing is the driver's job before construction"
+        ]
+      },
+      {
+        "name": "BolusEvent model and hard 25 U cap",
+        "behavior": "`data class BolusEvent(units: Float, isAutomated: Boolean, isCorrection: Boolean, correctionUnits: Float = 0f, mealUnits: Float = 0f, source: String = \"\", category: String = \"\", timestamp: Instant)`. `init` requires each of units, correctionUnits, mealUnits to be >= 0f and <= `MAX_BOLUS_UNITS = 25f` (hard cap: Tandem hardware max 25 U). Documented semantics: `units` is the ACTUAL delivered total from pump hardware, while correctionUnits/mealUnits are the REQUESTED breakdown, and they may not sum to `units` because (1) partial delivery from occlusion or user cancel means delivered < requested, (2) the Tandem status response (opcode 0x30) carries no breakdown so both are 0, and (3) automated boluses set mealUnits=0 regardless of the correction portion. `category` is the pump-specific string mapped through BolusCategoryProvider.",
+        "user_visible": true,
+        "key_files": [
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/model/PumpModels.kt"
+        ],
+        "edge_cases": [
+          "Two independent bolus caps exist and can disagree: the type-level 25f (units) and SafetyLimits.maxBolusDoseMilliunits (default 25_000 mU, user-narrowable). Drivers must apply the SafetyLimits one; the type cap is the backstop.",
+          "Displaying correctionUnits + mealUnits as if it equals the delivered dose would be a dosing-display bug"
+        ]
+      },
+      {
+        "name": "Remaining domain models (insulin, status, history, hardware)",
+        "behavior": "`IoBReading(iob: Float, timestamp: Instant)`. `BasalReading(rate: Float, isAutomated: Boolean, activityMode: PumpActivityMode, timestamp: Instant)`. `enum PumpActivityMode { NONE, SLEEP, EXERCISE }` \u2014 documented as a pump-level feature independent of Control-IQ automation, present on all Tandem pumps; `typealias ControlIqMode = PumpActivityMode` remains as a @Deprecated backwards-compat alias. `PumpSettings(firmwareVersion, serialNumber, modelNumber: String)`. `BatteryStatus(percentage: Int, isCharging: Boolean, timestamp)`. `ReservoirReading(unitsRemaining: Float, timestamp)`. `HistoryLogRange(firstSeq: Int, lastSeq: Int)` \u2014 from HistoryLogStatusResponse opcode 59; sequences are unsigned 32-bit on the wire, stored as signed Int, documented safe because current pumps sit near ~1.3M vs Int.MAX 2_147_483_647. `HistoryLogRecord(sequenceNumber: Int, rawBytesB64: String, eventTypeId: Int, pumpTimeSeconds: Long)`. `PumpHardwareInfo(serialNumber, modelNumber, partNumber: Long, pumpRev: String, armSwVer, mspSwVer, configABits, configBBits, pcbaSn: Long, pcbaRev: String, pumpFeatures: Map<String,Boolean>)`.",
+        "user_visible": true,
+        "key_files": [
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/model/PumpModels.kt"
+        ],
+        "edge_cases": [
+          "None of these carry validation requires \u2014 only CgmReading, BgmReading and BolusEvent do",
+          "HistoryLogRecord holds raw bytes as Base64 text, so parsing is deferred to the driver's extract* methods"
+        ]
+      },
+      {
+        "name": "GlucoseSource capability",
+        "behavior": "`interface GlucoseSource : PluginCapabilityInterface { fun observeReadings(): Flow<CgmReading>; suspend fun getCurrentReading(): Result<CgmReading> }`. Single-instance (GLUCOSE_SOURCE). Both shipped drivers implement observeReadings identically as a polling cold flow: `while(true) { source.getCgmReading().onSuccess { emit(it) }; delay(POLL_INTERVAL_MS) }` with `POLL_INTERVAL_MS = 60_000L` (60 s) in both TandemGlucoseSource and MedtronicGlucoseSource. Failures are swallowed \u2014 `onSuccess` only, so a failed poll emits nothing and the loop simply waits another 60 s. Medtronic's KDoc notes the real-time stream is polling, not pump-pushed, and that cadence ownership is planned to move to the polling orchestrator in Milestone D.",
+        "user_visible": true,
+        "key_files": [
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/plugin/capabilities/GlucoseSource.kt",
+          "plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/plugin/TandemGlucoseSource.kt",
+          "plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/plugin/MedtronicGlucoseSource.kt"
+        ],
+        "edge_cases": [
+          "A silently-failing poll is indistinguishable from 'no new reading' \u2014 staleness must be inferred from CgmReading.timestamp downstream",
+          "The flow never terminates; it only ends on collector cancellation"
+        ]
+      },
+      {
+        "name": "InsulinSource capability",
+        "behavior": "`interface InsulinSource : PluginCapabilityInterface { suspend fun getIoB(): Result<IoBReading>; suspend fun getBasalRate(): Result<BasalReading>; suspend fun getBolusHistory(since: Instant, limits: SafetyLimits): Result<List<BolusEvent>> }`. Single-instance. `getBolusHistory` takes SafetyLimits explicitly; the documented (interface-unenforced but required) contract is that implementations REJECT \u2014 drop, not clamp \u2014 any bolus whose dose exceeds `limits.maxBolusDoseMilliunits`. Tandem's implementation forwards straight to `bleDriver.getBolusHistory(since, limits)`. Medtronic maintains a per-process `bolusCursor: Int?` guarded by a `Mutex`, seeds it on first call from a lightweight `getHistoryCursor()` read-last (returning an empty list that call), then fetches `getHistoryLogs(sinceSequence = cursor)`, advances the cursor to `records.maxOfOrNull { sequenceNumber } ?: cursor`, extracts boluses applying limits, and filters `!timestamp.isBefore(since)` as a defensive lower bound.",
+        "user_visible": true,
+        "key_files": [
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/plugin/capabilities/InsulinSource.kt",
+          "plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/plugin/MedtronicInsulinSource.kt",
+          "plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/plugin/TandemInsulinSource.kt"
+        ],
+        "edge_cases": [
+          "Medtronic's cursor is explicitly best-effort: it advances before persistence, so a save failure can skip a bolus on this path; the slow-loop raw-history sync (Room-persisted per sequence) is the durable, self-healing path",
+          "Cursor is not persisted across process restarts \u2014 it re-seeds past all existing history each launch"
+        ]
+      },
+      {
+        "name": "PumpStatus capability and extract* safety contract",
+        "behavior": "Reads: `getBatteryStatus`, `getReservoirLevel`, `getPumpSettings`, `getPumpHardwareInfo`, `getHistoryLogs(sinceSequence: Int)`, and `getFullHistoryLogs(sinceSequence: Int)` whose DEFAULT implementation delegates to `getHistoryLogs` (full sync without lookback limits; Tandem overrides it, Medtronic does not). Three synchronous extractors take `(records, limits)`: `extractCgmFromHistoryLogs` must drop any reading outside `limits.glucoseLow..glucoseHigh` or at minimum the absolute 20-500 mg/dL range; `extractBolusesFromHistoryLogs` MUST drop (never return) events whose units exceed `limits.maxBolus`; `extractBasalFromHistoryLogs` must drop out-of-range entries. The rule everywhere is DROP, never clamp. Two lifecycle methods sit on this capability: `unpair()` (clear credentials + disconnect) and `autoReconnectIfPaired()`, both non-suspend with a TODO to become suspend once the deprecated PumpConnectionManager is removed.",
+        "user_visible": true,
+        "key_files": [
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/plugin/capabilities/PumpStatus.kt",
+          "plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/plugin/TandemPumpStatus.kt",
+          "plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/plugin/MedtronicPumpStatus.kt"
+        ],
+        "edge_cases": [
+          "extract* are pure functions over already-fetched records and need no live session",
+          "Medtronic derives both getPumpSettings and getPumpHardwareInfo from the same Device Information Service read (no dedicated settings characteristic)",
+          "unpair()/autoReconnectIfPaired() live on PUMP_STATUS, not DevicePlugin \u2014 a device plugin without PUMP_STATUS has no unpair path"
+        ]
+      },
+      {
+        "name": "BgmSource capability",
+        "behavior": "`interface BgmSource : PluginCapabilityInterface { fun observeReadings(): Flow<BgmReading>; suspend fun getLatestReading(): Result<BgmReading> }`. Multi-instance \u2014 several meters may be active simultaneously and BGM_SOURCE never conflicts with a pump's GLUCOSE_SOURCE. Reference implementation `DemoBgmSource(simulator, safetyLimits: StateFlow<SafetyLimits>, intervalProvider: () -> Long)`: `observeReadings()` returns the simulator's cold flow started with `intervalSeconds = intervalProvider()` (evaluated once per collection, so an interval settings change only takes effect on the next collection); `getLatestReading()` returns `simulator.latestReading` or `Result.failure(IllegalStateException(\"No readings available yet\"))`. Documented contract for authors: cold Flow, cancelled on deactivation; getLatestReading must be thread-safe; validate every reading against the CURRENT StateFlow value before emission.",
+        "user_visible": true,
+        "key_files": [
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/plugin/capabilities/BgmSource.kt",
+          "plugins/example/src/main/java/com/example/glycemicgpt/plugin/DemoBgmSource.kt"
+        ],
+        "edge_cases": [
+          "Only one collector per ReadingSimulator instance is safe (shared mutable phase/history); the platform guarantees this via a single activation scope per plugin"
+        ]
+      },
+      {
+        "name": "CalibrationTarget capability and BG validation",
+        "behavior": "`suspend fun calibrate(bgValueMgDl: Int, timestamp: Instant): Result<Unit>` and `suspend fun getCalibrationStatus(): Result<CalibrationStatus>`. Single-instance. The companion provides `validateBgValue(bgValueMgDl): Result<Unit>` returning `Result.failure(IllegalArgumentException(\"BG calibration value $v outside safe range [20..500]\"))` when `bgValueMgDl !in SafetyLimits.ABSOLUTE_MIN_GLUCOSE..SafetyLimits.ABSOLUTE_MAX_GLUCOSE`, else `Result.success(Unit)`. Division of responsibility documented in KDoc: the PLATFORM validates against absolute bounds before forwarding, so implementations need not re-check, but MAY enforce tighter device-specific limits. `CalibrationStatus(lastCalibrationTime: Instant?, isCalibrationNeeded: Boolean, nextCalibrationDue: Instant?)`. No CalibrationTarget implementation ships today (neither Tandem nor Medtronic declares it).",
+        "user_visible": true,
+        "key_files": [
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/plugin/capabilities/CalibrationTarget.kt",
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/model/CalibrationStatus.kt"
+        ],
+        "edge_cases": [
+          "validateBgValue checks the ABSOLUTE bounds, not the user's narrowed SafetyLimits \u2014 a value inside 20..500 but outside the user's configured range still passes",
+          "Returns a Result rather than throwing, unlike the model-level requires"
+        ]
+      },
+      {
+        "name": "BolusCategoryProvider capability and Tandem mapping",
+        "behavior": "`fun declaredCategories(): Set<String>` and `fun toPlatformCategory(pluginCategory: String): String?` (null for unknown). Single-instance (added in API v4 alongside `BolusEvent.category`). Purpose: pump-agnostic insulin summaries that still preserve pump-specific detail. TandemBolusCategoryProvider declares exactly {CONTROL_IQ, BG_FOOD, BG_ONLY, FOOD_ONLY, OVERRIDE, QUICK, UNKNOWN} and maps them to platform names: CONTROL_IQ->AUTO_CORRECTION, BG_FOOD->FOOD_AND_CORRECTION, BG_ONLY->CORRECTION, FOOD_ONLY->FOOD, OVERRIDE->OVERRIDE, QUICK->OTHER, UNKNOWN->OTHER. Platform names must match a `BolusCategory` enum name (that enum lives outside this module). Medtronic does not declare this capability.",
+        "user_visible": true,
+        "key_files": [
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/plugin/capabilities/BolusCategoryProvider.kt",
+          "plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/plugin/TandemBolusCategoryProvider.kt"
+        ],
+        "edge_cases": [
+          "Both QUICK and UNKNOWN collapse to OTHER \u2014 the mapping is lossy by design",
+          "Mapping is by string, so a typo yields null rather than a compile error"
+        ]
+      },
+      {
+        "name": "PluginEvent hierarchy and validation",
+        "behavior": "`sealed class PluginEvent { abstract val pluginId: String }` with 8 data-class variants. Device: `NewGlucoseReading(pluginId, reading: CgmReading)`, `NewBgmReading(pluginId, reading: BgmReading)`, `InsulinDelivered(pluginId, event: BolusEvent)`, `DeviceConnected(pluginId)`, `DeviceDisconnected(pluginId)`. Calibration: `CalibrationRequested(pluginId, bgValueMgDl: Int, timestamp: Instant)` whose `init` enforces `require(bgValueMgDl in 20..500)` with message \"bgValueMgDl must be in 20..500, was $v\" (inline literal, another drift-guard site), and `CalibrationCompleted(pluginId, success: Boolean, message: String)`. Platform-only: `SafetyLimitsChanged(pluginId, limits: SafetyLimits)`. `companion object { val PLATFORM_ONLY: Set<KClass<out PluginEvent>> = setOf(SafetyLimitsChanged::class) }` is the enforcement list.",
+        "user_visible": false,
+        "key_files": [
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/plugin/events/PluginEvent.kt"
+        ],
+        "edge_cases": [
+          "CalibrationRequested is the only variant with validation; it throws rather than returning a Result",
+          "Only SafetyLimitsChanged is platform-only; any plugin can forge a NewGlucoseReading claiming another plugin's id (pluginId is unvalidated)"
+        ]
+      },
+      {
+        "name": "PluginEventBus and its platform implementation",
+        "behavior": "Interface: `fun publish(event: PluginEvent)` and `fun <T : PluginEvent> subscribe(eventType: KClass<T>): Flow<T>`, plus a reified extension `inline fun <reified T> PluginEventBus.subscribe(): Flow<T>`. `PluginEventBusImpl` is a `@Singleton` over a `MutableSharedFlow<PluginEvent>(extraBufferCapacity = 256, onBufferOverflow = BufferOverflow.DROP_OLDEST)` \u2014 no replay, so late subscribers see nothing historical. `publish()` first checks `event::class in PluginEvent.PLATFORM_ONLY`; if so it logs a warning and RETURNS SILENTLY (no exception, no signal to the plugin). Otherwise `tryEmit`; a false result logs \"Event bus buffer full, dropping event\". `internal fun publishPlatform(event)` skips the platform-only check and is restricted to the `:app` module by Kotlin `internal` visibility (plugins are separate Gradle modules). `subscribe` is `events.filterIsInstance(eventType)`. Documented flow: BGM reading -> NewBgmReading -> CalibrationRequested -> CGM plugin calibrates -> CalibrationCompleted.",
+        "user_visible": false,
+        "key_files": [
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/plugin/events/PluginEventBus.kt",
+          "app/src/main/java/com/glycemicgpt/mobile/plugin/PluginEventBusImpl.kt"
+        ],
+        "edge_cases": [
+          "Events are droppable: a burst >256 with no fast consumer silently loses the OLDEST events \u2014 not a delivery guarantee",
+          "Blocked platform-only publishes are indistinguishable from success from the plugin's side",
+          "Kotlin `internal` is the only barrier on publishPlatform; a Swift port needs an equivalent module/access-control boundary"
+        ]
+      },
+      {
+        "name": "PairingProfile / PairingStyle / PairingFault",
+        "behavior": "`enum PairingStyle { CENTRAL_SCAN, ADVERTISE_AND_WAIT }`. CENTRAL_SCAN: phone is BLE central, scans, shows a device list, user taps one (Tandem). ADVERTISE_AND_WAIT: phone is BLE peripheral, advertises, the device connects as central (Medtronic MiniMed 700-series) \u2014 no scan, no device list; the user triggers pairing from the device's own menu and picks the phone by name. `data class PairingProfile(style = CENTRAL_SCAN, advertisedName: String? = null)`; advertisedName is the exact BLE name shown on the device's pairing menu, null for central-scan. `enum PairingFault { PERIPHERAL_UNSUPPORTED, ADVERTISE_FAILED, HANDSHAKE_TIMEOUT, AUTH_FAILED, BOUND_ELSEWHERE }`. Rationale captured in KDoc: advertise-and-wait failures (phone can't advertise; device still bound to another phone) produce NO ConnectionState transition, so without an explicit fault the UI has nothing to show. Medtronic maps its internal MedtronicConnectionFault 1:1 (BOUND_ELSEWHERE_SUSPECTED -> BOUND_ELSEWHERE).",
+        "user_visible": true,
+        "key_files": [
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/plugin/PairingProfile.kt",
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/plugin/PairingFault.kt",
+          "plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/plugin/MedtronicDevicePlugin.kt"
+        ],
+        "edge_cases": [
+          "Central-scan plugins keep the default observePairingFault() (always null) and drive UI from ConnectionState alone",
+          "BOUND_ELSEWHERE is inferred from 'advertising with nothing connecting', i.e. a heuristic timeout, not a protocol signal"
+        ]
+      },
+      {
+        "name": "Device discovery models and Tandem model detection",
+        "behavior": "`DiscoveredDevice(name: String, address: String, rssi: Int? = null, pluginId: String, metadata: Map<String,String> = emptyMap())` is the generalized discovery result; legacy `DiscoveredPump(name, address, rssi: Int)` is the Tandem-only shape the deprecated PumpScanner still uses (PumpScannerAdapter maps `rssi = device.rssi ?: 0`). `TandemPumpModel(displayName, hasScreen: Boolean?)` has TSLIM_X2(\"t:slim X2\", hasScreen=true), MOBI(\"Mobi\", false), UNKNOWN(\"Unknown Tandem Pump\", null \u2014 callers should show generic instructions). `fromAdvertisedName(name: String?)`: null -> UNKNOWN; otherwise trim and collapse whitespace via `Regex(\"\\\\s+\") -> \" \"`, then case-insensitive prefix match \"tslim X2\" or \"t:slim X2\" -> TSLIM_X2, \"Tandem Mobi\" -> MOBI, else UNKNOWN. It lives in the SDK because pairing UX needs model-appropriate instructions.",
+        "user_visible": true,
+        "key_files": [
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/model/DiscoveredDevice.kt",
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/model/DiscoveredPump.kt",
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/model/TandemPumpModel.kt",
+          "plugins/pump-driver-api/src/test/java/com/glycemicgpt/mobile/domain/model/TandemPumpModelTest.kt"
+        ],
+        "edge_cases": [
+          "The BleScanner fallback name \"Tandem Pump\" deliberately resolves to UNKNOWN (asserted by test)",
+          "Empty string -> UNKNOWN",
+          "Whitespace normalization exists specifically for non-breaking/extra spaces in BLE advertisements"
+        ]
+      },
+      {
+        "name": "Dashboard card descriptors and CardElement validation",
+        "behavior": "`DashboardCardDescriptor(id, title, priority: Int = 100, elements: List<CardElement>, hasDetail: Boolean = false)`; init requires id and title non-blank (whitespace-only rejected). Lower priority sorts higher; core platform cards occupy 0-50 and plugin cards should use 100+. `hasDetail=true` makes the platform render the card tappable with a chevron. `sealed class CardElement`: LargeValue(value, unit=\"\", color=DEFAULT); Label(text, style=BODY); StatusBadge(text, color); ProgressBar(value, max, label=\"\") requiring max and value finite, max > 0f, and value in 0f..max; IconValue(icon, value, label=\"\"); SparkLine(values, label=\"\") requiring values non-empty and all finite; Row(elements) and Column(elements) each requiring non-empty; Spacer(heightDp = 8) requiring heightDp >= 0. `enum UiColor { DEFAULT, SUCCESS, WARNING, ERROR, INFO, MUTED }`; `enum LabelStyle { TITLE, SUBTITLE, BODY, CAPTION }`; `enum PluginIcon { BLUETOOTH, BATTERY, RESERVOIR, INSULIN, GLUCOSE, HEART_RATE, SYNC, WARNING, CHECK, CLOCK, SETTINGS, SIGNAL, THERMOMETER }` (13).",
+        "user_visible": true,
+        "key_files": [
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/plugin/ui/DashboardCardDescriptor.kt",
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/plugin/ui/CardElement.kt",
+          "plugins/pump-driver-api/src/test/java/com/glycemicgpt/mobile/domain/plugin/DashboardCardDescriptorTest.kt"
+        ],
+        "edge_cases": [
+          "An empty elements list is legal for a card; empty Row/Column/SparkLine is not",
+          "NaN/Infinity in ProgressBar or SparkLine throws \u2014 this is why the finite checks exist",
+          "Card descriptors are constructed inside a Flow, so a require() failure surfaces as a flow exception mid-render"
+        ]
+      },
+      {
+        "name": "Settings descriptors and key validation",
+        "behavior": "`sealed class SettingDescriptor { abstract val key: String }` with six variants, each calling `requireValidKey(key)` in init against `VALID_KEY = Regex(\"^[a-zA-Z][a-zA-Z0-9_.-]{0,127}$\")` (must start with a letter, max 128 chars total). Variants: TextInput(key, label, hint=\"\", sensitive=false \u2014 masks input); Toggle(key, label, description=\"\"); Slider(key, label, min, max, step=1f, unit=\"\") additionally requiring min < max, step > 0, step <= (max - min); Dropdown(key, label, options: List<DropdownOption>) requiring options non-empty; ActionButton(key, label, style: ButtonStyle = DEFAULT); InfoText(key, text). `DropdownOption(value, label)` requires value non-blank. `enum ButtonStyle { DEFAULT, PRIMARY, DESTRUCTIVE }` (DESTRUCTIVE should get a confirmation dialog). `PluginSettingsSection(title, items)`; `PluginSettingsDescriptor(sections)` init requires all keys across all sections be distinct, error listing the duplicates.",
+        "user_visible": true,
+        "key_files": [
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/plugin/ui/SettingDescriptor.kt",
+          "plugins/pump-driver-api/src/test/java/com/glycemicgpt/mobile/domain/plugin/SettingDescriptorTest.kt"
+        ],
+        "edge_cases": [
+          "Keys double as SharedPreferences keys, so the regex is also the persistence-key contract",
+          "Note the setting-key regex `{0,127}` differs from the plugin-ID regex `{1,127}` and allows `.` `-` `_` in different positions"
+        ]
+      },
+      {
+        "name": "Detail screens and detail-action routing",
+        "behavior": "`DetailScreenDescriptor(title, elements: List<DetailElement>)`; init requires title non-blank, `elements.size <= MAX_ELEMENTS = 100` (explicitly to prevent UI DoS), and no duplicate keys among `DetailElement.Interactive` entries (error lists the dupes). `sealed class DetailElement { Display(element: CardElement); Interactive(setting: SettingDescriptor); SectionHeader(title) }` \u2014 SectionHeader requires non-blank title. Display elements have no keys and never collide. Empty element list is legal. Routing: `Plugin.observeDetailScreen(cardId)` returns null unless the plugin recognizes the cardId; `PluginDetailViewModel` collects it with `.flowOn(Dispatchers.IO).conflate()`, resets error on each emission, and surfaces \"Plugin encountered an error loading detail content\" on exception. `onAction(key)` dispatches `plugin.onDetailAction(cardId, key)` on Dispatchers.IO; failures set \"Action could not be completed\". Interactive setting values round-trip through the plugin's settings store.",
+        "user_visible": true,
+        "key_files": [
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/plugin/ui/DetailScreenDescriptor.kt",
+          "app/src/main/java/com/glycemicgpt/mobile/presentation/plugin/PluginDetailViewModel.kt",
+          "plugins/pump-driver-api/src/test/java/com/glycemicgpt/mobile/domain/plugin/DetailScreenDescriptorTest.kt"
+        ],
+        "edge_cases": [
+          "Exactly 100 elements is accepted; 101 throws",
+          "observeDetailScreen is only called for cards with hasDetail=true",
+          "ViewModel skips reload when the same cardId is requested again"
+        ]
+      },
+      {
+        "name": "PluginRegistry: creation, activation, mutual exclusion",
+        "behavior": "`initialize()` is one-shot (`check(initialized.compareAndSet(false,true))`). Per compile-time factory: skip if `metadata.apiVersion != PLUGIN_API_VERSION` (warn); skip if `featureGate.isEnabled(id)` is false; else validate the ID, RESERVE the id in `compileTimePluginIds` BEFORE init (so a runtime plugin cannot hijack a built-in id if init fails transiently), build the context, `factory.create()`, `plugin.initialize()`, store. Any exception -> log, drop the settings store entry, continue with the other plugins. Then discoverRuntimePlugins(), publish `_availablePlugins`, then restoreActivePlugins(). `activatePlugin(id)` under `synchronized(activationLock)`: unknown id -> failure; already active -> idempotent success; collect conflicting ids from persisted single-instance slots; call `onActivated()` FIRST (so the capability slot is never empty), then persist slots (set for single-instance, add for multi), THEN deactivate conflicts, then updateStateFlows(). `deactivatePlugin` removes from activePlugins, calls onDeactivated (exceptions logged and swallowed), clears/removes preference entries, updates flows.",
+        "user_visible": true,
+        "key_files": [
+          "app/src/main/java/com/glycemicgpt/mobile/plugin/PluginRegistry.kt"
+        ],
+        "edge_cases": [
+          "Activation order is deliberately new-then-old so no capability slot is ever empty mid-swap; briefly two plugins hold the same single-instance capability",
+          "restoreActivePlugins clears the stored preference for a plugin whose onActivated throws",
+          "A feature-gated plugin keeps its persisted active-plugin preference untouched so re-enabling restores the user's prior selection"
+        ]
+      },
+      {
+        "name": "PluginRegistry: capability slot state flows",
+        "behavior": "Exposed StateFlows: `availablePlugins: List<PluginMetadata>`, `activePumpPlugin: DevicePlugin?` = first active plugin declaring PUMP_STATUS **or** INSULIN_SOURCE, cast `as? DevicePlugin`; `activeGlucoseSource: DevicePlugin?` = first active with GLUCOSE_SOURCE; `activeCalibrationTarget: DevicePlugin?` = first active with CALIBRATION_TARGET; `activeBgmSources: Set<DevicePlugin>` = all active with BGM_SOURCE filtered to DevicePlugin; `activeDataSyncPlugins: Set<Plugin>` = all active with DATA_SYNC (Plugin, not DevicePlugin); `allActivePlugins: List<Plugin>`; `runtimePlugins: List<RuntimePluginInfo(metadata, jarFileName, isActive)>`. `refreshSafetyLimits()` re-reads SafetyLimitsStore, writes the shared `_safetyLimits` StateFlow, and publishes `SafetyLimitsChanged(pluginId = PLATFORM_PLUGIN_ID = \"platform\")` via publishPlatform.",
+        "user_visible": true,
+        "key_files": [
+          "app/src/main/java/com/glycemicgpt/mobile/plugin/PluginRegistry.kt"
+        ],
+        "edge_cases": [
+          "A non-DevicePlugin declaring GLUCOSE_SOURCE (e.g. the Nightscout source plugin) is silently excluded from these DevicePlugin-typed slots by the `as? DevicePlugin` cast",
+          "activePumpPlugin uses firstOrNull over a ConcurrentHashMap's values \u2014 iteration order is unspecified if two plugins somehow match"
+        ]
+      },
+      {
+        "name": "Runtime plugin loading (DEX JAR sideloading)",
+        "behavior": "`DexPluginLoader.discover()` lists `*.jar` in `filesDir/plugins`, creating `codeCacheDir/plugin_dex` as the DEX output dir. `loadJar` builds a `DexClassLoader(jarPath, dexOut, null, context.classLoader)`, reads `META-INF/plugin.json` bounded to `MAX_MANIFEST_SIZE = 65_536` chars (a manifest with anything past the limit is rejected), parses it, then rejects the JAR if `manifest.apiVersion != PLUGIN_API_VERSION` or if the id fails `VALID_PLUGIN_ID = Regex(\"^[a-zA-Z][a-zA-Z0-9._-]{1,127}$\")`. It then `loadClass(manifest.factoryClass)`, `getConstructor().newInstance()`, and casts to PluginFactory (null cast -> rejected). Any exception yields null and the other JARs still load. `PluginManifest.parse` requires non-blank factoryClass, id, name, version, an integer apiVersion >= 1; author and description default to \"\". Registry install/discovery additionally rejects ids colliding with `compileTimePluginIds` or already-loaded plugins, deleting the JAR on failure.",
+        "user_visible": true,
+        "key_files": [
+          "app/src/main/java/com/glycemicgpt/mobile/plugin/DexPluginLoader.kt",
+          "app/src/main/java/com/glycemicgpt/mobile/plugin/PluginManifest.kt",
+          "app/src/main/java/com/glycemicgpt/mobile/plugin/PluginRegistry.kt"
+        ],
+        "edge_cases": [
+          "Known limitation documented: plugins load in-process with the app classloader as parent, so they can reflect over host classes; full process isolation was deliberately NOT done because it 'adds significant complexity', relying instead on the trust model (explicit user install with a security warning)",
+          "apiVersion=1 manifests (including the shipped example) are rejected against the current version 5"
+        ]
+      },
+      {
+        "name": "Plugin JAR file management",
+        "behavior": "`PluginFileManager.installPlugin(uri)`: ensure `filesDir/plugins` exists; derive filename from the URI's last path segment (fallback `plugin_<epochMillis>.jar`); REQUIRE a `.jar` suffix (case-insensitive) else fail; sanitize with `Regex(\"[^a-zA-Z0-9._-]\") -> \"_\"`; canonical-path check that the destination starts with `pluginsDir.canonicalPath + File.separator` (path-traversal guard, `SecurityException` otherwise); fail if the file already exists; stream-copy while counting bytes and abort+delete past `MAX_PLUGIN_SIZE_BYTES = 50 MB` (50L*1024*1024); verify the first 4 bytes equal ZIP magic `PK\\x03\\x04` (0x50 0x4B 0x03 0x04) else delete and fail; finally `setReadOnly()` because Android's DexClassLoader rejects writable DEX files. `removePlugin` re-runs the canonical prefix check (with the trailing separator, to defeat `plugins_evil/` prefix collisions), calls `setWritable(true)`, then deletes. `listInstalledJars()` filters by extension.",
+        "user_visible": true,
+        "key_files": [
+          "app/src/main/java/com/glycemicgpt/mobile/plugin/PluginFileManager.kt"
+        ],
+        "edge_cases": [
+          "Sanitization can map two distinct source names onto one destination, which then trips the already-exists check",
+          "A truncated/invalid archive is deleted only after being fully written to disk"
+        ]
+      },
+      {
+        "name": "Runtime plugin sandbox (RestrictedContext)",
+        "behavior": "`RestrictedContext : ContextWrapper` throws `SecurityException(\"Runtime plugins cannot call <op>\")` for: getBaseContext, startActivity(\u00d72), startActivities(\u00d72), startService, startForegroundService, stopService, bindService, getContentResolver, sendBroadcast(\u00d72), sendOrderedBroadcast(\u00d73), registerReceiver(\u00d74 overloads), getSharedPreferences, openFileOutput, openFileInput, deleteFile, getDir, getDatabasePath, openOrCreateDatabase(\u00d72), deleteDatabase, createDeviceProtectedStorageContext, createPackageContext. `getApplicationContext()` returns `this` (trapped). `getSystemService(name)` is allowlisted to exactly {BLUETOOTH_SERVICE, LOCATION_SERVICE, POWER_SERVICE, ALARM_SERVICE, SENSOR_SERVICE, USB_SERVICE, WIFI_SERVICE}; everything else throws. WINDOW_SERVICE is deliberately excluded with the stated reason that WindowManager can add overlay views when SYSTEM_ALERT_WINDOW is held. filesDir/cacheDir/packageName remain available. Stated design philosophy: safety enforcement comes from SafetyLimits synced from the backend, not from blanket Context restrictions, because drivers genuinely need hardware access.",
+        "user_visible": false,
+        "key_files": [
+          "app/src/main/java/com/glycemicgpt/mobile/plugin/RestrictedPluginContext.kt",
+          "plugins/example/README.md"
+        ],
+        "edge_cases": [
+          "ScopedCredentialProvider deliberately uses the UNrestricted base context for its own SharedPreferences (the restricted wrapper blocks getSharedPreferences)",
+          "Compile-time plugins (Tandem, Medtronic) receive the full unrestricted context"
+        ]
+      },
+      {
+        "name": "Plugin feature gate (kill switch)",
+        "behavior": "`fun interface PluginFeatureGate { fun isEnabled(pluginId: String): Boolean }`, checked in PluginRegistry.initialize BEFORE the plugin is created. A gated-off plugin is never instantiated, so it is absent from Available Plugins, has no pairing entry, and is never polled \u2014 fully invisible and inert. `BuildConfigPluginFeatureGate` is default-on: `when (pluginId) { MedtronicDevicePlugin.PLUGIN_ID -> BuildConfig.MEDTRONIC_DRIVER_ENABLED; else -> true }`. Documented as the mobile analogue of the backend's per-integration kill switches (e.g. MEDTRONIC_CONNECT_ENABLED); the Medtronic read-only BLE driver ships BETA behind it (default true, build with MEDTRONIC_DRIVER_ENABLED=false to ship it off). The gate references the driver's canonical PLUGIN_ID constant directly so the switch can never silently drift onto a nonexistent id (which would leave it always enabled).",
+        "user_visible": true,
+        "key_files": [
+          "app/src/main/java/com/glycemicgpt/mobile/plugin/PluginFeatureGate.kt"
+        ],
+        "edge_cases": [
+          "Gating a plugin off intentionally leaves its persisted active-plugin preference intact so re-enabling restores the prior selection"
+        ]
+      },
+      {
+        "name": "Deprecated pump interfaces and their registry adapters",
+        "behavior": "Four @Deprecated interfaces remain in the SDK, all pointing at DevicePlugin/PumpStatus: `PumpDriver` (connect/disconnect/getIoB/getBasalRate/getBolusHistory(since, limits = SafetyLimits())/getPumpSettings/getBatteryStatus/getReservoirLevel/getCgmStatus/getHistoryLogs/getFullHistoryLogs(default-delegating)/getPumpHardwareInfo/observeConnectionState \u2014 explicitly documented as having NO delivery/control methods, strictly read-only); `PumpConnectionManager` (connectionState, pairingProfile, pairingFault StateFlows + connect(address, pairingCode?)/disconnect/unpair/autoReconnectIfPaired); `PumpScanner` (scan(): Flow<DiscoveredPump>); `HistoryLogParser` (the three extract* methods with `limits: SafetyLimits = SafetyLimits()` defaults). `:app` binds each to an adapter over PluginRegistry: PumpDriverAdapter (routes CGM to activeGlucoseSource, everything else to activePumpPlugin, returns `NoActivePluginException` failure when absent, rethrows CancellationException), PumpConnectionAdapter (flatMapLatest/stateIn on Dispatchers.Main.immediate, wraps pairingCode into `config[\"pairingCode\"]`), PumpScannerAdapter (`rssi ?: 0`), HistoryLogParserAdapter (empty list when no active plugin).",
+        "user_visible": false,
+        "key_files": [
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/pump/PumpDriver.kt",
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/pump/PumpConnectionManager.kt",
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/pump/PumpScanner.kt",
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/pump/HistoryLogParser.kt",
+          "app/src/main/java/com/glycemicgpt/mobile/plugin/adapter/PumpDriverAdapter.kt",
+          "app/src/main/java/com/glycemicgpt/mobile/di/PluginModule.kt"
+        ],
+        "edge_cases": [
+          "HistoryLogParserAdapter returns an EMPTY list when no pump plugin is active \u2014 indistinguishable from 'no records', which could mask data loss",
+          "The deprecated defaults (`SafetyLimits()`) silently substitute absolute limits when a caller omits the user's configured limits"
+        ]
+      },
+      {
+        "name": "Read-only capability set (deliberate non-feature)",
+        "behavior": "Explicit documented decision: the capability enum is intentionally limited to data collection and device management. The SDK exposes NO insulin delivery primitives \u2014 no bolus dosing, no basal rate changes, no therapeutic write surface \u2014 and the docs state AI workflows have no architectural path to such a surface. The device-management commands that do exist (`CalibrationTarget.calibrate()`, `PumpStatus.unpair()`, `PumpStatus.autoReconnectIfPaired()`, `DevicePlugin.connect()/disconnect()`) are classified as session/lifecycle operations, not therapy. PumpDriver's KDoc repeats this: 'This interface intentionally has NO methods for insulin delivery, pump setting changes, or any control operations.' Both shipped drivers restate READ-ONLY in file headers. Recorded follow-up (defense-in-depth, not yet built): capability enforcement at the plugin registry boundary, where the platform would refuse to load plugins declaring capabilities outside the official enum \u2014 tracked in the platform repo ROADMAP \u00a7Phase 1.",
+        "user_visible": false,
+        "key_files": [
+          "docs/dev/plugin-architecture.md",
+          "plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/pump/PumpDriver.kt",
+          "plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/plugin/MedtronicDevicePlugin.kt"
+        ],
+        "edge_cases": [
+          "Today the only barrier against a plugin declaring an unknown capability is that PluginCapability is a closed Kotlin enum \u2014 a Swift port must keep the capability type closed"
+        ]
+      },
+      {
+        "name": "DemoGlucometerPlugin (reference driver)",
+        "behavior": "Non-device `Plugin` (not DevicePlugin) with id `com.example.glycemicgpt.demo-glucometer`, name \"Demo Glucometer\", version 1.0.0, apiVersion = PLUGIN_API_VERSION, declaring {BGM_SOURCE, DATA_SYNC} \u2014 both multi-instance, chosen explicitly so it never conflicts with a real pump's GLUCOSE_SOURCE. initialize() stores the context and builds `DemoBgmSource(simulator, ctx.safetyLimits, intervalProvider = { settingsStore.getFloat(\"sim_interval\", 30f).toLong() })`. onActivated() returns early if `sim_enabled` (default true) is false; otherwise creates `CoroutineScope(Dispatchers.Default + SupervisorJob())`, launches the simulator flow, and per reading increments readingCount, sets lastSyncTime, publishes `PluginEvent.NewBgmReading`, and decays `simulatedBattery` by 0.1 from a start of 87f (floor 0). onDeactivated cancels the scope; shutdown cancels the scope and nulls context/bgmSource. getCapability returns bgmSource for BgmSource::class only \u2014 DATA_SYNC deliberately returns nothing since no interface exists.",
+        "user_visible": true,
+        "key_files": [
+          "plugins/example/src/main/java/com/example/glycemicgpt/plugin/DemoGlucometerPlugin.kt",
+          "plugins/example/README.md",
+          "plugins/example/src/main/resources/META-INF/plugin.json"
+        ],
+        "edge_cases": [
+          "Uses println() rather than a logger",
+          "Changing sim_interval mid-run has no effect until reactivation (the interval is read once when the flow starts)",
+          "onActivated with simulation disabled leaves isActive=false, so the sync card shows 'Disconnected'"
+        ]
+      },
+      {
+        "name": "DemoGlucometerPlugin UI surfaces",
+        "behavior": "observeDashboardCards() is an infinite `flow { ...; emit(cards); delay(5000L) }` (5 s repaint) emitting two cards. Card `demo-glucometer-status` (priority 100, hasDetail=true): LargeValue of the latest glucose or \"--\" colored MUTED when null, ERROR when < 70, WARNING when > 180, else SUCCESS; StatusBadge \"Simulated\"/INFO; a Row of IconValue BATTERY \"<int>%\" and GLUCOSE \"<count>\"; a SparkLine of history when non-empty; a ProgressBar(value=simulatedBattery, max=100f). Card `demo-glucometer-sync` (priority 110): Label with \"Last sync: HH:mm:ss\" (system zone) or \"No data synced yet\", IconValue SYNC with the record count, StatusBadge Connected/SUCCESS vs Disconnected/MUTED. Settings: three sections \u2014 Simulation Settings (Toggle sim_enabled, Slider sim_interval 5..300 step 5 sec, Dropdown glucose_unit mg_dl/mmol_l), Data Sync (TextInput sync_url, Toggle auto_sync, ActionButton sync_now PRIMARY, ActionButton clear_data DESTRUCTIVE), About (InfoText about_info, InfoText safety_info showing the live min-max limits).",
+        "user_visible": true,
+        "key_files": [
+          "plugins/example/src/main/java/com/example/glycemicgpt/plugin/DemoGlucometerPlugin.kt"
+        ],
+        "edge_cases": [
+          "The 70/180 color thresholds are hardcoded in the demo, unrelated to SafetyLimits",
+          "safety_info falls back to a generic string when context is null (post-shutdown)",
+          "glucose_unit and sync_url/auto_sync/sync_now/clear_data are declared but never acted on \u2014 pure UI demonstration"
+        ]
+      },
+      {
+        "name": "DemoGlucometerPlugin detail screen + manual entry",
+        "behavior": "observeDetailScreen returns null unless `cardId == \"demo-glucometer-status\"`, otherwise an infinite flow emitting a rebuilt DetailScreenDescriptor every 3000 ms. Layout: SectionHeader \"Recent Readings\" then either a CAPTION placeholder or the last 10 timestamped readings reversed as \"HH:mm:ss  -  <int> mg/dL\"; a SparkLine when history size >= 2; SectionHeader \"Manual Entry\" with TextInput `detail_bg_value` (hint \"Enter value between 20-500\") and ActionButton `detail_record_reading` (PRIMARY); SectionHeader \"Simulator Controls\" repeating the sim_enabled Toggle and sim_interval Slider; SectionHeader \"Safety Info\" with the limits text. onDetailAction for `detail_record_reading` reads `detail_bg_value` from the settings store, parses with toIntOrNull, and accepts only `value in 20..500`: it calls simulator.addManualReading, increments the count, sets lastSyncTime, publishes NewBgmReading with meterName \"Demo Glucometer (manual)\", then clears the input field. Invalid input only prints a message.",
+        "user_visible": true,
+        "key_files": [
+          "plugins/example/src/main/java/com/example/glycemicgpt/plugin/DemoGlucometerPlugin.kt"
+        ],
+        "edge_cases": [
+          "The manual-entry bound is the hardcoded 20..500, not the user's configured SafetyLimits \u2014 a manual reading outside the narrowed range still gets published",
+          "Invalid input gives the user no UI feedback"
+        ]
+      },
+      {
+        "name": "ReadingSimulator (synthetic BGM generator)",
+        "behavior": "`start(intervalSeconds: Long, safetyLimits: StateFlow<SafetyLimits>): Flow<BgmReading>` \u2014 a cold flow that `require(intervalSeconds > 0)`, then loops while the coroutine is active: generate a raw value, read `safetyLimits.value` FRESH each iteration (so backend limit changes take effect immediately \u2014 the behavior real drivers must copy), drop the value with a printed message if `raw < min || raw > max`, else construct `BgmReading(raw, Instant.now(), \"Demo Glucometer\")`, set latestReading, record history, emit; then `delay(intervalSeconds * 1000L)`. `generateRawValue()`: `base = 130.0 + 50.0 * sin(phase)` (range 80-180), `jitter = rng.nextDouble(-10.0, 10.0)`, `phase += 2\u03c0/12` (a full cycle every 12 readings), returns `(base + jitter).roundToInt().coerceIn(20, 500)`. `addManualReading(Float)` requires 20f..500f then records history. History is two synchronized lists (`List<Float>` for sparkline, `List<Pair<Instant,Float>>` for the detail screen), each trimmed from the front to `MAX_HISTORY = 12`.",
+        "user_visible": true,
+        "key_files": [
+          "plugins/example/src/main/java/com/example/glycemicgpt/plugin/ReadingSimulator.kt"
+        ],
+        "edge_cases": [
+          "The delay happens even when a reading is dropped, so the cadence is unaffected by filtering",
+          "Note the asymmetry: generateRawValue CLAMPS to 20..500 while the SafetyLimits check DROPS \u2014 clamping here is safe only because 80-180\u00b110 never approaches the bounds",
+          "Only one collector per instance is safe (shared phase/history); the platform enforces this via a single activation scope"
+        ]
+      },
+      {
+        "name": "Fidelity of the example driver as a reference",
+        "behavior": "What it faithfully demonstrates: the full lifecycle (initialize/onActivated/onDeactivated/shutdown with correct resource ownership), reactive safety-limit reads on every iteration, drop-not-clamp filtering, event-bus publication with the plugin's own id, every SettingDescriptor and CardElement variant, detail screens with interactive elements and action routing, per-plugin settings persistence, and the runtime-plugin packaging path (no-arg factory + META-INF/plugin.json + d8 DEX conversion). What it does NOT demonstrate: it is a plain `Plugin`, not a `DevicePlugin` \u2014 no connect/disconnect/scan, no ConnectionState, no pairing profile or fault, no credential provider use, no BLE, no DebugLogger use, no CalibrationTarget/CalibrationRequested participation, and no getCapability entry for its declared DATA_SYNC capability. Its manifest apiVersion is 1 while the platform requires 5, so as shipped it would be rejected by DexPluginLoader.",
+        "user_visible": false,
+        "key_files": [
+          "plugins/example/src/main/java/com/example/glycemicgpt/plugin/DemoGlucometerPlugin.kt",
+          "plugins/example/README.md",
+          "plugins/example/src/main/resources/META-INF/plugin.json"
+        ],
+        "edge_cases": [
+          "README's manifest table also says apiVersion must be `1`, matching neither the code (5) nor the architecture doc (2)"
+        ]
+      },
+      {
+        "name": "Build configuration and toolchain pins",
+        "behavior": "`:pump-driver-api` is an Android library: `compileSdk = 35`, `minSdk = 30`, Java source/target 17, `kotlinOptions.jvmTarget = \"17\"`, namespace `com.glycemicgpt.mobile.pump.api`, `consumerProguardFiles(\"consumer-rules.pro\")`. Its only production dependency is `api(libs.coroutines.core)` \u2014 kotlinx-coroutines-core 1.10.2 per the Gradle lockfile \u2014 plus junit 4.13.2 for tests; Kotlin stdlib/compiler 2.1.0. Notably it has NO Android framework dependency in code except `android.content.Context` in PluginContext. consumer-rules.pro is intentionally empty of keep rules (module classes are accessed programmatically, not via reflective serialization), but `:app`'s proguard keeps `com.glycemicgpt.mobile.domain.plugin.**`, `domain.pump.**` and `domain.model.**` for capability reflection. The example plugin is a standalone JVM project: `kotlin(\"jvm\") version \"2.0.21\"`, JVM 17, `compileOnly(files(\"libs/pump-driver-api.jar\"))` and `compileOnly(\"org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2\")`, jar base name `example-plugin`.",
+        "user_visible": false,
+        "key_files": [
+          "plugins/pump-driver-api/build.gradle.kts",
+          "plugins/pump-driver-api/gradle.lockfile",
+          "plugins/pump-driver-api/consumer-rules.pro",
+          "plugins/example/build.gradle.kts"
+        ],
+        "edge_cases": [
+          "Runtime plugin packaging requires `d8 --output dex-out/ build/libs/example-plugin.jar` then `jar uf example-plugin.jar -C dex-out classes.dex` \u2014 DEX bytecode plus the original manifest in one archive"
+        ]
+      }
+    ],
+    "safety_critical": [
+      "Glucose validity bounds 20..500 mg/dL are the load-bearing invariant and are duplicated across ~15 sites (SafetyLimits.DEFAULT_/ABSOLUTE_MIN|MAX_GLUCOSE, CgmReading.MIN_MG_DL/MAX_MG_DL, BgmReading require, PluginEvent.CalibrationRequested require, CalibrationTarget.validateBgValue, plus app/wear sites). A drift-guard unit test (app/src/test/.../contract/SafetyConstantDriftGuardTest.kt) enumerates them; docs/contract/safety-constants.md is the source of truth. A Swift port must either consolidate to one constant or reproduce an equivalent guard.",
+      "CgmReading, BgmReading and BolusEvent validate in their constructors and THROW. A driver that constructs one from unfiltered pump data crashes the coroutine instead of dropping a record. Swift value types must decide deliberately between throwing initializers and failable ones \u2014 and any change to failable silently converts crashes into dropped data.",
+      "DROP, never CLAMP. All three PumpStatus.extract* methods and InsulinSource.getBolusHistory must discard out-of-range readings/doses rather than coerce them. A clamped 900 mg/dL becoming 500, or a clamped 40 U bolus becoming 25 U, would display fabricated clinical data.",
+      "Two independent bolus caps must both be honored: BolusEvent.MAX_BOLUS_UNITS = 25f (type-level, units) and SafetyLimits.maxBolusDoseMilliunits (default/absolute 25_000 mU, user-narrowable). The milliunits-vs-units \u00d71000 scale difference between SafetyLimits and the reading models is an easy conversion bug with dosing-display consequences.",
+      "SafetyLimits.safeOf() clamps rather than throws for backend input, and its ordering (min clamped to 20..499 first, max then coerced to clampedMin+1..500) means a nonsensical config like (min=450, max=300) silently yields a 1 mg/dL-wide accept window (450..451) with no warning \u2014 nearly all readings would then be dropped.",
+      "SafetyLimits must be read from the StateFlow's CURRENT value on every validation pass, not cached at initialize(). ReadingSimulator documents this explicitly; caching would let a driver keep validating against revoked, wider limits after a backend narrowing.",
+      "The PluginEventBus is lossy by design: MutableSharedFlow(extraBufferCapacity = 256, onBufferOverflow = DROP_OLDEST), no replay. It is NOT a delivery guarantee \u2014 NewGlucoseReading / NewBgmReading / CalibrationRequested can be silently dropped under burst, and blocked platform-only publishes return silently. Any alerting built on it needs its own guarantee.",
+      "Glucose polling is fixed at 60_000 ms in both shipped GlucoseSource implementations, and failed polls are swallowed via `onSuccess` only \u2014 a persistently failing pump produces an indefinitely stale display with no distinguishing signal. Staleness must be derived from CgmReading.timestamp; nothing in the API surfaces it.",
+      "CalibrationTarget.validateBgValue checks ABSOLUTE bounds (20..500), not the user's narrowed SafetyLimits, and the demo's manual-entry path also uses the raw 20..500 literal. Sending an out-of-user-range fingerstick as a CGM calibration is a direct patient-safety path.",
+      "Medtronic's bolus cursor advances on a successful fetch BEFORE the orchestrator persists, so a transient save failure can skip a bolus on that path. This is explicitly tolerated only because the slow-loop raw-history sync (Room-persisted per sequence, restored on restart) is the durable path. Porting the fast path without the durable path would lose insulin records.",
+      "HistoryLogParserAdapter returns an EMPTY list when no pump plugin is active, which is indistinguishable from 'no new records' \u2014 silent data loss rather than an error.",
+      "DebugLogger carries raw glucose/insulin/device-identifier bytes; implementations must retain cargoHex/parsedValue only in debug builds and never persist them unencrypted.",
+      "Runtime plugins get UNencrypted credential storage (ScopedCredentialProvider) and load in-process with the app's classloader as parent \u2014 both accepted risks under the stated trust model, with documented revisit triggers.",
+      "Activation deliberately calls onActivated() on the new plugin BEFORE deactivating the conflicting one, so two plugins transiently hold the same single-instance capability (e.g. two live GLUCOSE_SOURCEs). The window is intentional (slot never empty) but readings from both can arrive.",
+      "The read-only capability model is the top-level safety architecture: no bolus/basal/therapeutic write surface exists anywhere in the SDK. Any port must preserve this closed capability set."
+    ],
+    "notes": "Coverage is complete for the stated scope at uniform depth: every file in plugins/pump-driver-api (23 main sources + 5 test sources + build files) and every file in plugins/example was read in full, plus the platform-side files the API's contracts depend on (PluginRegistry, PluginEventBusImpl, PluginSettingsStoreImpl, PluginPreferences, PluginFeatureGate, RestrictedPluginContext, DexPluginLoader, PluginManifest, PluginFileManager, SafetyLimitsStore, the four legacy adapters, PluginModule, PluginDetailViewModel), docs/dev/plugin-architecture.md and docs/contract/safety-constants.md. The shipped Tandem/Medtronic plugin+capability classes were read only as far as they show how the interfaces are implemented (poll intervals, lifecycle mapping, extract* delegation); their BLE stacks (auth, protocol, parsers, connection managers, reconnect/backoff) are a separate subsystem and are NOT covered here.\n\nThree doc/code inconsistencies a porter must resolve rather than copy: (1) PLUGIN_API_VERSION is 5 in code, \"2\" in docs/dev/plugin-architecture.md (two places), and \"1\" in plugins/example/README.md and META-INF/plugin.json \u2014 the shipped example JAR would be rejected by DexPluginLoader's exact-match check today. (2) docs say androidContext \"exposes the full application Context ... must be replaced with a restricted interface before any runtime-loaded plugin support is introduced\", but RestrictedPluginContext already exists and is used \u2014 the PluginContext KDoc is the accurate one. (3) PumpStatus KDoc references `SafetyLimits.glucoseLow`/`glucoseHigh` and `maxBolus`, which are not the actual property names (minGlucoseMgDl/maxGlucoseMgDl/maxBolusDoseMilliunits).\n\nTwo structural facts worth carrying into Swift: capability lookup is KClass-keyed with unchecked casts, which needs a protocol-witness or type-keyed registry instead; and `internal` Kotlin visibility is the ONLY thing preventing plugins from calling publishPlatform (the platform-only event bypass), so the port needs a real module/access boundary there.",
+    "external_dependencies": [
+      "kotlinx-coroutines-core 1.10.2 (exposed as `api` from :pump-driver-api; Flow/StateFlow/SharedFlow/Mutex are part of the public driver contract)",
+      "Kotlin 2.1.0 stdlib + kotlin-reflect (KClass used in getCapability, PluginEventBus.subscribe, PluginEvent.PLATFORM_ONLY)",
+      "java.time.Instant (all timestamps in the domain models)",
+      "Android SDK: compileSdk 35, minSdk 30, JavaVersion 17 / jvmTarget 17",
+      "android.content.Context (the only Android type inside :pump-driver-api, on PluginContext.androidContext)",
+      "junit 4.13.2 + hamcrest-core 1.3 (unit tests only)",
+      "Hilt/Dagger @Binds @IntoSet multibinding (compile-time PluginFactory discovery, in :app and shipped plugin modules)",
+      "dalvik.system.DexClassLoader (runtime plugin loading)",
+      "org.json JSONObject (META-INF/plugin.json parsing)",
+      "Timber (platform-side logging)",
+      "AndroidX Security EncryptedSharedPreferences (compile-time PumpCredentialProvider implementation, :app side)",
+      "Android d8 build-tool (required to convert runtime plugin JARs to DEX)",
+      "Example plugin standalone build: Kotlin JVM Gradle plugin 2.0.21, compileOnly kotlinx-coroutines-core 1.10.2"
+    ],
+    "permissions_and_platform_apis": [
+      "Bluetooth / BLE \u2014 Context.BLUETOOTH_SERVICE (BluetoothManager) is the primary allowlisted service for runtime plugins; central-scan and peripheral-advertise topologies are both first-class (PairingStyle)",
+      "Location \u2014 Context.LOCATION_SERVICE, allowlisted because Android requires location for BLE scanning",
+      "Context.POWER_SERVICE (wake locks for BLE connections), ALARM_SERVICE (scheduling periodic reads), SENSOR_SERVICE, USB_SERVICE, WIFI_SERVICE \u2014 the rest of the runtime-plugin allowlist",
+      "Context.WINDOW_SERVICE deliberately excluded from the allowlist (overlay-view risk with SYSTEM_ALERT_WINDOW)",
+      "SharedPreferences: `plugin_settings_$pluginId` (per-plugin settings), `plugin_creds_<sanitizedId>` (runtime plugin credentials), `plugin_prefs` (active-plugin slots + installed runtime plugin ids), `safety_limits` (backend-synced limits)",
+      "EncryptedSharedPreferences for compile-time plugin credentials",
+      "App-internal storage: filesDir/plugins (JAR store), codeCacheDir/plugin_dex (DEX output); plugin JARs are set read-only for DexClassLoader",
+      "ContentResolver.openInputStream for user-selected plugin JAR install (Storage Access Framework document picker)",
+      "Blocked for runtime plugins by SecurityException: startActivity/startActivities, startService/startForegroundService/bindService/stopService, sendBroadcast/sendOrderedBroadcast, registerReceiver (all overloads), getContentResolver, createPackageContext, getBaseContext, getSharedPreferences, openFileInput/openFileOutput/deleteFile/getDir, database open/delete/path, createDeviceProtectedStorageContext"
+    ]
+  },
+  "port": {
+    "subsystem": "Pump driver API and safety model (`:pump-driver-api` SDK + `plugins/example` reference driver + the `:app`-side enforcement the API contracts depend on: PluginRegistry, PluginEventBusImpl, RestrictedPluginContext, DexPluginLoader, PluginFileManager, SafetyLimitsStore, legacy adapters) \u2014 ported to a Swift `PumpDriverAPI` SPM package plus compile-time-linked driver targets for iOS 17+/watchOS 10+.",
+    "ports_cleanly": [
+      {
+        "capability": "Plugin base interface + lifecycle contract",
+        "ios_approach": "Swift `protocol Plugin` with `metadata`, `capabilities`, `initialize(_:)`, `shutdown()`, `onActivated()`, `onDeactivated()`, `settingsDescriptor()`, `dashboardCards: AsyncStream<[DashboardCardDescriptor]>`, `capability<T>(_:)`. The two defaulted members become protocol-extension defaults (`detailScreen(cardId:)` = nil, `onDetailAction(cardId:actionKey:)` = no-op). Lifecycle methods are `@MainActor` to reproduce Kotlin's main-thread serialization; capability methods stay non-isolated `async`. Throwing semantics map to `throws` on initialize/onActivated (registry catches, skips the driver, drops its settings entry) and `try?` on onDeactivated/shutdown (logged, continue)."
+      },
+      {
+        "capability": "PluginCapability enum and cardinality rules",
+        "ios_approach": "`enum PluginCapability: CaseIterable` with the same 7 cases and two static `Set` members (5 single-instance, 2 multi-instance). Swift has no enum-companion `init`, so the class-load exhaustiveness guard becomes an XCTest asserting `Set(allCases) == singleInstance.union(multiInstance)` and that the two sets are disjoint, run in a required CI job. Keeping the enum closed \u2014 no raw-string construction, no `@unknown default` escape \u2014 is what preserves the read-only architectural guarantee."
+      },
+      {
+        "capability": "Typed capability lookup (getCapability + as* helpers)",
+        "ios_approach": "Replace KClass dispatch and unchecked casts with `func capability<T: PluginCapabilityInterface>(_ type: T.Type) -> T?`, backed by an `[ObjectIdentifier: any PluginCapabilityInterface]` map built during `initialize()` or a `switch` on `T.self`. The six `as*()` extensions become protocol-extension computed properties (`var glucoseSource: (any GlucoseSource)?`). Strictly safer than Kotlin \u2014 no `@Suppress(\"UNCHECKED_CAST\")`. Declaring a capability and returning nil for it still works, preserving the demo driver's DATA_SYNC behavior."
+      },
+      {
+        "capability": "PluginContext (driver-facing platform services)",
+        "ios_approach": "`final class PluginContext` carrying `pluginId`, `settingsStore`, `credentialProvider`, `debugLogger`, `eventBus`, `apiVersion`, `safetyLimits`. The `androidContext` field is deleted outright \u2014 iOS has no per-app Context object and drivers reach CoreBluetooth directly. `StateFlow<SafetyLimits>` becomes a shared `SafetyLimitsPublisher` exposing `.value` (for the mandatory read-on-every-validation-pass) plus an `AsyncStream` for observers. One instance shared by all drivers, mutated only by the registry, exactly as today."
+      },
+      {
+        "capability": "PluginSettingsStore (driver-facing key-value settings)",
+        "ios_approach": "`UserDefaults(suiteName: \"plugin_settings_<pluginId>\")` reproduces per-plugin namespacing, survival across deactivation and app update, and wipe on uninstall; removal of a driver's whole store maps to `removePersistentDomain(forName:)`. Same four typed getter/setter pairs with defaults plus `remove`. One behavior delta to record: reading a key with the wrong typed accessor returns the zero value rather than throwing ClassCastException, so type confusion becomes silent \u2014 mitigate with a per-driver key-to-type table asserted in tests."
+      },
+      {
+        "capability": "PumpCredentialProvider (driver-facing secret storage)",
+        "ios_approach": "Keychain `kSecClassGenericPassword`, service `plugin_creds_<sanitizedId>`, accounts `paired_address`, `pairing_code`, `jpake_derived_secret`, `jpake_server_nonce`, accessibility `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` (required for background BLE reconnect after reboot; ThisDeviceOnly keeps secrets out of iCloud and encrypted backups). Same 9-method surface; `isPaired()` = item exists for `paired_address`. Two deltas: Keychain items survive app deletion, so a first-launch sentinel must purge orphans; and every driver now gets real encrypted storage, closing the Android runtime-plugin plaintext gap by construction."
+      },
+      {
+        "capability": "DebugLogger (BLE packet tracing) and HexUtils",
+        "ios_approach": "Same protocol, `enum Direction { case tx, rx }`, same `logPacket` and `updateLastPacket` signatures with Swift default arguments. `toSpacedHex` is a one-line map over `Data` producing the identical lowercase space-separated string. Enforce the KDoc security clause harder than Android: the implementation retaining `cargoHex`/`parsedValue` compiles only under `#if DEBUG` into an in-memory ring buffer; the release implementation records opcode, txId, size and error only. Never route payloads through OSLog (sysdiagnose capture); any persisted file needs `.completeUnlessOpen` Data Protection."
+      },
+      {
+        "capability": "SafetyLimits value type and hard bounds",
+        "ios_approach": "`struct SafetyLimits: Equatable` with the same four Int fields and defaults and an `init(...) throws` reproducing all five checks as typed errors \u2014 `throws`, not `precondition`, which would trap the whole process. Same DEFAULT_* and ABSOLUTE_* statics (today identical values). Milliunits stay `Int`, preserving the x1000 scale discipline against the Float-unit reading models. The boundary tests (19, -1, 501, min==max, basal 0/15001, bolus 0/25001) port one-for-one to XCTest."
+      },
+      {
+        "capability": "SafetyLimits.safeOf() lenient factory",
+        "ios_approach": "`static func safeOf(...) -> SafetyLimits` clamping in exactly the Android order: min into 20...499 first, then max into (clampedMin+1)...500, then basal 1...15000, bolus 1...25000. `coerceIn` maps to a `ClosedRange.clamping` helper. The (min 450, max 300) -> (450, 451) and (bolus 0) -> 1 cases become ported assertions. Add the one thing Android lacks: emit a structured log and telemetry event whenever any input was clamped, so a nonsensical backend config is observable instead of silent."
+      },
+      {
+        "capability": "SafetyLimitsStore (backend sync + staleness)",
+        "ios_approach": "`UserDefaults` suite `safety_limits` (or the App Group suite, since the watch and widget also render limit-dependent state) with the same five keys and DEFAULT_* fallbacks. `updateAll` runs values through `safeOf` before persisting; UserDefaults writes hit the in-memory domain synchronously so `.commit()` semantics hold. `clear()` maps to `removePersistentDomain`. `isStale(maxAge: TimeInterval = 3600)` over `Date`. Registry refresh republishes into the shared publisher and emits `SafetyLimitsChanged(pluginId: \"platform\")`. A never-synced install stays stale (lastFetched 0)."
+      },
+      {
+        "capability": "CgmReading model and validation",
+        "ios_approach": "`struct CgmReading { glucoseMgDl: Int; trend: CgmTrend; timestamp: Date }` with a throwing init enforcing 20...500 \u2014 throwing rather than failable keeps the Android contract that unfiltered data is a defect, and forces a `try` at every construction site. 8-case `CgmTrend` with no raw values and per-driver wire mapping, as today. `Date` replaces `Instant`; the seconds-Double vs nanosecond-Long precision difference is irrelevant at 5-minute CGM cadence, but ISO-8601 must be pinned for backend round-trips. mg/dL stays the storage unit; mmol/L remains display-only."
+      },
+      {
+        "capability": "BgmReading model and validation",
+        "ios_approach": "`struct BgmReading { glucoseMgDl: Int; timestamp: Date; meterName: String? }` with the same throwing 20...500 init and no trend arrow. Multi-instance semantics unchanged: several meters active at once, distinguished only by `meterName` and the publishing `pluginId` on the event. Port the Android inline literal to a reference to the single consolidated `GlucoseBounds.absolute` constant rather than creating a second Swift duplication site. Narrowing to the user's configured limits stays the driver's job before construction."
+      },
+      {
+        "capability": "BolusEvent model and hard 25 U cap",
+        "ios_approach": "`struct BolusEvent` with the same 8 fields; `units`, `correctionUnits`, `mealUnits` stay `Float` (32-bit, matching Kotlin) so dose display rounds identically to Android and the backend. Throwing init enforcing 0...25 on each. Keep both caps distinct: `BolusEvent.maxBolusUnits: Float = 25` as the type backstop, `SafetyLimits.maxBolusDoseMilliunits: Int` as the user-narrowable filter drivers must apply. Preserve the documented semantic that `units` is delivered total while correction/meal are the requested breakdown and need not sum."
+      },
+      {
+        "capability": "Remaining domain models (insulin, status, history, hardware)",
+        "ios_approach": "Mechanical struct translation of IoBReading, BasalReading, PumpSettings, BatteryStatus, ReservoirReading, HistoryLogRange, HistoryLogRecord and PumpHardwareInfo, plus 3-case `PumpActivityMode` with a deprecated `ControlIqMode` typealias. `Long` becomes `Int64`; HistoryLogRange sequences become `Int`, 64-bit on every iOS device, which eliminates the Android unsigned-32-in-signed-Int concern entirely. Keep `rawBytesB64` as a Base64 `String` at the model boundary for serialization parity, decoding to `Data` only inside driver parsers. None of these carry validation, as today."
+      },
+      {
+        "capability": "InsulinSource capability",
+        "ios_approach": "`protocol InsulinSource` with `getIoB() async -> Result<IoBReading>`, `getBasalRate() async -> Result<BasalReading>`, `getBolusHistory(since: Date, limits: SafetyLimits) async -> Result<[BolusEvent]>`. Passing limits explicitly rather than caching them carries over unchanged, as does the drop-never-clamp rejection of doses above `maxBolusDoseMilliunits`. Medtronic's Mutex-guarded `bolusCursor` becomes an `actor`, its lazy seed-from-getHistoryCursor first call, cursor advance to max sequence, and defensive `timestamp >= since` filter all preserved. Cursor persistence is addressed under risks."
+      },
+      {
+        "capability": "BgmSource capability",
+        "ios_approach": "`protocol BgmSource` with `readings: AsyncStream<BgmReading>` (cold \u2014 a fresh stream per call, terminated by consuming-Task cancellation) and `getLatestReading() async -> Result<BgmReading>` returning the same failure when nothing has been read yet. The `intervalProvider` closure ports verbatim, preserving the documented 'interval change takes effect only on next collection' behavior. Multi-instance registration is unchanged and never conflicts with a pump's GLUCOSE_SOURCE. Thread-safety of `getLatestReading` is satisfied by making the reference implementation an `actor`."
+      },
+      {
+        "capability": "CalibrationTarget capability and BG validation",
+        "ios_approach": "`protocol CalibrationTarget` with `calibrate(bgValueMgDl:timestamp:) async -> Result<Void>` and `getCalibrationStatus() async -> Result<CalibrationStatus>`, plus a static `validateBgValue(_:) -> Result<Void>` returning the same failure text for values outside the absolute 20...500. The documented division stands: the platform validates against absolute bounds before forwarding; implementations may enforce tighter device limits. `CalibrationStatus` is a 3-field struct with optional Dates. No shipped implementation today \u2014 port the contract and its tests, not an implementation."
+      },
+      {
+        "capability": "BolusCategoryProvider capability and Tandem mapping",
+        "ios_approach": "`protocol BolusCategoryProvider` with `declaredCategories() -> Set<String>` and a mapping function. Swift lets this be strengthened for free: return `BolusCategory?` (the platform enum) instead of `String?`, converting Android's 'a typo yields nil at runtime' into a compile error while keeping the deliberately lossy QUICK->OTHER and UNKNOWN->OTHER collapse. Tandem's 7 declared categories and their 7 platform mappings port verbatim; Medtronic still does not declare the capability."
+      },
+      {
+        "capability": "PluginEvent hierarchy and validation",
+        "ios_approach": "Swift `enum PluginEvent` with 8 associated-value cases and a `pluginId` computed property \u2014 a sealed class maps more naturally to an enum than to a class hierarchy. `CalibrationRequested`'s 20...500 requirement becomes a throwing static factory, since enum cases cannot throw. Platform-only enforcement becomes stronger than Kotlin's runtime set membership: give the `SafetyLimitsChanged` payload a `package`-access initializer so a driver in a separate target cannot construct the case at all, rather than having its publish silently swallowed."
+      },
+      {
+        "capability": "PluginEventBus and its platform implementation",
+        "ios_approach": "`protocol PluginEventBus { func publish(_:); func subscribe<T>(_ type: T.Type) -> AsyncStream<T> }`. Implementation is an actor holding per-subscriber `AsyncStream.Continuation`s created with `bufferingPolicy: .bufferingNewest(256)` \u2014 exactly reproducing 256-slot DROP_OLDEST with no replay, and improving on Kotlin by confining a slow consumer's drops to that consumer. `publishPlatform` lives only in the app module and constructs platform-only cases via the `package`-access initializer, so a separate driver target is a genuine access boundary rather than Kotlin's `internal`."
+      },
+      {
+        "capability": "Dashboard card descriptors and CardElement validation",
+        "ios_approach": "`struct DashboardCardDescriptor` with a throwing init (non-blank id and title, whitespace-only rejected) and `indirect enum CardElement` with the same 9 cases behind throwing factories carrying the same finite/non-empty/range checks. UiColor (6), LabelStyle (4) and PluginIcon (13) become plain enums mapped to a SwiftUI style catalog and SF Symbols. Priority ordering (0-50 core, 100+ plugin, lower sorts higher) and `hasDetail` chevron behavior are unchanged. Empty `elements` stays legal; empty Row/Column/SparkLine still throws."
+      },
+      {
+        "capability": "Settings descriptors and key validation",
+        "ios_approach": "`enum SettingDescriptor` with the same 6 cases, each built through a throwing factory applying `^[a-zA-Z][a-zA-Z0-9_.-]{0,127}$` \u2014 keys remain both UI identifiers and persistence keys. Slider's min<max, step>0, step<=(max-min) and Dropdown's non-empty options and non-blank values port as-is. `PluginSettingsDescriptor` still rejects duplicate keys across sections and lists the duplicates. `ButtonStyle.destructive` drives a SwiftUI `.confirmationDialog`. The renderer auto-persists Toggle/Slider/Dropdown/TextInput and writes a timestamp for ActionButton taps."
+      },
+      {
+        "capability": "Detail screens and detail-action routing",
+        "ios_approach": "`DetailScreenDescriptor` with a throwing init: non-blank title, at most 100 elements (100 accepted, 101 rejected \u2014 the explicit UI-DoS guard), and no duplicate keys among Interactive elements. `enum DetailElement { display, interactive, sectionHeader }` with non-blank section titles; Display elements have no keys and never collide; empty element lists stay legal. The ViewModel becomes an `@Observable` object consuming the stream off the main actor with latest-wins conflation, resetting error per emission and surfacing the same two user-facing strings. Actions dispatch off-main; detail is only requested for `hasDetail` cards; same-cardId reload is still skipped."
+      },
+      {
+        "capability": "PluginRegistry: creation, activation, mutual exclusion",
+        "ios_approach": "A `@MainActor final class DriverRegistry` with one-shot initialization. Per driver: apiVersion check, feature-gate check, ID regex validation, reserve the id in `compileTimeIds` before init so a later registration cannot hijack it, build context, create, initialize, store; any throw logs, drops the settings entry, and continues with the remaining drivers. Activation preserves the exact order \u2014 `onActivated()` on the new driver first, then persist capability slots, then deactivate conflicts, then republish \u2014 so a single-instance slot is never empty mid-swap. MainActor isolation replaces `synchronized(activationLock)`; a reentrant actor must not be used here."
+      },
+      {
+        "capability": "PluginRegistry: capability slot state flows",
+        "ios_approach": "Eight `@Observable` properties (or AsyncStreams) with identical selection rules: activePumpPlugin = first active declaring PUMP_STATUS or INSULIN_SOURCE cast to DevicePlugin; activeGlucoseSource; activeCalibrationTarget; activeBgmSources as a Set; activeDataSyncPlugins typed `any Plugin` rather than DevicePlugin; allActivePlugins; availablePlugins. `as? DevicePlugin` becomes `as? any DevicePlugin`, preserving the silent exclusion of non-device sources such as a Nightscout-backed glucose source. Replace the ConcurrentHashMap `firstOrNull` with an order-stable array so the unspecified-iteration-order ambiguity disappears."
+      },
+      {
+        "capability": "Plugin feature gate (kill switch)",
+        "ios_approach": "`protocol PluginFeatureGate { func isEnabled(_ pluginId: String) -> Bool }`, evaluated before instantiation so a gated driver is never created, never listed, never paired and never polled \u2014 identical semantics. Backed by an `.xcconfig` build setting surfaced as a generated Swift constant, which the fork-and-build model already requires for team and bundle identifiers. Keep the reference to the driver's canonical `pluginId` constant so the switch cannot drift onto a nonexistent id. Gating a driver off still leaves its persisted active-plugin preference intact."
+      },
+      {
+        "capability": "Read-only capability set (deliberate non-feature)",
+        "ios_approach": "Preserved and hardened. `PluginCapability` stays a closed Swift enum with no raw-value or string construction, so an out-of-enum capability is a compile error rather than a runtime hope. No protocol in `PumpDriverAPI` exposes delivery, basal, or setting-write methods; calibrate, unpair, autoReconnectIfPaired and connect/disconnect remain classified as session/lifecycle, not therapy. Implement the follow-up Android recorded but never built: a CI lint that fails the build if a driver target writes to a known therapy control-point characteristic or exposes a symbol matching a delivery-verb denylist."
+      },
+      {
+        "capability": "DemoGlucometerPlugin (reference driver) \u2014 core",
+        "ios_approach": "Ports verbatim as a compile-time Swift target and gains importance: with no Core Bluetooth in the Simulator it is the lead developer's only executable driver. Same id, name, version, and `{BGM_SOURCE, DATA_SYNC}` declaration \u2014 both multi-instance, deliberately never conflicting with a pump's GLUCOSE_SOURCE. Same lifecycle including the early return when `sim_enabled` is false and the resulting Disconnected sync card. The SupervisorJob scope becomes a `Task` retained by the driver and cancelled in onDeactivated and shutdown. Replace `println` with OSLog (no payloads)."
+      },
+      {
+        "capability": "DemoGlucometerPlugin UI surfaces",
+        "ios_approach": "Both cards port element-for-element: `demo-glucometer-status` at priority 100 with detail, the MUTED / ERROR<70 / WARNING>180 / SUCCESS LargeValue coloring, the Simulated INFO badge, the BATTERY+GLUCOSE IconValue row, the SparkLine, the battery ProgressBar; `demo-glucometer-sync` at priority 110 with last-sync HH:mm:ss in the system zone or the no-data string. The 5-second repaint becomes an AsyncStream with `Task.sleep(for: .seconds(5))` suspended when the view is off screen via `.task` \u2014 a battery win over Android's unconditional loop. All three settings sections port unchanged."
+      },
+      {
+        "capability": "DemoGlucometerPlugin detail screen + manual entry",
+        "ios_approach": "Same cardId gate, same 3-second rebuild, same layout: Recent Readings placeholder or the last 10 reversed as HH:mm:ss with mg/dL, SparkLine at history>=2, Manual Entry TextInput plus PRIMARY ActionButton, Simulator Controls repeating the toggle and slider, Safety Info showing live limits. The action reads `detail_bg_value`, parses with `Int(_:)`, publishes NewBgmReading with meterName 'Demo Glucometer (manual)', and clears the field. Fix two Android defects during the port: validate against the current SafetyLimits rather than the raw literal, and show an inline error instead of a silent no-op."
+      },
+      {
+        "capability": "ReadingSimulator (synthetic BGM generator)",
+        "ios_approach": "An `actor` producing a cold `AsyncStream<BgmReading>`. Generator ports exactly: base = 130 + 50\u00b7sin(phase), jitter +/-10, phase advanced by 2pi/12 for a 12-reading cycle, result rounded and clamped to 20...500. Critically the safety-limits read stays inside the loop, one `.value` per iteration \u2014 this is the reference behavior every real driver must copy. Out-of-range values are dropped, not clamped, and the delay still runs so cadence is unaffected by filtering. Both history arrays trimmed to 12; actor isolation replaces the informal one-collector-only rule."
+      }
+    ],
+    "needs_redesign": [
+      {
+        "capability": "DevicePlugin (hardware) extension \u2014 connect/disconnect/scan contract",
+        "why": "Three Android assumptions break. (1) `address: String` is a MAC on Android; iOS never exposes a BLE MAC \u2014 a peripheral is identified by `CBPeripheral.identifier`, a UUID that is app-specific, device-specific and NOT stable across app reinstall. (2) CoreBluetooth's `connect(_:options:)` has no timeout at all and retries indefinitely, including across app suspension and relaunch \u2014 the opposite of Android's documented 30s convention. (3) `scanForPeripherals(withServices: nil)` discovers nothing while the app is backgrounded; background scans must pass explicit service UUIDs and always coalesce duplicates, and only UUID-filtered scans are restored after a background relaunch. Medtronic's 'ignores address entirely' case is unaffected.",
+        "options": [
+          "Keep `address: String` and carry `CBPeripheral.identifier.uuidString` in it \u2014 minimal API churn, but the field silently changes meaning and stops being reinstall-stable",
+          "Introduce a `DeviceIdentity` value type (opaque platform id + advertised name + optional pump serial) and re-bind on serial match when the UUID misses, so reinstall does not force a full re-pair",
+          "Split connect into `connect(identity:config:)` with a driver-owned timeout Task for user-initiated pairing, plus `awaitConnection(identity:)` that deliberately leaves the CoreBluetooth connect pending forever to power background reconnect"
+        ],
+        "recommendation": "Adopt DeviceIdentity and both connect forms. Use a driver-owned 30s timeout for user-initiated connect to preserve the Android contract, and the never-timing-out pending connect for auto-reconnect \u2014 that is CoreBluetooth's designed reconnect path and is strictly better than Android's backoff loop. `scan()` must always pass the driver's service UUID set; unfiltered scan becomes a documented foreground-only debug affordance. Keep `config` as a free-form string map with `pairingCode` preserved."
+      },
+      {
+        "capability": "ConnectionState machine",
+        "why": "The 7 states port, but iOS adds two conditions the enum cannot express. First, `CBManagerState` (poweredOff, unauthorized, unsupported, resetting) is a first-class, user-actionable condition: connect() cannot even be attempted and there is no state to show \u2014 Android reaches the same situation by a different path and the enum papers over it. Second, Core Bluetooth state restoration relaunches the app straight into an already-connected peripheral without passing through SCANNING/CONNECTING/AUTHENTICATING; `willRestoreState` fires before `centralManagerDidUpdateState`, in a short background window, and cannot resume arbitrary driver work \u2014 the driver must rebuild session and auth context from persisted credentials.",
+        "options": [
+          "Add cases to ConnectionState (`unavailable`, `unauthorized`, `restoring`) \u2014 simple, but mutates an enum shared with the watch target and the backend contract",
+          "Keep the 7 states and expose a parallel `bluetoothAvailability` stream on the registry, mirroring how PairingFault already runs parallel to ConnectionState",
+          "Model restoration as a synthetic transition \u2014 enter AUTHENTICATING, then CONNECTED or AUTH_FAILED \u2014 so no consumer ever observes a state it cannot interpret"
+        ],
+        "recommendation": "Option 2 plus option 3's synthetic transition, with no new public case. Keep the 7 names and the StateFlow-always-has-a-value guarantee for cross-platform parity, add the parallel availability stream (the PairingFault precedent is exactly this pattern), and emit synthetic transitions on restoration. AUTH_FAILED stays terminal-ish, requiring an explicit new connect(); explicit disconnect and give-up still land on DISCONNECTED."
+      },
+      {
+        "capability": "PairingProfile / PairingStyle / PairingFault \u2014 the ADVERTISE_AND_WAIT path",
+        "why": "CENTRAL_SCAN (Tandem) is fine. ADVERTISE_AND_WAIT (Medtronic MiniMed 700-series) collides with two hard CoreBluetooth rules. When backgrounded, `CBPeripheralManager` drops `CBAdvertisementDataLocalNameKey` entirely and moves service UUIDs into the overflow advertising area, discoverable only by iOS devices explicitly scanning for that UUID \u2014 a pump scanning by name will never see a backgrounded iPhone. And `advertisedName` is only settable in the foreground advertisement payload; the GAP Device Name a pump may actually read is the user's device name ('Dan's iPhone'), which an app cannot set. iOS also cannot clear a BLE bond programmatically.",
+        "options": [
+          "Foreground-only pairing: a modal pairing screen that advertises with a local name, explicit keep-this-screen-open instruction, and `isIdleTimerDisabled` while advertising",
+          "Instruct the user to rename their iPhone in Settings so the system device name matches what the pump expects, with an on-screen verification of the current name",
+          "Ship Medtronic gated off at launch using the existing feature gate and enable it only after advertise-and-wait is validated on Daniel's hardware"
+        ],
+        "recommendation": "Options 1 and 3 together, with 2 documented as the fallback. Implement the foreground-only pairing modal, keep `PairingProfile.advertisedName` as the displayed expectation, and extend PairingFault with iOS-specific cases \u2014 `bluetoothUnauthorized`, `bluetoothPoweredOff`, `backgroundAdvertisingNameless` \u2014 alongside the existing five. PERIPHERAL_UNSUPPORTED maps to `CBPeripheralManager.state == .unsupported`; ADVERTISE_FAILED to a failed `startAdvertising` callback; BOUND_ELSEWHERE stays the same heuristic timeout with no protocol signal."
+      },
+      {
+        "capability": "Device discovery models and Tandem model detection",
+        "why": "`TandemPumpModel.fromAdvertisedName` ports verbatim \u2014 `CBAdvertisementDataLocalNameKey` yields the same advertised string, and the whitespace-collapse, case-insensitive prefix match, empty-string and 'Tandem Pump' fallback-to-UNKNOWN behaviors are all unchanged, tests included. What breaks is `DiscoveredDevice.address` and the legacy `DiscoveredPump`: no MAC, a per-install UUID, and RSSI only available at discovery time (a connected peripheral requires an explicit `readRSSI()`, so `rssi` must stay optional and the legacy `rssi ?: 0` coercion becomes actively misleading).",
+        "options": [
+          "Store `CBPeripheral.identifier.uuidString` in `address` and accept a forced re-pair after every reinstall or device migration",
+          "Store the UUID plus the pump serial number read post-connect from Device Information Service / PumpHardwareInfo, and re-bind on serial match when the UUID misses",
+          "Drop the legacy `DiscoveredPump` shape entirely during the port rather than carrying its rssi coercion forward"
+        ],
+        "recommendation": "Options 2 and 3. Persisting the serial alongside the peripheral UUID is what makes 'you reinstalled, we found your pump again' possible; without it, every reinstall or bundle-identifier change forces a full re-pair, which for Tandem means re-entering the pump pairing code from the pump screen. Delete DiscoveredPump. Keep the `metadata: [String: String]` bag on DiscoveredDevice for driver-specific advertisement data."
+      },
+      {
+        "capability": "GlucoseSource capability \u2014 the 60-second poll",
+        "why": "Both shipped drivers poll every 60,000 ms in an unbounded loop. iOS has no foreground service and suspends the app between Core Bluetooth callbacks: a self-scheduled Timer or `Task.sleep` does not fire while suspended, and BGAppRefreshTask cannot be scheduled tighter than roughly 15 minutes \u2014 opportunistic, system-decided, not guaranteed. Holding an open BLE connection wakes the app for peripheral events, not for its own timers. So an exact 60s cadence is achievable only in the foreground. Worse, the Android implementations swallow failures via success-only handling, so on iOS an indefinitely stale display would be indistinguishable from a quiet pump.",
+        "options": [
+          "Notification-driven: subscribe to the pump's CGM characteristic and let value-update callbacks wake the app \u2014 only works where the pump pushes, and Medtronic's own KDoc says its stream is polling, not pump-pushed",
+          "Hybrid: exact 60s cadence in the foreground; in the background rely on connection and notification wakes plus history-log backfill on the next wake to close every gap",
+          "Register BGAppRefreshTask and BGProcessingTask as opportunistic supplements, and use BGContinuedProcessingTask for a user-initiated full history backfill with a system progress UI"
+        ],
+        "recommendation": "Option 2 as the architecture with option 3 as a supplement, and move cadence ownership out of the capability into a platform polling orchestrator \u2014 where Medtronic's KDoc already says it is headed. Explicitly do NOT port the swallow-failures behavior: surface poll failure and last-successful-read time, because iOS will produce far more gaps than Android and staleness must be visible rather than inferred."
+      },
+      {
+        "capability": "PumpStatus capability \u2014 unpair(), autoReconnectIfPaired(), and full history sync",
+        "why": "The six read methods and the three pure `extract*` functions port unchanged; drop-never-clamp is language-independent. Two lifecycle methods do not. An iOS app cannot remove a Bluetooth bond \u2014 only the user can, via Settings > Bluetooth > Forget This Device \u2014 so `unpair()` can clear credentials and disconnect but may leave a stale bond that blocks re-pairing with a fresh key. `autoReconnectIfPaired()` maps far better on iOS than Android because an indefinite pending connect plus state restoration does the work, so its shape should change too. Both currently sit on PUMP_STATUS, meaning a device driver without PUMP_STATUS has no unpair path at all.",
+        "options": [
+          "Make `unpair()` async, clear app-side credentials, cancel the connection, and return a flag telling the UI to instruct the user to also forget the device in iOS Settings",
+          "Make both methods `async throws` now \u2014 the Android TODO says exactly this, and the port is the free moment to do it",
+          "Move both from PUMP_STATUS to DevicePlugin, fixing the Android quirk that a device driver without PUMP_STATUS has neither unpair nor reconnect"
+        ],
+        "recommendation": "All three. `unpair()` becomes `async throws -> UnpairResult` carrying `requiresSystemForget: Bool`; both lifecycle methods move to DevicePlugin where they belong. Keep `getFullHistoryLogs`'s defaulted delegation to `getHistoryLogs` (Tandem overrides, Medtronic does not) and run the unbounded variant under BGContinuedProcessingTask so a long Tandem backfill survives backgrounding. Fix the KDoc property names (glucoseLow/glucoseHigh/maxBolus do not exist) rather than porting them."
+      },
+      {
+        "capability": "PluginFactory and dual discovery",
+        "why": "Half of this capability disappears: the runtime path \u2014 no-arg constructor plus reflective instantiation from a sideloaded DEX JAR \u2014 is impossible on iOS. The compile-time path also has no direct equivalent: Swift and SPM have no Hilt `@Binds @IntoSet` multibinding, and Swift cannot enumerate types conforming to a protocol at runtime. Drivers must be registered in an explicit, hand-maintained list, which introduces a failure mode Android does not have: a driver that compiles but was never added to the list is silently absent from the app.",
+        "options": [
+          "A single `DriverCatalog.all: [any PluginFactory]` array in the app module, hand-maintained",
+          "An SPM build-tool plugin that scans driver targets with SwiftSyntax and generates the registration array at build time",
+          "Each driver package exposes a `register(into:)` entry point called from one explicit place, with a test asserting the catalog's exact expected set of plugin IDs"
+        ],
+        "recommendation": "Option 1 plus option 3's test. The driver set is small and fixed, and a codegen build plugin adds complexity to a repo every user must build themselves. `metadata` stays available without instantiation as a `static var` on the factory type so the settings screen can list drivers without creating them, and the platform \u2014 not the factory \u2014 still calls `initialize(context)` with the same context instance handed to `create`."
+      },
+      {
+        "capability": "PluginMetadata and PLUGIN_API_VERSION",
+        "why": "The struct ports trivially, but the version check changes meaning. On Android it is a runtime gate rejecting a mismatched sideloaded JAR; with compile-time linking a driver can never be older than the app it is built into, so a runtime `apiVersion != 5` check is dead code. Its real iOS value is as a source-compatibility marker for out-of-tree forks carrying a private driver. This is also the moment to resolve the three-way drift \u2014 code says 5, docs/dev/plugin-architecture.md says 2, and the example README and META-INF/plugin.json say 1, which is why the shipped example would be rejected today.",
+        "options": [
+          "Keep the runtime check as belt-and-braces \u2014 cheap, but it always passes",
+          "Move enforcement to build time: an XCTest asserting every registered factory's apiVersion equals PLUGIN_API_VERSION, so a stale out-of-tree driver fails CI instead of silently vanishing at runtime",
+          "Drop the constant and rely purely on SPM semantic versioning of the PumpDriverAPI package"
+        ],
+        "recommendation": "Option 2 plus SPM semver on PumpDriverAPI, bumping major on breaking changes to Plugin/DevicePlugin, capability protocols, PluginContext parameters, PluginEvent cases, or descriptor cases \u2014 the same rule Android documents. Set the Swift constant to 5 and fix all three documentation sites in the same change; do not carry the drift into the new repo. Keep the reverse-domain plugin-ID regex and the 'Tandem v1.0.0' protocolName+version rendering convention."
+      },
+      {
+        "capability": "Deprecated pump interfaces (PumpDriver, PumpConnectionManager, PumpScanner, HistoryLogParser) and their registry adapters",
+        "why": "These four interfaces plus four adapters exist purely to keep pre-plugin Android call sites compiling. A green-field Swift port has no such call sites, so porting them imports roughly eight types of pure technical debt \u2014 including two genuine defects. HistoryLogParserAdapter returns an empty list when no pump plugin is active, indistinguishable from 'no new records', which masks data loss; and the deprecated `limits: SafetyLimits = SafetyLimits()` default parameters silently substitute absolute limits whenever a caller forgets to pass the user's narrowed configuration.",
+        "options": [
+          "Port all four plus adapters for line-by-line traceability against the Android source",
+          "Port none; every iOS call site goes directly to the registry's capability slots",
+          "Port none, but keep the adapters' one good behavior \u2014 an explicit no-active-plugin error rather than an empty or substituted result"
+        ],
+        "recommendation": "Option 3. Delete the deprecated surface entirely, and make 'no active pump plugin' a typed error everywhere \u2014 never an empty array, never a default-constructed SafetyLimits. Also delete the `SafetyLimits()` default parameter from every signature so the user's configured limits must be passed explicitly; that default is a latent safety bug rather than a convenience, and the port is the only cheap moment to remove it."
+      },
+      {
+        "capability": "Safety-constant drift guard (the 20..500 bound duplicated across ~15 sites)",
+        "why": "The Android guard works three ways, the third being a comment-stripped source scan for inline `20..500` literals across modules a test cannot import. That third mechanism is fragile, and the port is the moment to remove the need for it. Separately, the Android repo's static-analysis gates lean on Semgrep's Kotlin and Java rulesets, which have no Swift equivalent, so 'the same security testing in substance' must be reconstructed from different tools rather than by copying the workflow.",
+        "options": [
+          "Reproduce the Android guard verbatim in XCTest including a source scan over the driver sources",
+          "Consolidate to one `GlucoseBounds.absolute: ClosedRange<Int> = 20...500` in a SafetyCore module referenced by CgmReading, BgmReading, SafetyLimits, CalibrationTarget, PluginEvent, the watch target and the widget, plus a SwiftLint custom rule banning bare `20...500` and `20..<501` outside that file",
+          "Both: consolidate, and keep a reduced guard test asserting the constants and exercising every validator at its boundaries"
+        ],
+        "recommendation": "Option 3, and state the security-gate mapping plainly rather than by tool name. Semgrep parses Swift but there is no Swift security ruleset comparable to p/kotlin or p/java; the substance is recovered from MobSF for iOS/Swift static analysis, `xcodebuild analyze` (Clang static analyzer), SwiftLint custom rules encoding this project's own invariants, and Periphery for dead code. Language-agnostic gates port by name unchanged: gitleaks/trufflehog for secrets, zizmor for GitHub Actions, osv-scanner for Package.resolved (thinner Swift coverage than Maven \u2014 supplement with Dependabot's SPM support)."
+      },
+      {
+        "capability": "Fidelity of the example driver as a reference",
+        "why": "On Android the demo plugin is a nice-to-have; on iOS it becomes load-bearing. Core Bluetooth does not exist in the iOS Simulator, and the lead developer has no iPhone and no Apple Watch, so every non-hardware validation runs in the Simulator. But the Android demo is a plain Plugin, not a DevicePlugin: no connect/disconnect/scan, no ConnectionState, no PairingProfile or PairingFault, no credential use, no DebugLogger, no CalibrationTarget participation, and no capability entry for its declared DATA_SYNC. Those are precisely the surfaces most in need of Simulator exercise.",
+        "options": [
+          "Port the demo as-is and accept that the entire DevicePlugin surface is untestable without Daniel's hardware",
+          "Add a `SimulatedPumpDriver` implementing the full DevicePlugin + PumpStatus + InsulinSource + GlucoseSource + CalibrationTarget surface with scriptable scenarios: connect, auth failure, link loss, reconnect, restoration entry, occlusion, partial delivery, out-of-range readings, and both pairing styles including advertise-and-wait faults",
+          "Add a recorded-trace replay driver that plays captured Tandem and Medtronic packet logs through the real parsers so extract* and the drop-never-clamp filters run against real wire data in the Simulator"
+        ],
+        "recommendation": "Options 2 and 3, both shipped in the repo and both runnable in the Simulator and in CI. The scriptable simulator is how the connection state machine, pairing faults, restoration and safety filtering get automated coverage; the trace-replay driver is how parser correctness gets covered without a pump. Also fix the demo's apiVersion inconsistency and its use of the raw 20...500 literal instead of the configured limits."
+      },
+      {
+        "capability": "Build configuration and toolchain pins",
+        "why": "Nothing here survives literally: Gradle modules, compileSdk 35 / minSdk 30, jvmTarget 17, ProGuard consumer rules, the Gradle lockfile, kotlinx-coroutines exported as an api dependency, and the d8 DEX packaging step all disappear. The fork-and-build distribution model adds constraints Android does not have: bundle identifiers, App Group identifiers and Keychain access groups must be templated per user because every fork signs with a different Team ID, and the proguard keep-rules for capability reflection have no analogue because Swift capability lookup is not reflective.",
+        "options": [
+          "One Xcode project with targets \u2014 simplest for a fork-and-build user, weakest module boundary",
+          "SPM packages for SafetyCore, PumpDriverAPI and one per driver, consumed by a thin app target \u2014 real internal/package access boundaries, which is what replaces Kotlin `internal` for the platform-only event bypass",
+          "Mixed: SPM for the API and drivers, an Xcode project for the app, watch app and widget extension"
+        ],
+        "recommendation": "Option 3. Pin Swift and Xcode versions in the CI workflow and in a `.xcode-version` file, and commit `Package.resolved` as the lockfile equivalent. SafetyCore must build for iOS, watchOS and the widget extension so no surface outside the phone app can construct an invalid reading. Templated TEAM_ID, BUNDLE_ID_PREFIX and APP_GROUP live in an xcconfig the forking user fills in once, following the Loop/LoopWorkspace pattern."
+      }
+    ],
+    "impossible": [
+      {
+        "capability": "Runtime plugin loading (DEX JAR sideloading via DexPluginLoader)",
+        "why": "iOS forbids executing code that is not present in the signed app bundle. There is no DexClassLoader equivalent, `dlopen` of a downloaded binary is blocked by code signing and by App Store and TestFlight policy, and Swift has no reflective instantiation of a class named by a manifest string. Every element of this capability is unimplementable: the DexClassLoader with the app classloader as parent, the 65,536-char-bounded META-INF/plugin.json read, `loadClass(factoryClass).getConstructor().newInstance()`, the PluginFactory cast, and the exact-match apiVersion rejection.",
+        "closest_alternative": "Compile-time-linked driver targets \u2014 already the decided architecture \u2014 plus the fork-and-build distribution model as the authorship path: a third-party driver author forks the repo, adds a Swift package target conforming to DevicePlugin, registers it in DriverCatalog, and the user builds and signs it into their own TestFlight. The PluginManifest fields (id, name, version, apiVersion, factoryClass, author, description) survive as static metadata on the factory type, validated by the same reverse-domain ID regex and by a build-time apiVersion assertion instead of a runtime rejection. The trust step moves from 'user taps install and accepts a warning' to 'user builds with their own signing key'."
+      },
+      {
+        "capability": "Plugin JAR file management (PluginFileManager install/remove)",
+        "why": "With no runtime loading there is nothing to install. The entire mechanism is Android-specific plumbing for a capability iOS does not have: the Storage Access Framework document picker, the .jar suffix requirement, filename sanitization, the canonical-path traversal guard with its trailing-separator refinement, the 50 MB streaming abort, the PK\\x03\\x04 ZIP magic check, `setReadOnly()` for DexClassLoader, and the setWritable-then-delete removal. iOS also gives a user no supported way to place an executable artifact into an app's container.",
+        "closest_alternative": "Nothing user-facing survives. The equivalent trust decision moves to build time and becomes visible in the repository: which drivers a given fork links is declared in DriverCatalog and in the xcconfig feature flags. The one thing worth keeping in spirit is the security warning \u2014 the pre-build documentation and the in-app driver list should state which drivers are compiled into this build and that they were reviewed as source rather than contained at runtime."
+      },
+      {
+        "capability": "Runtime plugin sandbox (RestrictedContext + ScopedCredentialProvider)",
+        "why": "RestrictedContext is a ContextWrapper that throws SecurityException for roughly thirty Context operations and allowlists seven system services. iOS has no per-module runtime capability restriction: all code in an app bundle shares one sandbox, one entitlement set, one container and one Keychain. Swift cannot deny one target access to CoreBluetooth, the file system or URLSession at runtime, and there is no getSystemService chokepoint to allowlist. The stated design philosophy \u2014 that safety enforcement comes from backend-synced SafetyLimits rather than blanket Context restriction \u2014 is the part that does survive intact.",
+        "closest_alternative": "Compile-time containment in place of runtime containment: each driver lives in its own SPM target declaring only SafetyCore, PumpDriverAPI and CoreBluetooth as dependencies, so importing UIKit, URLSession or app internals is a build error rather than a caught SecurityException; back that with a CI lint over driver-target imports and a CODEOWNERS review gate on driver code. ScopedCredentialProvider's deliberate unencrypted-SharedPreferences compromise disappears entirely \u2014 on iOS every driver uses the same Keychain-backed store, which is strictly stronger than the Android runtime-plugin path and removes that documented revisit trigger."
+      }
+    ],
+    "ios_requirements": [
+      "The app must define the absolute glucose validity range 20-500 mg/dL exactly once, in a module shared by the phone app, the watch app and any widget extension, and every reading model, safety-limit type, calibration validator and event validator must reference that single definition.",
+      "CI must fail the build if the glucose bounds, the mmol/mg-dL factor 18.0156, or the Tandem epoch offset 1199145600 drifts from its canonical value, and must exercise every validator at both its accept and reject boundaries.",
+      "Every reading model (CGM, BGM, bolus) must reject out-of-range construction by throwing, so a driver cannot publish an unvalidated value and a caller that omits filtering fails loudly rather than storing bad data.",
+      "All history extraction and bolus-history paths must drop out-of-range readings and doses rather than clamp them, and tests must prove that a 900 mg/dL record and a 40 U bolus are absent from the result rather than coerced to 500 and 25.",
+      "Drivers must read the current safety limits at every validation pass, and a test must prove that narrowing the limits mid-stream changes which readings are accepted without restarting the driver.",
+      "The app must accept safety limits only from backend sync and must never offer a local override; limits received from the backend must be clamped rather than crash the app, and any clamping must be recorded and surfaced.",
+      "The app must expose the age of the last safety-limit sync and must treat a never-synced install as stale.",
+      "A user must be able to see every pump driver compiled into their build, which drivers are active, and which capability slot each one occupies.",
+      "Activating a driver must never leave its capability slot empty during the swap, and activating a conflicting single-instance driver must automatically deactivate the previous one.",
+      "Deactivating a driver must stop its work while preserving its credentials and settings, so reactivation does not require re-pairing.",
+      "A maintainer must be able to disable a specific driver at build time such that it is absent from the driver list, never instantiated and never polled, while the user's prior selection is preserved for when it is re-enabled.",
+      "A user must be able to pair a Tandem t:slim X2 by scanning, choosing from a device list and entering the pump pairing code, with model-appropriate instructions derived from the advertised name and generic instructions for an unrecognized model.",
+      "A user must be able to pair a Medtronic 700-series pump by keeping a pairing screen open while the phone advertises, selecting the phone from the pump's own menu, and must be shown a specific reason when the attempt stalls: Bluetooth off, Bluetooth permission denied, this device cannot advertise, advertising rejected, handshake timed out, authentication rejected, or the pump is still bound to another phone.",
+      "The app must reconnect automatically to a previously paired pump after being backgrounded, after being terminated by the system, and after device reboot, without the user reopening the app.",
+      "The app must remain able to identify a previously paired pump after the app is reinstalled or the phone is replaced, or must clearly tell the user that re-pairing is required and why.",
+      "When a user unpairs a pump the app must clear its stored credentials and disconnect, and must tell the user when an additional Forget This Device step in iOS Settings is required to complete removal.",
+      "The app must distinguish 'no new reading' from 'the pump has not responded', and must surface the age of the most recent successful read rather than presenting an indefinitely stale value as current.",
+      "The app must backfill pump history after any period of lost connectivity or app suspension, and a full history sync started by the user must be able to continue while the app is backgrounded.",
+      "Pump credentials and pairing codes must be stored encrypted, unavailable before first device unlock, excluded from iCloud and encrypted backups, and removed when the app is deleted and reinstalled.",
+      "Raw BLE packet payloads must be retained only in debug builds and only in memory, and must never be written to any log or file that can leave the device.",
+      "The app must expose no insulin delivery, basal change or pump setting write anywhere in the driver API, and CI must fail if a driver introduces a write to a therapy control point or a symbol matching a delivery-verb denylist.",
+      "The app must ship a fully simulated pump driver, runnable in the iOS Simulator without Bluetooth, that exercises connection, authentication failure, link loss, reconnection, background restoration, both pairing styles, every pairing fault, and out-of-range readings.",
+      "The app must ship a recorded-trace replay driver so that real Tandem and Medtronic packet parsing and safety filtering can be validated in the Simulator without a physical pump.",
+      "A user must be able to fork the repository, supply their own Apple Team ID and App Store Connect API key, and produce a signed TestFlight build through GitHub Actions without owning a Mac and without any project-published binary.",
+      "The app must declare NSBluetoothAlwaysUsageDescription and the bluetooth-central and bluetooth-peripheral background modes, and must degrade to a clearly labelled unavailable state when Bluetooth is off, unauthorized or unsupported.",
+      "Every driver plugin ID must match the reverse-domain identifier pattern and every settings key must match the settings-key pattern, enforced at build time, because both values are also persistence keys.",
+      "Event delivery between drivers and the platform must be explicitly best-effort with bounded buffering, and no user-facing alerting may depend on it for a delivery guarantee.",
+      "A driver that is compiled into the app but not registered in the driver catalog must fail CI rather than be silently absent from the running app."
+    ],
+    "risks": [
+      {
+        "risk": "The 60-second glucose poll cannot run on schedule while the app is backgrounded. iOS suspends the app between Core Bluetooth callbacks so a self-scheduled timer does not fire, and BGAppRefreshTask is opportunistic at roughly 15-minute-or-worse granularity. Android's foreground service has no iOS equivalent, so iOS users will see data gaps Android users do not.",
+        "severity": "high",
+        "mitigation": "Drive cadence from peripheral notifications where the pump pushes; hold an indefinite pending connect so link events wake the app; backfill every gap from history logs on the next wake; and surface last-successful-read age prominently so a gap is visible rather than a stale number presented as current. Move cadence ownership from the capability into a platform polling orchestrator."
+      },
+      {
+        "risk": "Medtronic advertise-and-wait pairing may be unachievable in the background and unreliable even in the foreground: iOS drops the advertised local name when the app is backgrounded and never lets an app set the system GAP device name. If the pump matches on device name rather than the advertisement local name, the flow cannot work without the user renaming their iPhone.",
+        "severity": "high",
+        "mitigation": "Implement foreground-only pairing with a keep-awake modal and explicit on-screen instructions, ship Medtronic behind the existing feature gate, and enable it only after validation on Daniel's hardware. Document the rename-your-iPhone fallback and detect the mismatch on screen."
+      },
+      {
+        "risk": "Nothing BLE is testable in the iOS Simulator and the lead developer has neither an iPhone nor an Apple Watch. Every connection, pairing, authentication, restoration and reconnection path depends on one maintainer's devices for validation, making that maintainer a single point of failure in the release pipeline.",
+        "severity": "high",
+        "mitigation": "Make the scriptable simulated driver and the trace-replay driver first-class shipped targets with CI coverage rather than test fixtures. Define a hardware smoke-test checklist Daniel runs before each tagged release, and treat any change to driver connection or authentication code as requiring hardware sign-off."
+      },
+      {
+        "risk": "Peripheral identity is not stable on iOS: CBPeripheral.identifier is per-app-install, so reinstalling the app, rebuilding a fork with a different bundle identifier, or moving to a new phone silently loses the pairing binding \u2014 and for Tandem that means re-entering the pump pairing code from the pump screen.",
+        "severity": "high",
+        "mitigation": "Persist the pump serial number alongside the peripheral UUID and re-bind on serial match. Keep Keychain items in a stable access group keyed off a templated identifier so an in-place rebuild does not orphan credentials, and purge orphaned Keychain items only on a genuine fresh install."
+      },
+      {
+        "risk": "Medtronic's bolus cursor is process-local, unpersisted, and advances before the orchestrator persists \u2014 tolerable on Android because the durable Room-backed slow loop self-heals. iOS suspends and terminates apps far more aggressively, so the fast path will skip boluses much more often, and porting it without the durable path would lose insulin records.",
+        "severity": "high",
+        "mitigation": "Persist the cursor, and do not ship the fast path until durable per-sequence history persistence exists. Make the durable path the source of truth for insulin totals and treat the cursor path strictly as a latency optimization."
+      },
+      {
+        "risk": "Critical Alerts is the only iOS mechanism that breaks through Silent mode and Focus, and its entitlement is granted by Apple only on individual request against a specific Team ID. In a fork-and-build model where every user signs with their own personal developer account, that entitlement is not obtainable, so no urgent-low alarm can be guaranteed to sound.",
+        "severity": "high",
+        "mitigation": "Use Time Sensitive notifications, whose entitlement is available to every developer without approval, plus a Live Activity for continuous glucose display, and state the limitation plainly in onboarding and the medical disclaimer: this app is not an alarm system. Coordinate with the alerting subsystem owner \u2014 this cannot be solved inside the driver API."
+      },
+      {
+        "risk": "Removing the runtime plugin loader deletes a real Android capability (third-party driver authorship without a repo change), and removing RestrictedContext deletes the only runtime containment for driver code. On iOS every compiled-in driver has the app's full entitlements, container and Keychain.",
+        "severity": "medium",
+        "mitigation": "Replace runtime containment with build-time containment: per-driver SPM targets declaring minimal dependencies, a CI import lint, CODEOWNERS review on driver targets, and an in-app list stating which drivers are compiled in. Document 'fork, add a target, build with your own key' as the supported authorship path."
+      },
+      {
+        "risk": "Core Bluetooth state restoration relaunches the app directly into a connected peripheral, bypassing SCANNING, CONNECTING and AUTHENTICATING, and gives only a short window in which willRestoreState fires before the manager state callback. A driver that assumes it always enters through connect() will observe an inconsistent state machine or fail to re-establish its authenticated session.",
+        "severity": "medium",
+        "mitigation": "Require every DevicePlugin to implement an explicit restoration entry point that rebuilds session and authentication context from persisted credentials, and emit synthetic AUTHENTICATING then CONNECTED or AUTH_FAILED transitions so downstream consumers never see an unreachable state. Cover restoration explicitly in the simulated driver's scenario set."
+      },
+      {
+        "risk": "Swift cannot enumerate protocol conformances at runtime, so a driver that compiles but is never added to the registration catalog is silently absent from the app \u2014 a failure mode Hilt's @IntoSet multibinding prevents on Android.",
+        "severity": "medium",
+        "mitigation": "A CI test asserting the catalog contains exactly the expected set of plugin IDs, updated deliberately whenever a driver is added, renamed or gated."
+      },
+      {
+        "risk": "UserDefaults returns a zero value rather than throwing when a key is read with the wrong typed accessor, converting Android's loud ClassCastException into a silent wrong value \u2014 which for a settings key feeding a threshold would be a wrong number rather than a crash.",
+        "severity": "medium",
+        "mitigation": "Maintain a per-driver key-to-type table asserted in tests, and never let a driver-owned settings value participate in glucose or dose validation; validation limits come only from the backend-synced SafetyLimits."
+      },
+      {
+        "risk": "safeOf can silently produce a 1 mg/dL-wide accept window from a nonsensical backend config (min 450, max 300 yields 450-451), after which nearly every reading is dropped and the app appears to have lost the pump with no explanation.",
+        "severity": "medium",
+        "mitigation": "Log and surface every clamping event, and add a sanity check that reports a resulting window narrower than a configurable floor to the user and to telemetry as a configuration fault rather than silently accepting it."
+      },
+      {
+        "risk": "Activation intentionally calls onActivated on the new driver before deactivating the conflicting one, so two drivers transiently hold the same single-instance capability and both can publish readings. A naive Swift port using a reentrant actor can widen that window from milliseconds to an unbounded await.",
+        "severity": "medium",
+        "mitigation": "Keep the registry on the main actor with a serialized activation queue rather than a reentrant actor, and tag events with the publishing driver so duplicates during the overlap are detectable downstream."
+      },
+      {
+        "risk": "Semgrep's Kotlin and Java security rulesets that back the Android repo's static gates have no Swift equivalent, so a naive port of the CI configuration would report green while testing nothing.",
+        "severity": "medium",
+        "mitigation": "Reconstruct the substance with MobSF, xcodebuild analyze, SwiftLint custom rules encoding this project's own safety invariants, and Periphery; carry gitleaks, zizmor and osv-scanner across unchanged; and record in the CI documentation which Android gate each Swift gate replaces."
+      },
+      {
+        "risk": "The Android source carries a three-way PLUGIN_API_VERSION inconsistency (code 5, architecture doc 2, example manifest 1) and PumpStatus KDoc references SafetyLimits property names that do not exist. Porting from the documentation rather than the code would encode wrong contracts into the new repository.",
+        "severity": "low",
+        "mitigation": "Treat the Kotlin source as the sole authority for the port, and land the documentation corrections in the Android repo in the same change set so the two repositories do not diverge further."
+      }
+    ],
+    "questions_for_pm": [
+      "Medtronic 700-series pairing requires the phone to advertise as a BLE peripheral under a name the pump can recognize, and iOS strips the advertised name whenever the app is backgrounded and never lets an app set the system-level device name. That makes Medtronic pairing foreground-only at best, and possibly dependent on the user renaming their iPhone. Is a foreground-only, instruction-heavy Medtronic pairing flow acceptable as parity, or should Medtronic ship gated off on iOS until hardware validation proves the flow works end to end?"
+    ]
+  }
+}

@@ -1,0 +1,1113 @@
+{
+  "key": "docs-and-policy",
+  "label": "Docs site, legal, and community policy surface",
+  "map": {
+    "subsystem": "Docs site, legal, and community policy surface (android-unofficial)",
+    "capabilities": [
+      {
+        "name": "docs/ tree layout and section _meta.json contract",
+        "behavior": "docs/ has 7 section dirs, each with exactly one _meta.json: adr, concepts, contract, daily-use, dev, mobile, troubleshooting. Schema is {\"title\": string, \"pages\": string[]}. Titles: adr=\"Architecture Decisions\", concepts=\"Concepts\", contract=\"API Contract\", daily-use=\"Daily Use\", dev=\"Developer Reference\", mobile=\"Mobile App\", troubleshooting=\"Troubleshooting\". pages entries are basenames WITHOUT extension and resolve to .md or .mdx (mobile lists \"status-icons\" \u2192 status-icons.mdx). pages order is the rendered nav order and is curated, not alphabetical \u2014 dev is [instrumented-tests-ci, security-testing, dependency-updates, release-and-promotion, signing-and-secrets, spdx-header-policy, plugin-architecture, wear-os-architecture]. There is NO docs/_meta.json; section ordering/inclusion at the top level is decided in the consuming website repo, not here.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/docs/adr/_meta.json",
+          "android-unofficial/docs/concepts/_meta.json",
+          "android-unofficial/docs/contract/_meta.json",
+          "android-unofficial/docs/daily-use/_meta.json",
+          "android-unofficial/docs/dev/_meta.json",
+          "android-unofficial/docs/mobile/_meta.json",
+          "android-unofficial/docs/troubleshooting/_meta.json"
+        ],
+        "edge_cases": [
+          "A page file present on disk but absent from its section's pages array is not in the nav.",
+          "No root docs/_meta.json exists, so this repo cannot order or name its own top-level sections.",
+          "pages arrays are hand-maintained: nothing in CI validates that every .md/.mdx is listed or that every listed page exists."
+        ]
+      },
+      {
+        "name": "Publication gate: what makes a page publishable",
+        "behavior": "Two conditions, both hand-enforced: (1) YAML frontmatter with `title:` and `description:` delimited by `---`; (2) the basename appearing in the owning directory's _meta.json pages array. All 18 pages inside the 7 section dirs satisfy both. The two files at docs/ root \u2014 history-extraction.md and THIRD_PARTY_LICENSES.md \u2014 have NO frontmatter and belong to no pages array, so they are repo-internal documents that are never published as website pages (THIRD_PARTY_LICENSES.md is instead consumed by the Gradle build). docs/licenses/*.txt are plain text, not pages. Frontmatter titles may be quoted when they contain a colon (all three ADRs quote theirs). Descriptions are one-sentence and used as the page subtitle/meta description.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/docs/history-extraction.md",
+          "android-unofficial/docs/THIRD_PARTY_LICENSES.md"
+        ],
+        "edge_cases": [
+          "No CI check enforces frontmatter presence or pages-array membership; a new page silently fails to publish.",
+          "No link checker exists \u2014 broken cross-references are undetected."
+        ]
+      },
+      {
+        "name": "Docs \u2192 website publication pipeline (notify-docs-update.yml)",
+        "behavior": "Workflow \"Notify Website on Docs Update\". Triggers: push to `main` touching `docs/**` or `.github/workflows/notify-docs-update.yml`, plus manual `workflow_dispatch` (documented as the way to force a rebuild after a failed run). Top-level and job-level `permissions: {}` (no GITHUB_TOKEN scopes at all). Single job `notify` on ubuntu-latest, two steps: (1) mint a cross-repo token with actions/create-github-app-token pinned to SHA 1b10c78c7865c340bc4f6099eb2f838309f1e8c3 (v3), app-id `secrets.CI_APP_ID`, private-key `secrets.CI_APP_PRIVATE_KEY`, `owner: github.repository_owner` (deliberately dynamic so org renames don't break it \u2014 the App installation lookup does not follow rename redirects), `repositories: website`; (2) `gh api repos/<owner>/website/dispatches -f event_type=docs-updated -F client_payload[source]=<repo> -F client_payload[sha]=<sha>`. The website repo pulls and renders the docs; this repo only fires the signal.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.github/workflows/notify-docs-update.yml"
+        ],
+        "edge_cases": [
+          "Only `main` publishes; docs merged to `develop` are invisible until promotion.",
+          "Dispatch is fire-and-forget: a failed website build is not surfaced here.",
+          "Nothing validates docs content before dispatch."
+        ]
+      },
+      {
+        "name": "Cross-repo shared docs namespace (relative links leave this repo)",
+        "behavior": "Published pages link with docs-root-relative paths to pages that do NOT exist in this repository: ../get-started.md, ../get-started.md#choose-your-path, ../get-started.md#a-note-on-the-terminal, ../troubleshooting/bg-not-updating.md, ../concepts/what-this-software-is-and-isnt.md, ../concepts/privacy.md, ../daily-use/dashboard.md, ./connecting-medtronic.md (CareLink page). This proves the website merges this repo's docs/ tree with the platform repo's docs/ tree into one namespace; a link is only resolvable post-merge. Conversely install.md links back into GitHub with absolute URLs for releases and ROADMAP.md. A Swift/iOS port that ships its own docs must reproduce this merged-tree assumption or rewrite every relative link.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/docs/mobile/install.md",
+          "android-unofficial/docs/mobile/status-icons.mdx",
+          "android-unofficial/docs/daily-use/connecting-medtronic-pump.md"
+        ],
+        "edge_cases": [
+          "install.md links to ./status-icons.md but the file is status-icons.mdx \u2014 extension-tolerant resolution assumed.",
+          "Repo slugs are inconsistent across documents: GlycemicGPT/GlycemicGPT, GlycemicGPT/android-unofficial, GlycemicGPT/glycemicgpt-android-unofficial, lumose-health/GlycemicGPT, lumose-health/.github, lumose-health/android-unofficial all appear."
+        ]
+      },
+      {
+        "name": "MDX pages with inline JSX (status-icons.mdx)",
+        "behavior": "docs/mobile/status-icons.mdx is the only .mdx page. It embeds raw <svg> elements with JSX attribute syntax (viewBox, fill, aria-hidden, style={{verticalAlign:\"-4px\",marginRight:\"8px\"}}) inline in prose, so the site renderer must support MDX/JSX, not just CommonMark. It documents the home-screen status row: Bluetooth pump state (blue #2563eb solid = Connected; amber #d97706 = Scanning\u2026/Connecting\u2026/Reconnecting\u2026; red #dc2626 crossed-out = No pump connected/Pairing failed, explicitly documented as the resting non-error state); sync status (up/down arrows = Synced, amber cloud-check = Pending, red = Not synced/Sync error); server reachability (blue cloud-check = Reachable, no label; red = \"Backend unreachable\"; red = \"Offline\"). Sync and reachability icons are hidden entirely in BLE-only mode (no server configured). Integration brand marks follow, at most one pump mark (Tandem or Medtronic) plus data sources (Nightscout); unbranded plugins show no mark; the mark row scrolls horizontally.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/docs/mobile/status-icons.mdx"
+        ],
+        "edge_cases": [
+          "Two separate icons intentionally answer different questions (\"is my data uploaded\" vs \"can I reach the server right now\") and must not look alike."
+        ]
+      },
+      {
+        "name": "docs/mobile/install.md \u2014 published Android install contract",
+        "behavior": "Requirements: Android 11+ (API 30+), Bluetooth, a reachable platform URL (http://<lan-ip>:3000 local, or https://domain). Explicit statement: \"Today only Android is supported. iOS is on the roadmap \u2026 but not available yet\" \u2014 iPhone users get browser dashboard only. Distribution: signed `app-release.apk` from the topmost GitHub release WITHOUT the yellow Pre-release label; dev users take `app-debug.apk` from the `dev-latest` pre-release. Install Path A = tap APK, toggle \"Allow from this source\". Path B = `adb install app-release.apk` after enabling Developer Options (tap Build number 7\u00d7) and USB debugging; `INSTALL_FAILED_USER_RESTRICTED` means policy-blocked (work device). Onboarding = Server URL then email/password sign-in. Pairing: Bluetooth + Location permission (Android requires Location for BLE scan; app does not track location), pump into pairing mode, 6-digit code. Battery impact documented as <5%/day. No auto-update; stale-version banner; in-place APK upgrade preserves settings/login/pairing.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/docs/mobile/install.md"
+        ],
+        "edge_cases": [
+          "Tandem pumps allow exactly one BLE connection at a time \u2014 must unpair t:connect first.",
+          "Battery optimization must be disabled or the background pump link drops.",
+          "\"If the dashboard is still empty after 5 minutes\" is the documented troubleshooting threshold."
+        ]
+      },
+      {
+        "name": "docs/mobile/wear-os.md \u2014 published watch install contract",
+        "behavior": "Watch face is optional. Two components: `wear-device` (companion app providing complications) and `watchface` (Watch Face Format APK). Wear OS 6+: ADB-install `wear-device-release.apk` once, then the phone app pushes the face via the Watch Face Push API (Settings \u2192 Watch \u2192 Push watch face). Wear OS 5: ADB-install BOTH `wear-device-release.apk` and `watchface-release.apk`; phone cannot push. Version check at Settings \u2192 System \u2192 About \u2192 Versions. Dev mode: tap Build number 7\u00d7, enable ADB debugging + Debug over Wi-Fi/Bluetooth; watch shows `<ip>:<port>` e.g. 192.168.1.42:5555; `adb connect`, `adb devices`, `adb -s <serial> install`, `-r` to upgrade in place. Face renders glucose, trend arrow (up/down/flat), IoB, time; updates once per glucose reading interval (~5 minutes). Documented failure threshold: `--` for glucose >5 minutes after fresh setup. Face is explicitly read-only.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/docs/mobile/wear-os.md"
+        ],
+        "edge_cases": [
+          "Wear OS forbids APK download from the watch browser, forcing the ADB workflow \u2014 called out as the hardest step in the whole product.",
+          "Roadmap items (Watch Face Push expansion, possible Play Store distribution) are documented as not available."
+        ]
+      },
+      {
+        "name": "docs/troubleshooting/cant-pair-pump.md",
+        "behavior": "Only page in the troubleshooting section here. Prerequisites checklist: Bluetooth on, Location permission granted (OS requirement for BLE scan), pump in pairing mode (Tandem: Options \u2192 Bluetooth Settings \u2192 Pair Device), pump within a couple of meters, both batteries healthy. Pump 6-digit code \"times out after a couple of minutes\". Ordering rule: app must be scanning BEFORE the pump starts advertising (cancel pairing \u2192 force-stop app \u2192 reopen \u2192 tap Pair pump \u2192 then pair on pump). One-BLE-connection-at-a-time rule for Tandem; unpair t:connect. Requires Android 11+ (API 30+). Drop-after-connect causes: battery optimization (set Don't optimize; Samsung also has a \"Sleeping apps\" list), pump BLE flake (power cycle, wait 10 seconds), metal/magnetic phone cases. Tandem Mobi is protocol-compatible but unverified on hardware \u2014 \"at your own risk\".",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/docs/troubleshooting/cant-pair-pump.md"
+        ],
+        "edge_cases": [
+          "Explicit log-redaction warning before posting to Discord: emails, bearer/API tokens, auth headers, account IDs, pump serials, BLE device identifiers must be replaced with [REDACTED] or DM'd to a maintainer."
+        ]
+      },
+      {
+        "name": "docs/daily-use/connecting-medtronic-pump.md",
+        "behavior": "Covers MiniMed 680G/770G/780G on-device BLE pairing, explicitly beta and read-only. Contrasts with CareLink cloud sync (separate, unrelated path). Pairing is advertise-and-wait, inverted from Tandem: the PHONE advertises as a BLE peripheral named exactly \"Mobile 000001\" and the PUMP initiates. Flow states named in the doc: waiting \u2192 connecting \u2192 connected. Pump pairs with only one phone at a time; must be removed from MiniMed Mobile first. Reads sensor glucose, IoB, basal (active rate), bolus history, reservoir, battery. Documented limitation: SmartGuard auto-basal micro-boluses are \"not yet fully attributed\". IoB is read as the pump exposes it and has been confirmed against a live 780G's on-screen Active Insulin, subject to display rounding. Named failure copy: \"No pump has connected yet.\", \"This phone can't act as a Bluetooth accessory.\", \"Couldn't start Bluetooth advertising.\", \"The secure handshake timed out\" / \"the pump rejected the secure handshake.\"",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/docs/daily-use/connecting-medtronic-pump.md"
+        ],
+        "edge_cases": [
+          "Some phones cannot act as a BLE peripheral at all \u2014 hard blocker with dedicated error copy.",
+          "Pairing is remembered; reconnect is automatic when back in range."
+        ]
+      },
+      {
+        "name": "docs/concepts/acknowledgments.md \u2014 attribution posture (Tandem vs Medtronic)",
+        "behavior": "Public credit page. Draws the load-bearing distinction: Tandem = ARCHITECTURAL REFERENCE ONLY. jwoglom/pumpX2 (MIT, James Woglom) and jwoglom/controlX2 (MIT) were studied; the Kotlin driver is an independent port; no code imported; pumpX2 test vectors are used only to validate parser correctness. In-source headers cite upstream MIT in TandemProtocol.kt, JpakeAuthenticator.kt, EcJpake.kt, Hkdf.kt. Medtronic = DIRECT DEPENDENCY/PORT and \"the one place GlycemicGPT differs from its Tandem posture\": org.openminimed:javasake is a Maven Central runtime dependency driven through MedtronicSakeSession; PythonPumpConnector's CGM, IDD-status, history, device-info and battery readers are ported line-for-line; PythonSake and JavaPumpConnector informed the connection manager. Legal basis: OpenMinimed is GPL-3.0 and this app is GPL-3.0, with explicit permission from palmarci (P\u00e1l Marci) who relicensed for this purpose. Also credits drfubar, Morten Fyhn Amundsen, Stenium, @planiitis (medtronic-bt-decrypt PoC).",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/docs/concepts/acknowledgments.md"
+        ],
+        "edge_cases": [
+          "Page invites correction issues explicitly: \"correctness matters more than concision\".",
+          "Also credits the diabetes-OSS movement: Nightscout, OpenAPS/Dana Lewis, Loop/LoopKit/Pete Schwamb, AndroidAPS, xDrip+, Tidepool \u2014 and states GlycemicGPT does not do closed-loop \"and never will\"."
+        ]
+      },
+      {
+        "name": "docs/THIRD_PARTY_LICENSES.md \u2014 scope rule and content",
+        "behavior": "Records SOURCE LINEAGE only: upstream projects whose protocol work was studied, ported, or derived from. It explicitly is NOT the redistributed-dependency list (\"do not expand this document into a runtime-dependency list\") because a hand-maintained list goes stale on the next bump; that obligation is discharged by the generated attribution shown under \"Redistributed Components\". Sections: Tandem (pumpX2, controlX2 \u2014 MIT, full MIT text reproduced); Medtronic/OpenMinimed (GPL-3.0, four-repo table mapping PythonSake/PythonPumpConnector/JavaSake/JavaPumpConnector to their role, note that firmware-derived SAKE key material ships in the JavaSake artifact under GPL-3.0 and introduces no new secret); EC-JPAKE (particle-iot/ecjpake-java, Apache-2.0, Copyright 2022 Particle Industries, full Apache-2.0 text minus the instructional APPENDIX); SQLCipher (net.zetetic:sqlcipher-android:4.13.0, BSD-3-Clause, ZETETIC LLC, full text) \u2014 the documented example of a component that is both a lineage entry and a runtime dependency.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/docs/THIRD_PARTY_LICENSES.md"
+        ],
+        "edge_cases": [
+          "This file is compiled into the APK verbatim and gated by a unit test, so any edit is an app change (see android.yml path filter).",
+          "It is not a published website page (no frontmatter, no pages entry)."
+        ]
+      },
+      {
+        "name": "docs/licenses/ \u2014 canonical license text bundle",
+        "behavior": "Nine .txt files, one per license identifier, consumed by the Gradle attribution generator: Apache-2.0.txt (202 lines), BouncyCastle.txt (7), BSD-2-Clause.txt (9), BSD-3-Clause.txt (11), CUP.txt (19), ICU.txt (12), MIT.txt (18), SAX-PD-2.0.txt (10), SAX-PD.txt (31). Filename-without-extension IS the lookup key: `docs/licenses/<identifier>.txt`. Seven are SPDX identifiers; BouncyCastle and CUP are bundled-by-name because their POMs declare no SPDX identifier and their artifacts ship no license text. GPL-3.0 is NOT here \u2014 the repo-root LICENSE is the GPL-3.0 source and is shipped as its own asset. BSD-2/BSD-3/MIT texts carry `<year> <owner>` placeholders (canonical SPDX templates, not per-component instantiations).",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/docs/licenses/Apache-2.0.txt",
+          "android-unofficial/docs/licenses/BouncyCastle.txt",
+          "android-unofficial/docs/licenses/CUP.txt",
+          "android-unofficial/docs/licenses/ICU.txt",
+          "android-unofficial/docs/licenses/SAX-PD.txt",
+          "android-unofficial/docs/licenses/SAX-PD-2.0.txt"
+        ],
+        "edge_cases": [
+          "A license family with no matching .txt fails the build (see generator failure modes)."
+        ]
+      },
+      {
+        "name": "generateDependencyAttribution Gradle task",
+        "behavior": "@CacheableTask in app/build.gradle.kts. Reads Licensee `artifacts.json` reports from four AttributionSource triples: (:app, licenseeAndroidRelease, releaseRuntimeClasspath), (:wear-device, licenseeAndroidRelease, releaseRuntimeClasspath), (:watchface, licenseeAndroidDigitalFullRelease, digitalFullReleaseRuntimeClasspath), (:watchface, licenseeAndroidAnalogMechanicalRelease, analogMechanicalReleaseRuntimeClasspath). Uses evaluationDependsOn per sibling project (accepted cost: not configuration-cache compatible) because siblings are applications, not consumable dependencies. Resolves artifacts through an artifactView filtered to ModuleComponentIdentifier (published archives only; project deps are this repo's own GPL-3.0 modules). Resolution is strict \u2014 no lenient view \u2014 so a failed artifact breaks the build rather than dropping a NOTICE. Outputs to build/generated/attribution: runtime_dependencies.md and runtime_dependency_licenses.txt. licenseTexts input = rootProject docs/licenses.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/app/build.gradle.kts"
+        ],
+        "edge_cases": [
+          "Empty component list \u2192 GradleException (\"would ship empty, which reads as 'this app redistributes nothing'\").",
+          "Component with no SPDX identifier and no entry in unmappedLicenses/unreproducedLicenses \u2192 GradleException naming the coordinates.",
+          "A license identifier with no docs/licenses/<id>.txt \u2192 GradleException listing the missing families."
+        ]
+      },
+      {
+        "name": "Attribution generator output format",
+        "behavior": "runtime_dependencies.md: `# Redistributed Components`, three fixed preamble paragraphs, then `Components: <N>.`, then one `## <heading>` per license family sorted alphabetically. Heading = the component's FIRST license identifier, or the literal `License terms available elsewhere` for unreproduced ones. Each entry: \"- `group:artifact:version` -- <name> -- carries a NOTICE\" (name omitted when blank or equal to coordinates; the NOTICE suffix only when that component contributed one), then an indented scm URL line, then \"Also licensed under: X, Y\" for multi-license components, then \"Terms: <note>\". runtime_dependency_licenses.txt: header \"LICENSE TEXTS AND UPSTREAM NOTICES\", then per identifier a 64-'=' separator line, the identifier, another separator, the bundled text; then a final \"UPSTREAM NOTICES\" block with per-component \"--- coordinates ---\" sections. Components are keyed by coordinates so the four variant reports de-duplicate.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/app/build.gradle.kts"
+        ],
+        "edge_cases": [
+          "Multi-license components (xml-apis = Apache-2.0 plus two SAX public-domain grants) get ALL their texts bundled but are grouped under the first only.",
+          "License texts must never reach the markdown renderer \u2014 numbered clauses parse as list markers, indented lines as code blocks."
+        ]
+      },
+      {
+        "name": "NOTICE harvesting (Apache-2.0 \u00a74(d) discharge)",
+        "behavior": "collectNotices() scans every resolved .jar/.aar artifact. NOTICE_ENTRY regex is `(META-INF/)?NOTICE(\\.(txt|md))?` with IGNORE_CASE, fully anchored \u2014 so `META-INF/notices/other/NOTICE` is deliberately NOT matched, because a nested path belongs to a bundled dependency and is that dependency's obligation, not this project's. For an .aar the nested `classes.jar` is opened as a ZipInputStream and its own NOTICE entries harvested too. Multiple notices within one archive are sorted by entry name and joined with a blank line. Empty/whitespace notices are dropped. Any archive that cannot be read as a zip throws GradleException (\"Could not read <archive> while collecting notices\") rather than silently dropping attribution. Notices map is sorted by coordinates. LicenseAssetsTest asserts jakarta.inject:jakarta.inject-api (pulled by Hilt) appears as a stable witness.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/app/build.gradle.kts"
+        ],
+        "edge_cases": [
+          "A component whose artifact path is not in artifactsByCoordinates falls back to the bare filename as its label.",
+          "Five of six reproduced NOTICE files are reachable only through :wear-device, which is why :app alone is insufficient."
+        ]
+      },
+      {
+        "name": "Licensee allowlist policy (root build.gradle.kts)",
+        "behavior": "Applied to every subproject with the app.cash.licensee plugin, declared once at root so the three APK modules cannot disagree. unusedAction(IGNORE) because one policy spans three different graphs. allow(): Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, ICU, SAX-PD, SAX-PD-2.0. allowUrl(): https://www.gnu.org/licenses/gpl-3.0.txt (\"GPL-3.0-only, the same licence this application ships under\"), http://opensource.org/licenses/BSD-2-Clause (commonmark 0.13.0 predates SPDX in its POM). allowDependency() with a `because` reason, per exact version: play-services-base 18.5.0, play-services-basement 18.4.0, play-services-tasks 18.2.0, play-services-wearable 18.2.0; six twelvemonkeys 3.9.4 artifacts; edu.princeton.cup:java-cup:10k; net.zetetic:sqlcipher-android:4.13.0; org.bouncycastle:bcprov-jdk18on:1.84; com.github.jeziellago:Markwon:58aa5aba6a; com.github.jeziellago:compose-markdown:0.5.8; com.github.xgouchet:AXML:v1.0.1. A version bump re-raises the judgement rather than inheriting it.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/build.gradle.kts"
+        ],
+        "edge_cases": [
+          "DELIBERATE OMISSION: EPL-1.0 is intentionally absent \u2014 the FSF considers it incompatible with GPLv3 for a combined distributed work. The one EPL-1.0 artifact that reached the graph (an XPath 2.0 processor, transitive of the alpha wear watchface validator) is excluded at that dependency in wear-device/build.gradle.kts; WatchFaceValidatorTest proves the validator still works without it. Any new EPL dependency fails the gate rather than shipping."
+        ]
+      },
+      {
+        "name": "Unmapped and unreproduced license maps",
+        "behavior": "unmappedRuntimeLicenses (coordinates \u2192 license text to use when the POM declares no SPDX id): Markwon:58aa5aba6a\u2192Apache-2.0, compose-markdown:0.5.8\u2192Apache-2.0, AXML:v1.0.1\u2192Apache-2.0 (JitPack POMs carry no license metadata); six twelvemonkeys 3.9.4 artifacts\u2192BSD-3-Clause (POM says the unmapped name \"The BSD License\"); three commonmark 0.13.0 artifacts\u2192BSD-2-Clause (declared by URL); bcprov-jdk18on:1.84\u2192BouncyCastle; java-cup:10k\u2192CUP. unreproducedRuntimeLicenses (coordinates \u2192 note on where the terms live): the four play-services artifacts \u2192 \"Android Software Development Kit License -- https://developer.android.com/studio/terms\"; sqlcipher-android:4.13.0 \u2192 \"BSD-style Zetetic licence, reproduced in full under Third-Party Licenses above\"; org.openminimed:javasake:0.2.0 \u2192 \"GNU General Public License v3.0 -- the license this application ships under; its full text is the GPL-3.0 document in this screen\". Fallback order: declared SPDX \u2192 unmapped override \u2192 external note \u2192 build failure.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/app/build.gradle.kts"
+        ],
+        "edge_cases": [
+          "The override is consulted ONLY when the POM declared no SPDX identifier \u2014 a declared identifier always wins.",
+          "A component that is neither SPDX-declared nor classified is surfaced as a build failure, never papered over with an \"undeclared\" placeholder."
+        ]
+      },
+      {
+        "name": "generateLicenseAssets Gradle task \u2014 the five shipped assets",
+        "behavior": "@CacheableTask producing assets/licenses/ inside every variant (wired via androidComponents.onVariants \u2192 addGeneratedSourceDirectory, with a checkNotNull that fails loudly if a variant has no asset source, because a variant that lost it would ship an APK with no license text and only debug is unit-tested). Five files: project_license_notice.md (the README `## License` section, heading included, verbatim, up to the next `## `), third_party_licenses.md (docs/THIRD_PARTY_LICENSES.md whole), gpl-3.0.txt (repo-root LICENSE whole), runtime_dependencies.md and runtime_dependency_licenses.txt (from generateDependencyAttribution). Nothing is rewritten for display \u2014 normalisation belongs to the UI \u2014 so each asset stays an exact substring of its source and the drift test is a plain equality check. Regenerated on every build, so documents are the single source of truth.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/app/build.gradle.kts"
+        ],
+        "edge_cases": [
+          "Any whole-file source that is blank \u2192 GradleException (\"Refusing to ship an APK whose licence screen would show a blank section in its place\").",
+          "README.md missing a `## License` heading \u2192 GradleException naming the heading.",
+          "This check runs for EVERY variant, whereas LicenseAssetsTest only gates variants that run unit tests."
+        ]
+      },
+      {
+        "name": "In-app license viewer (LicensesScreen) \u2014 REQUIRED product surface",
+        "behavior": "Reached from Settings \u2192 App Info card \u2192 \"Open Source Licenses\" TextButton (testTag open_source_licenses_button) \u2192 nav route \"licenses\", title \"Open Source Licenses\", Icons.Default.Description. DetailScaffold with back. State machine: Loading (CircularProgressIndicator) \u2192 Loaded | Unavailable. Unavailable shows \"License text could not be read from this build.\" in error color and is documented as a packaging failure, not a user state (triggered only by IOException reading assets; logged via Timber). Loaded renders one SelectionContainer wrapping a LazyColumn (contentPadding 16.dp, spacedBy 12.dp, testTag licenses_content): project notice \u2192 divider \u2192 third-party \u2192 dividers around one item per redistributed-component license family \u2192 one item per license-text paragraph \u2192 one item per GPL paragraph. rememberLazyListState is hoisted above the Loading branch so rotation returns the reader to position rather than the top of a 35 KB document. Assets are read on Dispatchers.IO; no connectivity required.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/licenses/LicensesScreen.kt",
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/licenses/LicenseDocuments.kt",
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/settings/SettingsScreen.kt"
+        ],
+        "edge_cases": [
+          "GPL and license-text documents are rendered as PLAIN TEXT, never markdown: numbered clauses parse as list markers and indented lines as code blocks.",
+          "Paragraph split regex is `\\n\\s*\\n`; per-paragraph items exist so the list measures only on-screen paragraphs instead of ~670 GPL lines."
+        ]
+      },
+      {
+        "name": "License viewer markdown normalisation",
+        "behavior": "stripUnresolvableLinks: regex `(?<!!)\\[([^\\]]+)]\\((?![a-zA-Z][a-zA-Z0-9+.\\-]*:)[^)]*\\)` reduces repository-relative links to their label text, because such a path addresses a file that does not exist on the device and would render as a dead affordance. Targets carrying a URI scheme are left intact even when the renderer declines to open them \u2014 a `mailto:` in a licensing document is information the reader may need. Image syntax is left for AppMarkdownText's own sanitizer. splitIntoSections splits the generated component document at `## ` boundaries, keeping the heading with its section (preamble becomes section 0). AppMarkdownText strips `![...](...)`, `![...][...]` and `<img ...>` before rendering (blocks outbound image fetches), and onLinkClicked only opens links whose lowercase form starts with https:// or http://. The license screen passes linkifyMask = 0 because these documents name files, not sites (Linkify.WEB_URLS would turn `some-file.md` into a link), and isTextSelectable = true because the markdown view is outside SelectionContainer's reach.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/licenses/LicenseDocuments.kt",
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/common/MarkdownText.kt"
+        ],
+        "edge_cases": [
+          "AppMarkdownText returns early on blank markdown, rendering nothing."
+        ]
+      },
+      {
+        "name": "LicenseAssetsTest \u2014 license drift gate",
+        "behavior": "Robolectric test reading assets back out of the built variant and comparing to `../<path>` on disk. Assertions: FULL_LICENSE == repo LICENSE verbatim; THIRD_PARTY == docs/THIRD_PARTY_LICENSES.md verbatim; full license contains \"GNU GENERAL PUBLIC LICENSE\" and \"Version 3, 29 June 2007\" and length > 30,000; third-party contains \"# Third-Party Licenses\" and length > 10,000; project notice length > 200, starts with \"## License\", is a verbatim substring of README.md, contains no later `\\n## ` (over-capture guard), and contains both \"Copyright (C) 2026 Josh Engelbrecht\" and \"GPL-3.0-only\". Component asset must start with \"# Redistributed Components\" and name okhttp, retrofit, room-runtime, timber, sentry-android, kotlinx-coroutines-core, plus wear-only androidx.wear.watchface:watchface-push. License-text asset must contain \"Apache License\"/\"Version 2.0, January 2004\", a non-blank UPSTREAM NOTICES block containing \"\\n--- \" and jakarta.inject:jakarta.inject-api. BouncyCastle and CUP bodies must each exceed 200 chars.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/app/src/test/java/com/glycemicgpt/mobile/presentation/licenses/LicenseAssetsTest.kt"
+        ],
+        "edge_cases": [
+          "SPDX_FAMILIES_WITH_TEXT = {Apache-2.0, BSD-2-Clause, BSD-3-Clause, ICU, MIT, SAX-PD, SAX-PD-2.0}; NON_SPDX_HEADINGS = {BouncyCastle, CUP, License terms available elsewhere}. Any heading outside those two sets fails the test.",
+          "play-services-base's own entry must carry \"Terms: Android Software Development Kit License\" \u2014 checked per-entry, not per-heading.",
+          "Section-split count must equal (number of `## ` lines) + 1."
+        ]
+      },
+      {
+        "name": "CI treats license documents as app code",
+        "behavior": "android.yml's detect-changes job (dorny/paths-filter pinned to 7b450fff21473bca461d4b92ce414b9d0420d706 / v4.0.2) gates the whole Android build on an `android` filter. Beyond app/, wear-device/, watchface/, plugins/, gradle/, gradlew(.bat), settings.gradle.kts, settings-gradle.lockfile, build.gradle.kts, gradle.properties and the workflow itself, the filter deliberately includes README.md, LICENSE, docs/THIRD_PARTY_LICENSES.md and docs/licenses/** \u2014 \"a change to one of these is an app change even though it is a document\". Other docs/** changes skip the build entirely. Additionally app/build.gradle.kts registers ../README.md, ../LICENSE, ../docs/THIRD_PARTY_LICENSES.md, ../docs/licenses (dir) and generateDependencyAttribution's outputDir provider (via the task's own output provider, not a bare path, so Gradle sees the producer/consumer edge) as unit-test task inputs, so editing a license document invalidates a cached green test result.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.github/workflows/android.yml",
+          "android-unofficial/app/build.gradle.kts"
+        ],
+        "edge_cases": [
+          "Build steps: JDK 17 temurin, ./gradlew testDebugUnitTest, lintDebug, assembleDebug; debug APKs uploaded with 14-day retention."
+        ]
+      },
+      {
+        "name": "SPDX header policy (docs/dev/spdx-header-policy.md)",
+        "behavior": "Identifier is `GPL-3.0-only` \u2014 explicitly NOT GPL-3.0-or-later and not the deprecated bare GPL-3.0. Copyright holder is the individual: `Copyright (C) 2026 Josh Engelbrecht`; \"Lumose Health\" and \"GlycemicGPT\" are org/project names, not legal entities, and must never appear as the holder. Canonical two-line block, verbatim, `//` for Kotlin/Java/Gradle KTS (above `package`), `#` for shell (after the shebang) and YAML (top). An existing descriptive block comment is kept and the SPDX lines go above it. In-scope globs: app/src, wear-device/src, watchface/src, plugins/pump-driver-api/src, plugins/example/src, plugins/shipped/tandem/src (all **/*.kt); the seven build.gradle.kts files and settings.gradle.kts listed INDIVIDUALLY (a recursive glob would reach excluded medtronic/spike build files); scripts/*.sh; .github/workflows/*.yml. Anything unmatched is not stamped. Exclusion beats inclusion where both match. LICENSE is never edited.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/docs/dev/spdx-header-policy.md"
+        ],
+        "edge_cases": [
+          "Out of scope by design: resource XML, AndroidManifest.xml, ProGuard rules, gradle.properties, shell.nix, renovate.json5, osv-scanner.toml, zizmor.yml, libs.versions.toml, contract/openapi.json, .githooks/*, lockfiles, build/ output, binaries, and ALL Markdown \u2014 prose carries its license via the repo LICENSE."
+        ]
+      },
+      {
+        "name": "SPDX never-stamp trees and the EcJpake attribution gap",
+        "behavior": "Normative exclusion list; a PR adding an upstream-derived file must add it to the list in the same PR. Objective test: excluded if upstream code was COPIED OR PORTED into it; in scope if upstream work was only STUDIED and reimplemented. When test and list disagree, treat as excluded and fix the list. Excluded: plugins/shipped/medtronic/** (whole tree, main and test \u2014 a direct OpenMinimed port; stated at directory level deliberately even though some di/ and plugin/ files are original, because file-by-file lines invite misattribution); tools/medtronic-ble-spike/**; gradlew, gradlew.bat, tools/medtronic-ble-spike/gradlew(.bat), gradle/wrapper/** (Gradle's own Apache-2.0 files \u2014 leave exactly as-is; do not add identifier lines to the ones lacking them). Five Tandem files that merely CITE pumpX2 (TandemProtocol.kt, JpakeAuthenticator.kt, StatusResponseParser.kt, Hkdf.kt, HmacSha256Util.kt) are IN scope. THIRD_PARTY_LICENSES.md is authoritative if it and this policy disagree.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/docs/dev/spdx-header-policy.md"
+        ],
+        "edge_cases": [
+          "OPEN GAP: plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/crypto/EcJpake.kt is a port of io.particle.crypto.EcJpake. Its header records the port in prose but carries NO copyright notice and NO license identifier, while the Apache-2.0 notice lives only in THIRD_PARTY_LICENSES.md \u2014 Apache-2.0 requires the notice travel with the file. The sweep must stamp it `// SPDX-License-Identifier: Apache-2.0` / `// Copyright 2022 Particle Industries, Inc.` \u2014 the one file that gets a non-GPL header.",
+          "Six verification commands are specified, judged by OUTPUT not exit status (grep -L/-l exit non-zero on no match); each ends in `|| true`. The final one calls `gh api repos/lumose-health/android-unofficial/license?ref=$SWEEP_HEAD` and must report exactly one license, GPL-3.0."
+        ]
+      },
+      {
+        "name": "docs/history-extraction.md \u2014 provenance record",
+        "behavior": "Records the git-filter-repo extraction from the GlycemicGPT monorepo so it is reproducible and auditable. Source: https://github.com/GlycemicGPT/GlycemicGPT.git, branch `develop`, commit `2ffc3607d1fd7676070181d2886d476d7868f268`, extracted 2026-07-10. Command runs on a fresh throwaway clone only, with --path apps/mobile/, plugins/, tools/medtronic-ble-spike/, scripts/mobile-dev.sh, LICENSE and --path-rename apps/mobile/: (re-root). All 123 monorepo tags stripped (platform v0.x, changelog-*, dev-latest) because carrying them would corrupt release-please's versioning baseline. No blobs stripped \u2014 filter-repo --analyze showed the largest object is a 60 KB launcher PNG and committed watchface APK assets are ~33 KB each. gitleaks git v8.30.0 run over ALL refs before push: 233 commits, ~5.9 MB, no leaks found. Merged into the bootstrap scaffold with `git merge --allow-unrelated-histories`.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/docs/history-extraction.md"
+        ],
+        "edge_cases": [
+          "Deliberately excluded from extraction: docs/ (platform docs stay in the monorepo), all backend/web/sidecar code, monorepo CI workflows, and monorepo root community files (this repo has its own reviewed versions).",
+          "Post-merge fixes: settings.gradle.kts plugin projectDir overrides rewritten from file(\"../../plugins/...\") to file(\"plugins/...\"); shell.nix gained pkgs.zip (the watchface re-sign task shells out to zip); scripts/mobile-dev.sh MOBILE_DIR repointed to repo root."
+        ]
+      },
+      {
+        "name": "PRIVACY.md \u2014 exact claims",
+        "behavior": "Scoped to android-unofficial (phone app, Wear OS face+companion, BLE driver plugins). The platform repo's docs/concepts/privacy.md is canonical and WINS on any conflict. Claims: nothing centralized; phone stores glucose/insulin in an encrypted Room database and tokens/credentials in EncryptedSharedPreferences; the watch keeps a small rolling cache of rendered values (recent glucose, trend, IoB) in app-private storage so the face survives restart, stores NO credentials, and requests NO internet permission. No telemetry; no distributed build sends health data or usage analytics. Exactly four outbound connections, all user-chosen: (1) the pump over BLE, direct and local; (2) your self-hosted backend if configured \u2014 with none configured the app still does local BLE monitoring, on-device storage and local threshold alerts with zero network calls; (3) the watch over the Wear OS Data Layer (Google Play Services transport \u2014 glucose, trend, IoB, alerts only, never credentials); (4) GitHub's release API, only on tapping \"Check for updates\", downloading from github.com / objects.githubusercontent.com. Last reviewed 2026-07-23.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/PRIVACY.md"
+        ],
+        "edge_cases": [
+          "Two third parties necessarily see connection/request metadata (Google Play Services, GitHub); neither receives health data.",
+          "Which AI provider processes data is determined by the user's backend config, not this app \u2014 the app never talks to AI providers directly.",
+          "Privacy concerns are reported through the SECURITY.md channels."
+        ]
+      },
+      {
+        "name": "PRIVACY.md \u2014 Sentry error-monitoring posture",
+        "behavior": "Sentry (donated via Sentry for Good) is used for the project's OWN development and CI only. The DSN is compiled in only when a developer supplies it at build time on their own machine (`SENTRY_DSN` env or `-PsentryDsn`); it is NEVER baked into any published APK \u2014 not signed release builds, not the CI-published `dev-latest` debug build. Release builds compile the DSN as an empty string and the build FAILS OUTRIGHT if a DSN is supplied to a CI build. Blank DSN = no-op integration. Configuration lockdown: error events only \u2014 no performance traces, no profiling, no session/release-health telemetry, no Session Replay, no screenshots or view-hierarchy capture, no user-interaction tracking; HTTP/navigation/UI/network automatic breadcrumbs dropped wholesale; every surviving string field passes a glucose/token/email scrubber; reporting IP replaced with a non-routable placeholder so Sentry cannot geo-locate. Report contents: stack trace, exception type, OS/runtime versions, app version and commit hash, triggering line. Never: glucose or health data, user identifiers/names/contacts, keys/tokens/credentials, device serials or pump pairing IDs, DB contents or query params, local variables, HTTP bodies, or health data interpolated into exception/log messages.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/PRIVACY.md"
+        ],
+        "edge_cases": [
+          "\"Default -- nothing to opt out of\": there is no project telemetry toggle because distributed builds carry no DSN.",
+          "Opting in sends reports to YOUR Sentry account, never the project's."
+        ]
+      },
+      {
+        "name": "MEDICAL-DISCLAIMER.md \u2014 regulatory status and no-write surface",
+        "behavior": "Disclaimer of record for this repo (phone app, Wear face/companion, Tandem+Medtronic drivers); the platform disclaimer governs backend/web/sidecar. Conflict rule: where a statement about this app or its device handling appears in both, THE STRICTER APPLIES; nothing in the platform disclaimer relaxes device-level limits. Not cleared/approved/certified by FDA, EU Notified Bodies (no CE marking under MDR 2017/745), Health Canada, TGA, or any equivalent. \"NOT a medical device\"; no person or entity is the \"manufacturer\" under any framework. No Therapeutic Write Surface: drivers READ glucose, IoB, basal, bolus history and pump hardware status and issue no therapeutic writes \u2014 no bolus dosing, no basal changes, no pump-setting modification; the plugin SDK has no insulin delivery primitives on any capability interface. Non-therapeutic device-management operations that DO exist (CGM calibration, BLE pair/unpair, connect/disconnect) are session/lifecycle operations, not therapy, and remain permitted. Any change introducing a therapeutic write would move the software into a regulatory category it is not built, tested, or licensed for. Last reviewed 2026-07-23.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/MEDICAL-DISCLAIMER.md"
+        ],
+        "edge_cases": [
+          "Health data processed: CGM readings, pump telemetry (basal, bolus history, IoB), hardware status (battery, reservoir), user therapy parameters (target ranges, insulin ratios), meal entries, and food photos submitted for carb estimation.",
+          "AI analysis happens on the user's backend, not on the phone."
+        ]
+      },
+      {
+        "name": "MEDICAL-DISCLAIMER.md \u2014 warnings, forks, untested hardware, liability",
+        "behavior": "AI limitations named: hallucination, misinterpreting glucose data, outdated guidance, missing context (history, comorbidities, medications); all AI content labeled suggestions, not medical advice. Five Critical Warnings, including #4: alerts from this app depend on a BLE connection holding, Android scheduling background work, the watch being in range, and the phone being charged \u2014 they are a SUPPLEMENT to the pump's and CGM's own alerts, never a replacement, and device alerts must stay enabled. Project-owned unofficial builds are sideloaded from this repo's Releases page only; an APK from anywhere else is not covered. Third-party forks that add device control operate OUTSIDE the project \u2014 not reviewed, not recommended, no liability, and contributions intended to enable them are refused; users of such forks become the manufacturer of their personal medical device, following the Loop/AndroidAPS precedent. Untested-device clause: protocol compatibility does not guarantee correct operation; safety-critical values (IoB, glucose, basal) must always be verified against the manufacturer's official app; the README table is the authoritative per-device verification status.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/MEDICAL-DISCLAIMER.md",
+          "android-unofficial/README.md"
+        ],
+        "edge_cases": [
+          "Limitation of liability is stated in caps and then re-grounded in GPL-3.0 Sections 15/16/17.",
+          "Jurisdictional note: personal-injury liability limits may be unenforceable under EU consumer protection, UK consumer rights, and Australian consumer law; the project states its PRIMARY risk mitigation is the monitoring-only design, not the disclaimer."
+        ]
+      },
+      {
+        "name": "README device verification table (authoritative safety status)",
+        "behavior": "README `## Overview` publishes the per-device verification status the medical disclaimer defers to: Tandem t:slim X2 \u2014 insulin pump, BLE (direct), \"Verified\"; Tandem Mobi \u2014 BLE (direct), \"Protocol-compatible (unverified on hardware)\"; Medtronic MiniMed 680G/770G/780G \u2014 pump + CGM, BLE (direct), \"Beta, read-only, unverified on hardware\". README also carries the pre-Overview IMPORTANT SAFETY WARNING blockquote and the `## Disclaimer` section (\"USE AT YOUR OWN RISK\", not FDA-approved, does not control any medical device, AI can be wrong, verify dosing/carb-ratio/correction-factor suggestions with your care team). The `## License` section \u2014 the ONLY README section shipped inside the APK \u2014 states the project name/description, `Copyright (C) 2026 Josh Engelbrecht`, GPL-3.0 with SPDX `GPL-3.0-only` (version 3 only, no \"or any later version\"), pointers to LICENSE and the SPDX header policy, the inbound=outbound contribution term, and the GPL no-warranty paragraph.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/README.md"
+        ],
+        "edge_cases": [
+          "Editing README.md is an app change (paths-filter + unit-test input) because the License section is packaged.",
+          "Adding a `## ` heading inside the License section would truncate the in-app notice; the test asserts no later `\\n## ` exists."
+        ]
+      },
+      {
+        "name": "In-app onboarding safety-acknowledgement gate",
+        "behavior": "5-page HorizontalPager (OnboardingPages: WELCOME=0, FEATURES=1, DISCLAIMER=2, SERVER=3, LOGIN=4, COUNT=5). userScrollEnabled is `currentPage < PAGE_DISCLAIMER`, so swiping is disabled from the disclaimer page onward to force the explicit acknowledgement; the primary button on PAGE_DISCLAIMER reads \"I Understand\" (not \"Next\"). Skip jumps to PAGE_DISCLAIMER, never past it. DisclaimerPage shows a red Warning icon, headline \"Important Safety Information\", and five DisclaimerCards in errorContainer@30% alpha: (1) Experimental Software \u2014 alpha, not broadly tested, use at your own risk; (2) AI Limitations \u2014 can hallucinate, misinterpret, be outdated; never rely solely on AI; (3) Photo Carb Estimates Are Guesses \u2014 AI estimates from an image are frequently wrong including misidentifying the food; NEVER use a photo carb estimate to calculate an insulin dose or bolus; always verify carbs yourself; (4) Not FDA Approved \u2014 not a medical device; (5) Consult Your Healthcare Provider. PAGE_SERVER's Next is enabled only on connectionTestSuccess. Existing users who previously completed onboarding are re-run through it so they see the disclaimer.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/onboarding/OnboardingScreen.kt",
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/onboarding/OnboardingPages.kt"
+        ],
+        "edge_cases": [
+          "Card 3 mirrors the server disclaimer's \"Photo Carb Estimates Are Guesses\" warning and is required consent coverage for the only AI-vision feature."
+        ]
+      },
+      {
+        "name": "SECURITY.md \u2014 disclosure process",
+        "behavior": "Scope: this repo's phone app, Wear OS companion, and Tandem/Medtronic driver plugins; backend/web/sidecar go to the platform repo's policy. Do NOT open a public issue. Two private channels, both reaching the project lead: GitHub private vulnerability reporting (../../security/advisories/new) or security@glycemicgpt.org. If no response \"within a few days\", escalate via the channels in the platform repo's README. Required report contents: description and potential impact; reproduction steps or PoC; app version / commit SHA tested; whether the issue requires physical proximity to a BLE device. The project acknowledges, investigates, keeps the reporter updated, and asks for \"a reasonable period\" before public disclosure (no fixed embargo number is given). Supported versions: fixes land on `develop` and ship via the develop\u2192main promotion; only the LATEST SIGNED RELEASE is supported \u2014 update before reporting.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/SECURITY.md"
+        ],
+        "edge_cases": [
+          "No SLA numbers are committed to beyond \"a few days\" for first response."
+        ]
+      },
+      {
+        "name": "SECURITY.md \u2014 in-scope vulnerability classes (safety framing)",
+        "behavior": "Because the app has no therapeutic write surface, the named classes are: (1) INCORRECT BLE PARSING PRODUCING A WRONG GLUCOSE, IOB, OR DOSING-HISTORY VALUE \u2014 explicitly \"a safety issue, not just a bug\", report through this channel even though it isn't a classic security bug; (2) insecure local storage \u2014 glucose/insulin escaping the encrypted Room DB, or tokens escaping EncryptedSharedPreferences; (3) sensitive data in logs \u2014 pump serials, auth material, raw BLE payloads that could identify a device or user; (4) any code path that could introduce a therapeutic write primitive into a capability interface, even unintentionally; (5) standard app issues \u2014 insecure network calls to a configured backend, dependency vulnerabilities, unsafe deserialization, permission/intent handling. Monitoring-only posture is a DELIBERATE safety and legal boundary, not an implementation gap: a report proposing that the missing write capability is a bug to \"fix\" will be DECLINED as a feature request for a different, unendorsed kind of project.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/SECURITY.md"
+        ],
+        "edge_cases": [
+          "No DAST or GitGuardian secret-scanning check exists in this repo's CI (no backend/web attack surface); GitGuardian-equivalent coverage is expected from GitHub platform Secret Scanning + Push Protection once the repo lives under the org."
+        ]
+      },
+      {
+        "name": "CONTRIBUTING \u2014 safety rules and device-driver contribution path",
+        "behavior": "\"Safety First\" non-negotiables: all AI outputs surfaced by the app must be labeled suggestions, not medical advice; test thoroughly because a wrong number on a glucose chart is a safety issue; safety limits (glucose range, max bolus, max basal) are platform-enforced via `SafetyLimits` and plugins MUST validate incoming pump and CGM history values against them \u2014 when a reading falls outside the limits the plugin must DISCARD it (do not return, emit, or persist) and LOG the rejection with the violated limit; no device control, full stop. Driver contribution steps: (1) pick an unsupported device; (2) open an issue naming device, protocol and data surfaced; (3) PR a Gradle module under plugins/shipped/<device-name>/ declaring only capabilities from the read-only enum \u2014 GLUCOSE_SOURCE, INSULIN_SOURCE, PUMP_STATUS, BGM_SOURCE, CALIBRATION_TARGET, BOLUS_CATEGORY_PROVIDER; (4) include unit tests, especially parsing and SafetyLimits validation; (5) runtime-loaded plugins under plugins/example/ are a separate advanced path, not compiled into official builds. Shipped drivers table: Tandem `:tandem-pump-driver` BLE central, \"Stable -- reference implementation\"; Medtronic `:medtronic-pump-driver` BLE peripheral advertise-and-wait, \"Beta, read-only\".",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/CONTRIBUTING.md"
+        ],
+        "edge_cases": [
+          "PRs introducing therapeutic write primitives will not be merged; contributions whose intent is to enable a device-control fork are refused.",
+          "Repository-split note: mobile PRs are currently opened against the PLATFORM repo's develop and cherry-picked here with authorship preserved (tracked in docs/dev/monorepo-port-ledger.md, which does not exist in this checkout)."
+        ]
+      },
+      {
+        "name": "CONTRIBUTING \u2014 DCO requirement",
+        "behavior": "Every commit must carry a `Signed-off-by: Name <email>` trailer certifying rights under the Developer Certificate of Origin. Use `git commit -s`; fix the last commit with `git commit --amend -s --no-edit`; multiple commits via interactive rebase or re-commit before pushing. Must use a REAL NAME and reachable email from git config, not an alias. Explicit rationale: DCO is a lightweight per-commit provenance attestation that does NOT grant the project relicensing rights; there is NO CLA. PRs with unsigned commits are blocked from merging until every commit in the branch carries a valid trailer. Server-side enforcement is the DCO GitHub App configured by .github/dco.yml: `require.members: true` (no exemption tier \u2014 maintainers and the project lead sign off like anyone else) and `allowRemediationCommits.individual: true` (one remediation commit, e.g. `git commit -s -m \"chore: DCO remediation\"`, can fix a whole PR's history instead of rewriting every commit).",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/CONTRIBUTING.md",
+          "android-unofficial/.github/dco.yml"
+        ],
+        "edge_cases": [
+          "The local commit-msg hook only WARNS on a missing sign-off; the App is authoritative and blocking."
+        ]
+      },
+      {
+        "name": "CONTRIBUTING \u2014 setup, branching, commits, and pre-submit checklist",
+        "behavior": "Prerequisites: phone app = JDK 17 + Android SDK Platform 35 (targetSdk 35, minSdk 30); Wear OS = JDK 17 + Platform 36 + Wear system image, phone and watch emulators paired via ADB. Quick start: fork, clone, `git remote add upstream`, install the hook (`cp .githooks/commit-msg .git/hooks/commit-msg && chmod +x`), `./gradlew assembleDebug`, `testDebugUnitTest`, `lintDebug`. Branching: develop/main. ALL contributor PRs target `develop`; never target `main`. Branch prefixes: feat/, fix/, docs/, refactor/, ci/. Conventional Commits drive release-please: feat, fix, perf, docs, refactor, ci are CHANGELOG-visible; chore and test are hidden. Pre-submit checklist: tests pass, lint clean with no new warnings, no hardcoded secrets/keys/tokens/credentials, new functionality has tests, Conventional Commit format, every commit signed off, branch up to date with develop. PR process: push branch, open PR against develop, fill the PR template completely, link issues with `Fixes #123` / `Relates to #123`; a code owner reviews and a maintainer squash-merges. Optional local pre-review via CodeRabbit CLI (`coderabbit review --plain --type uncommitted`).",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/CONTRIBUTING.md"
+        ],
+        "edge_cases": [
+          "GAP: CONTRIBUTING instructs contributors to \"fill out the PR template completely\", but this repository contains no .github/PULL_REQUEST_TEMPLATE or .github/ISSUE_TEMPLATE \u2014 every `../../issues/new/choose` link relies on org-level defaults.",
+          "Response expectation: PRs/issues answered \"within a few days\"; ping after a week."
+        ]
+      },
+      {
+        "name": "CONTRIBUTING \u2014 required CI checks and fork-PR handling",
+        "behavior": "Five required checks: Android Gate (unit tests, lint, debug APK for :app, :pump-driver-api, :tandem-pump-driver, :medtronic-pump-driver, :wear-device, :watchface); Security Scan Gate (Semgrep SAST on changed Kotlin); Dependency Scan Gate (OSV-Scanner over this repo's Gradle lockfiles); Attribution Check; Workflow Lint (zizmor on changed workflows, advisory while it beds in). Fork PRs run every required check with no maintainer action needed. Documented mechanism: the Attribution Check runs under `pull_request_target` so it executes in the base-repo context with a writable GITHUB_TOKEN, and it NEVER checks out PR code into the working tree \u2014 it fetches PR commits into a remote-only ref and inspects commit messages and diff text only (grep/sed), so it cannot install dependencies from the branch or execute pushed code. The Security Scan Gate runs Semgrep against the diff without building or running code, so it behaves identically for fork and branch PRs. CodeRabbit has its own review queue; stale state after rapid pushes is not a CI failure (`@coderabbitai review` re-triggers).",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/CONTRIBUTING.md",
+          "android-unofficial/.github/workflows/attribution-check.yml"
+        ],
+        "edge_cases": [
+          "ci.yml is still a bootstrap smoke test that only proves GitHub App token minting works; it skips token steps for fork-originated pull_request runs because secrets are not passed to fork PRs."
+        ]
+      },
+      {
+        "name": "AI-attribution policy and its enforcement ladder",
+        "behavior": "Using AI to write code is fine; leaving AI attribution lines in the repo is not \u2014 the contributor owns, understands, and tests the code (AI is called out as especially prone to subtle BLE-parsing bugs). The full policy is org-wide. attribution-check.yml runs on pull_request_target for main/develop (opened, synchronize, reopened, edited), concurrency-grouped per PR with cancel-in-progress. Three layers: (1) commit trailers \u2014 a `Co-Authored-By: ...[bot]` not matching the whitelist is CRITICAL; a Co-Authored-By naming an AI tool without `[bot]` is HIGH; `Authored-By:`/`Generated-By:`/`AI-Generated-By:` are HIGH; (2) added lines in changed *.py/ts/tsx/js/jsx/kt/java/sh matching an attribution phrase plus a tool name or \\bai\\b/\\bgpt\\b are MEDIUM; (3) PR description matching AI branding is HIGH. Any severity != NONE exits 1. Bot whitelist (anchored to the start of the co-author name so \"not really dependabot[bot]\" cannot substring-match): github-actions, coderabbitai, glycemicgpt-security, glycemicgpt-ci, glycemicgpt-release, glycemicgpt-merge, glycemicgpt-renovate, dependabot, homebot-0, gitguardian.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.github/workflows/attribution-check.yml",
+          "android-unofficial/CONTRIBUTING.md"
+        ],
+        "edge_cases": [
+          "CRITICAL AUTO-CLOSES the PR, skipped only when head ref is literally `develop` AND the head repo is this repository (guards against a fork branch named develop).",
+          "A sticky comment (marker `<!-- attribution-check-comment -->`) is upserted with paginated comment lookup; it is only posted when detect produced a severity, so an early crash cannot publish a misleading \"Passed\".",
+          "AI tool regex: claude|anthropic|copilot|chatgpt|openai|cursor|windsurf|codeium|codewhisperer|amazon.q|gemini|gemini.code.assist|jetbrains.ai|tabnine|sourcegraph|cody|devin|aider|codex.",
+          "CodeRabbit's auto-generated footer is stripped only when it is a properly bracketed block at the trailing end of the body \u2014 an earlier from-first-marker strip was a bypass."
+        ]
+      },
+      {
+        "name": "Local commit-msg hook (.githooks/commit-msg)",
+        "behavior": "One file, two jobs, because git runs only one commit-msg hook. Job 1: `sed -E -i.bak` deletes any `Co-Authored-By:` line matching the AI-tool alternation (Claude|Anthropic|Copilot|ChatGPT|OpenAI|Cursor|Windsurf|Codeium|CodeWhisperer|Amazon.Q|Gemini|JetBrains.AI|Tabnine|Sourcegraph|Cody|Devin|Aider|Codex|\\[bot\\]|noreply@, written with character classes for portable case handling), then deletes `Authored-By:`/`Generated-By:`/`AI-Generated-By:` trailers, then `perl -0777 -pi -e 's/\\n{2,}\\z/\\n/'` collapses the trailing blank lines the strips leave. Job 2: if the message lacks a line matching `^Signed-off-by: .+ <.+@.+>$`, print a three-line WARNING to stderr (non-blocking) telling the author to use `git commit -s` and noting CI will block the PR. Always exits 0. Install via copy, or `git config core.hooksPath .githooks`.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.githooks/commit-msg"
+        ],
+        "edge_cases": [
+          "Note the local hook's `noreply@` pattern is BROADER than the CI check, which deliberately does not treat a bare noreply@ as CRITICAL so a human co-author's PR is never auto-closed."
+        ]
+      },
+      {
+        "name": "CODE_OF_CONDUCT.md",
+        "behavior": "Contributor Covenant v2.1 verbatim, with one project-specific paragraph added to the Pledge: the community builds software for people managing a chronic illness, so be patient with newcomers and \"especially patient with people who are stressed, tired, or scared because of their own or a loved one's diabetes.\" Scope: all community spaces for this repository (issues, pull requests, discussions) plus official public representation. Reports go to the project lead at info@glycemicgpt.org (note: distinct from security@glycemicgpt.org); complaints are reviewed and investigated promptly and fairly, and leaders must respect reporter privacy and security. Four-rung enforcement ladder with named consequences: 1 Correction (private written warning, possible requested public apology); 2 Warning (no interaction with those involved for a specified period; violation may escalate to temporary or permanent ban); 3 Temporary Ban (no interaction/public communication for a specified period); 4 Permanent Ban. Attribution to Contributor Covenant v2.1 and Mozilla's enforcement ladder is retained.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/CODE_OF_CONDUCT.md"
+        ],
+        "edge_cases": [
+          "No time constants are specified for any ban rung \u2014 \"a specified period\" is left to leader discretion."
+        ]
+      },
+      {
+        "name": "GOVERNANCE.md and CODEOWNERS",
+        "behavior": "GOVERNANCE.md is a 545-byte stub that delegates entirely: the canonical document is GOVERNANCE.md in the org `.github` repo (lumose-health/.github), maintained once org-wide so it cannot drift between repos. It covers roles and permissions, contributor advancement, decision-making and disputes, funding/compensation, branch protection, code ownership, and security governance. Role model named in CONTRIBUTING: Contributor, Committer, Maintainer, Project Lead. CODEOWNERS makes @jlengelbrecht the default owner of everything (mobile is lead-held under an expertise-based ownership model; area teams can be added when a mobile maintainer is onboarded), with explicit rules for governance/policy files (CODEOWNERS, GOVERNANCE.md, CONTRIBUTING.md, LICENSE, CODE_OF_CONDUCT.md), security infrastructure (SECURITY.md, .github/dco.yml), all workflows, release/promotion config (release-please-config.json, .release-please-manifest.json, changelog-pr-config.json, autolabeler-config.json, zizmor.yml, renovate.json5), gradle/libs.versions.toml, and the three plugin trees (\"safety-critical BLE parsing and SafetyLimits enforcement. Lead review required on every change\").",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/GOVERNANCE.md",
+          "android-unofficial/.github/CODEOWNERS"
+        ],
+        "edge_cases": [
+          "Tier-B Renovate auto-merge PRs bypass the CODEOWNERS approval requirement via the glycemicgpt-merge bypass actor; required status checks still gate the merge.",
+          "CONTRIBUTING's Project Structure block lists GOVERNANCE.md as covering \"Roles, decision-making, branch protection\", which is now only true by reference."
+        ]
+      },
+      {
+        "name": "LICENSE and the inbound=outbound term",
+        "behavior": "LICENSE is the full GNU General Public License Version 3, 29 June 2007 (35,149 bytes; the test requires >30,000 chars and the presence of both the title and the version line). SPDX identifier throughout is `GPL-3.0-only` \u2014 version 3 only, deliberately WITHOUT the \"or any later version\" option, so downstream recipients do not get the upgrade right. CONTRIBUTING states the term explicitly: \"GPL-3.0 is the inbound license-of-record for this repository: contributions are accepted under GPL-3.0 and are distributed under GPL-3.0 (inbound = outbound)\", and contributing plus DCO sign-off constitutes agreement. The file is shipped verbatim into every APK as assets/licenses/gpl-3.0.txt and is never edited (the GPL is a verbatim document; its \"How to Apply These Terms\" appendix is an instruction to attach notices to source files, not a template to fill in). GPL-3.0 compatibility is what makes the OpenMinimed port and the org.openminimed:javasake runtime dependency lawful.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/LICENSE",
+          "android-unofficial/CONTRIBUTING.md"
+        ],
+        "edge_cases": [
+          "The SPDX sweep must leave LICENSE untouched; a git diff over the sweep range must show no change to it."
+        ]
+      },
+      {
+        "name": "docs/contract/safety-constants.md \u2014 the three cross-repo constants",
+        "behavior": "SAFETY-CRITICAL page. Three constants are duplicated between this repo and the platform repo; a silent desync mis-converts or mis-validates glucose. (1) mmol\u2194mg/dL factor = 18.0156 (backend owner apps/api/src/core/units.py MGDL_PER_MMOL); Android sites: app/.../domain/format/GlucoseFormat.kt (client conversion choke-point) and wear-device/.../util/GlucoseDisplayUtils.kt (wear mirror, since wear cannot depend on :app). (2) glucose-validity bound = 20..500 mg/dL (platform invariant PR #729, backend rejects outside range at every ingestion mapper and on GlucoseReading with ge=20). (3) Tandem epoch offset = 1199145600 s (2008-01-01 UTC), backend TANDEM_EPOCH_OFFSET_SECONDS; Android site plugins/shipped/tandem/.../ble/messages/StatusResponseParser.kt (private TANDEM_EPOCH_OFFSET). Rule: canonical glucose storage is mg/dL everywhere, mmol/L is display-only (\u00f7 18.0156, round last), alert/SSE numerics stay mg/dL. A legitimate change must land in BOTH repos in the same coordinated release, updating this page and the guard's enumeration in the same PR. Enforced by SafetyConstantDriftGuardTest.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/docs/contract/safety-constants.md"
+        ],
+        "edge_cases": [
+          "The 20..500 bound has NO single owner. Named constants: SafetyLimits.kt DEFAULT_MIN_GLUCOSE=20/DEFAULT_MAX_GLUCOSE=500 plus ABSOLUTE_* aliases (closest to canonical; SafetyLimitsStore defaults derive from it); PumpModels.kt CgmReading.MIN_MG_DL/MAX_MG_DL; DashboardComputations.kt VALID_GLUCOSE_MIN/MAX; HomeViewModel.kt MIN_THRESHOLD/MAX_THRESHOLD.",
+          "Inline 20..500 literals: BgmReading.kt require, PluginEvent.kt require, EnrichedBolusEvent.kt, AlertThresholdStore.kt, AuthRepository.kt (\u00d72, plus off-by-one 20..499 / 21..500), SettingsViewModel.kt (\u00d72), PumpDao.kt SQL BETWEEN 20 AND 500, wear AlertsActivity.kt, wear GlucoseDisplayUtils.kt (isValidGlucose + urgent-low/high coerceIn clamps).",
+          "Documented exclusions from the guard: plugins/example/** sample code; comment-only mentions (guard strips comments before counting); display-only re-expressions \u2014 WatchGraphRenderer.kt:76-77 Y-axis coerceAtLeast(20)/coerceAtMost(500) and SettingsViewModel's mmol/L display-range math. REVISIT TRIGGER stated: revisit if any display-only site ever feeds a validation path."
+        ]
+      },
+      {
+        "name": "ADR 0001 \u2014 API versioning and app-compatibility signal",
+        "behavior": "Status Accepted. Decision 1: LEAVE endpoint versioning AS-IS and document it. Only /api/v1/devices, /api/v1/alerts, /api/v1/api-keys and /api/v1/glucose/stream are version-prefixed; /api/auth, /api/settings, /api/ai, /api/food-records and most /api/integrations are unversioned. The split is historical, not designed; normalizing is a runtime backend change that would break every unversioned path the shipped app calls. If a breaking change to an unversioned path is unavoidable, introduce a /v2 sibling and keep the old path until the shipped fleet ages out \u2014 never mutate an unversioned path in place. Decision 2: design the compatibility signal now, implement later \u2014 backend exposes x-contract-version via an X-Contract-Version header on /health or a body field; the app pins the CONTRACT_VERSION it was built against, vendored at contract/CONTRACT_VERSION. CONTRACT_VERSION is a MONOTONICALLY INCREASING INTEGER starting at 1, compared numerically; anything unparseable or unreadable is treated as ABSENT, never silently as compatible.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/docs/adr/0001-api-versioning-and-compat-signal.md"
+        ],
+        "edge_cases": [
+          "SCOPED fail-open: signal present and app-required \u2264 backend \u2192 proceed; signal older or absent/unparseable \u2192 proceed on READ/MONITORING paths with a one-time dismissible warning; individual failing calls handled per-call, never by blocking the app. Hard-refusing would brick a legitimate self-hoster.",
+          "EXPLICIT CARVE-OUT: were a therapeutic or safety-critical WRITE surface ever added, it must NOT inherit blanket fail-open \u2014 such an operation must be REFUSED when backend compatibility is unknown. Whole-app hard refusal is reserved for a future explicitly-declared hard-incompatibility epoch."
+        ]
+      },
+      {
+        "name": "ADR 0002 / ADR 0003 \u2014 tolerant reader and contract-drift strategy",
+        "behavior": "ADR 0002 (Accepted): the backend's tolerant-reader behavior IS the cross-cadence compatibility mechanism \u2014 legacy-value migration before validation (schemas/pump.py migrate_control_iq_mode rewrites legacy `standard` to `none` pre-validation; control_iq_mode is a loose str|None, not an enum) and loose-typed pass-through fields (raw_events, pump_info typed Any). Client half: Moshi DTOs ignore unknown keys, so additive drift is tolerated; a renamed/removed consumed field or a type change fails to parse. Only TWO directions are established: older app \u2192 newer backend, and newer backend \u2192 older app. Newer app \u2192 older backend is NOT proven compatible and is handled defensively per ADR 0001. ADR 0003 (Accepted): ContractSmokeTest is deliberately a smoke test, not a full DTO\u2194OpenAPI structural diff (disproportionate: would need a Kotlin-reflection + JSON-Schema resolver modeling @Json renames, nullability, Instant adapters, polymorphism). Pin refresh = copy platform apps/api/contract/openapi.json byte-for-byte and update contract/CONTRACT_VERSION.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/docs/adr/0002-backend-tolerant-reader-compat.md",
+          "android-unofficial/docs/adr/0003-contract-drift-strategy.md"
+        ],
+        "edge_cases": [
+          "KNOWN BLIND SPOT: round-trip tests catch removal of a required non-null undefaulted consumed field (Moshi throws) but silently tolerate removal of a nullable/defaulted one (deserializes to null). The exception is Nightscout pump_events[].units \u2014 nullable-consumed, and a null DROPS THE EVENT, UNDERSTATING IOB. It is covered by field-presence coupling (assertArrayItemFieldsPresent) instead. Rule: any new nullable consumed field whose absence would silently degrade a safety surface must be added to the field-presence coupling.",
+          "Recorded follow-up: consolidate the 20..500 bound into a single shared object; deliberately NOT bundled with the guard because it edits safety validators (require/init blocks in BgmReading, PluginEvent, EnrichedBolusEvent, CgmReading, SafetyLimits) and would enlarge the blast radius."
+        ]
+      },
+      {
+        "name": "CodeRabbit Medical-Safety review gate (.coderabbit.yaml)",
+        "behavior": "Three error-mode custom checks on every PR. \"No Hardcoded Secrets\": no keys, tokens, HMAC keys, passwords, keystore material, base64 secrets, committed .env values, private URLs/internal hostnames \u2014 credential leaks are critical severity in a health-tech app. \"Medical Safety Review\": glucose is STORED and COMPARED in canonical mg/dL \u2014 every persisted field, bound, threshold/alert comparison, dedup key and safety check must stay mg/dL and be bounds-checked to 20-500; mmol/L is display and input only; the single allowed factor is 18.0156. HARD-FAIL if code stores or compares an mmol/L value as mg/dL (e.g. persisting 3.9 instead of ~70 \u2014 \"this silently suppresses low alerts\"), converts the wrong direction, permits a stored mg/dL value outside 20-500 after conversion, or uses any other factor. It must NOT flag user-facing mmol/L display literals (3.9, 10.0, 22.2) or an mmol/L input converted before storage. Also verifies no auto-bolus/therapeutic device-command code exists and that AI suggestions carry safety disclaimers. \"BLE Protocol Safety\": GATT ops timed out and serialized, connection state transitions handled, LITTLE ENDIAN for Tandem, no raw pump data/serials/auth material logged at INFO.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.coderabbit.yaml"
+        ],
+        "edge_cases": [
+          "Review tone is configured to ignore style, naming, and formatting and focus on correctness, security, medical safety, BLE protocol safety, and maintainability.",
+          "detekt and actionlint are enabled as CodeRabbit tools."
+        ]
+      },
+      {
+        "name": "Docs labeling and changelog surface",
+        "behavior": "auto-label.yml consumes .github/autolabeler-config.json, which maps paths to labels: mobile=app/**, wear=wear-device/**, watchface=watchface/**, plugin=plugins/**, ci=.github/**, docs=[docs/**, **/*.md] EXCLUDING CHANGELOG.md, dependencies=[gradle/libs.versions.toml, **/gradle.lockfile, settings-gradle.lockfile, renovate.json5], security=[.github/workflows/*security*.yml, SECURITY.md, osv-scanner.toml]. .github/changelog-pr-config.json turns those labels into release-note scopes: Documentation \ud83d\udcda (labels docs, documentation) with hasSubCategories:false, alongside Mobile \ud83d\udcf1, Wear OS \u231a, Watch Face \ud83c\udfa8, Plugins \ud83d\udd0c, Security \ud83d\udd12, CI & Build \ud83c\udfd7\ufe0f, Dependencies \ud83d\udce6, Uncategorized \u2753. Sub-categories by priority: Breaking Changes \ud83d\udca5 (0), New Features \u2728 (1), Bug Fixes \ud83d\udc1b (2), Performance \u26a1 (3), Refactor \ud83d\udd27 (4), default Other Changes \ud83d\udcdd (99). excludeLabels: automated, autorelease: tagged, autorelease: pending, invalid. keepLabels: dependencies.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/.github/autolabeler-config.json",
+          "android-unofficial/.github/changelog-pr-config.json"
+        ],
+        "edge_cases": [
+          "A docs-only PR gets the docs label and a Documentation changelog section but skips the Android build entirely unless it touches README.md, LICENSE, docs/THIRD_PARTY_LICENSES.md or docs/licenses/**."
+        ]
+      },
+      {
+        "name": "docs/dev/ section \u2014 index of developer-reference pages (out-of-scope detail)",
+        "behavior": "Eight published pages under \"Developer Reference\", each with frontmatter, listed in a curated (non-alphabetical) order. instrumented-tests-ci \u2014 how the emulator-backed androidTest job runs in CI and how to run instrumented tests locally. security-testing \u2014 how security testing works in CI and how to extend it (also the reference for why Gradle lockfiles exist: OSV-Scanner does not parse build.gradle.kts or libs.versions.toml). dependency-updates \u2014 how Renovate proposes updates, which auto-merge, and the security policy behind it. release-and-promotion \u2014 how a develop\u2192main promotion becomes a versioned release, changelog entry, and sync-back, plus the CI hygiene gates. signing-and-secrets \u2014 Android signing material stored in 1Password and loaded into GitHub Actions at runtime so no keystore or password is kept in GitHub. spdx-header-policy \u2014 covered above. plugin-architecture \u2014 developer reference for building mobile plugins. wear-os-architecture \u2014 the single phone-app-plus-watch-services architecture. Content detail for these belongs to the CI/release, plugin, and Wear subsystem passes.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/docs/dev/_meta.json",
+          "android-unofficial/docs/dev/instrumented-tests-ci.md",
+          "android-unofficial/docs/dev/security-testing.md",
+          "android-unofficial/docs/dev/dependency-updates.md",
+          "android-unofficial/docs/dev/release-and-promotion.md",
+          "android-unofficial/docs/dev/signing-and-secrets.md",
+          "android-unofficial/docs/dev/plugin-architecture.md",
+          "android-unofficial/docs/dev/wear-os-architecture.md"
+        ],
+        "edge_cases": [
+          "These pages document Android/Gradle/GitHub-Actions mechanics that a Swift port will need equivalents for (signing, release promotion, dependency scanning), but their content was not read in depth in this pass."
+        ]
+      }
+    ],
+    "safety_critical": [
+      "docs/contract/safety-constants.md is the single source of truth for three cross-repo constants whose desync is a patient-safety failure: mmol\u2194mg/dL factor 18.0156, glucose-validity bound 20..500 mg/dL, Tandem epoch offset 1199145600 s (2008-01-01 UTC). Canonical storage is mg/dL everywhere; mmol/L is display-only (\u00f7 18.0156, round last); alert/SSE numerics stay mg/dL. Any change must land in both repos in the same coordinated release and update the page plus SafetyConstantDriftGuardTest's enumeration in the same PR.",
+      "The 20..500 bound has no single owner and is duplicated across ~17 shipped sites listed in safety-constants.md, including two documented off-by-one variants in AuthRepository.kt (20..499 and 21..500) and a SQL `BETWEEN 20 AND 500` in PumpDao.kt. A Swift port must consolidate rather than replicate the scatter, and must not lose the off-by-one sites silently.",
+      "CONTRIBUTING mandates the plugin-side validation behavior: a reading outside SafetyLimits must be DISCARDED \u2014 not returned, not emitted, not persisted \u2014 and the rejection logged with the violated limit. This is a hard rule for any Swift driver.",
+      "MEDICAL-DISCLAIMER Critical Warning #4 is an explicit alert-delivery non-guarantee: app alerts depend on the BLE connection holding, the OS scheduling background work, the watch being in range, and the phone being charged; they are a supplement to the pump's and CGM's own alerts, never a replacement, and device alerts must stay enabled. Any iOS port must carry this claim and must not strengthen it.",
+      "No therapeutic write surface anywhere: no bolus dosing, no basal rate changes, no pump-setting modification, and no insulin delivery primitive on any capability interface. Permitted non-therapeutic device-management ops are exactly CGM calibration, BLE pair/unpair, and connect/disconnect. This is asserted independently in MEDICAL-DISCLAIMER.md, SECURITY.md, CONTRIBUTING.md, README.md, and the CodeRabbit Medical Safety gate; SECURITY.md pre-declines any report proposing the boundary be 'fixed'.",
+      "ADR 0001's fail-open carve-out: monitoring/read paths fail open with a dismissible warning when backend compatibility is unknown, but a therapeutic or otherwise safety-critical write must be REFUSED under the same condition. If iOS ever adds such a surface it must not inherit the monitoring fail-open default.",
+      "ADR 0003 blind spot: removal of a nullable/defaulted consumed field is not caught by round-trip parsing. The known instance is Nightscout pump_events[].units \u2014 a null DROPS the event and UNDERSTATES IoB. Covered only by field-presence coupling to the pinned spec. Any new nullable consumed field that degrades a safety surface when absent must be added to that coupling.",
+      "SECURITY.md classifies incorrect BLE parsing that yields a wrong glucose, IoB, or dosing-history value as a security-channel report, not an ordinary bug \u2014 the private disclosure path must exist for wrong-number defects, not just classic vulnerabilities.",
+      "CodeRabbit's hard-fail list encodes the concrete conversion hazards: storing/comparing an mmol/L value as mg/dL (persisting 3.9 instead of ~70 silently suppresses low alerts), converting the wrong direction, permitting a stored mg/dL value outside 20-500 after conversion, or using a factor other than 18.0156.",
+      "Untested-hardware clause: Tandem Mobi is protocol-compatible but unverified on hardware, and Medtronic 680G/770G/780G is beta and unverified. Safety-critical values (IoB, glucose, basal) must always be verified against the manufacturer's official app. The README table is the authoritative per-device status the disclaimer defers to; an iOS port must publish its own equivalent table rather than inheriting this one.",
+      "Medtronic doc records that SmartGuard auto-basal micro-boluses are not yet fully attributed on the on-device read path \u2014 a known incompleteness in insulin display.",
+      "The in-app license viewer's Unavailable state exists only as a packaging failure signal; shipping an APK/IPA whose license section is blank is treated as a build-breaking defect (GradleException), not a runtime degradation."
+    ],
+    "external_dependencies": [
+      "GitHub Actions: actions/create-github-app-token (SHA 1b10c78c7865c340bc4f6099eb2f838309f1e8c3 v3 in notify-docs-update; bcd2ba49218906704ab6c1aa796996da409d3eb1 v3.2.0 elsewhere), actions/checkout 9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 v7.0.0, actions/github-script f28e40c7f34bde8b3046d885e986cb6290c5673b v7, dorny/paths-filter 7b450fff21473bca461d4b92ce414b9d0420d706 v4.0.2, actions/setup-java 0f481fcb613427c0f801b606911222b5b6f3083a v5.5.0, gradle/actions/setup-gradle 3f131e8634966bd73d06cc69884922b02e6faf92 v6.2.0, actions/upload-artifact 043fb46d1a93c77aae656e7c1c64a875d1fc6a0a v7.0.1",
+      "Separate `website` repository in the same GitHub org, reached only via repository_dispatch event_type=docs-updated; it owns rendering, top-level nav, and the merge with the platform repo's docs tree",
+      "GitHub App `glycemicgpt-ci` with org secrets CI_APP_ID / CI_APP_PRIVATE_KEY (visibility: all)",
+      "DCO GitHub App (github.com/apps/dco), configured by .github/dco.yml",
+      "CodeRabbit (AI PR review, .coderabbit.yaml; optional CLI via cli.coderabbit.ai)",
+      "app.cash.licensee Gradle plugin (license policy + artifacts.json reports)",
+      "org.openminimed:javasake:0.2.0 (Maven Central, GPL-3.0) \u2014 the only ported/dependency upstream driver code",
+      "net.zetetic:sqlcipher-android:4.13.0, org.bouncycastle:bcprov-jdk18on:1.84, edu.princeton.cup:java-cup:10k, com.google.android.gms play-services base 18.5.0 / basement 18.4.0 / tasks 18.2.0 / wearable 18.2.0, six com.twelvemonkeys 3.9.4 artifacts, three com.atlassian.commonmark 0.13.0 artifacts, JitPack Markwon 58aa5aba6a / compose-markdown 0.5.8 / AXML v1.0.1",
+      "dev.jeziellago compose-markdown (MarkdownText) for in-app markdown rendering",
+      "Robolectric (LicenseAssetsTest), JDK 17, Android SDK Platform 35 (phone) and 36 (Wear)",
+      "git-filter-repo and gitleaks v8.30.0 (history extraction, one-time)",
+      "Semgrep (SAST gate), OSV-Scanner (Gradle lockfile CVE gate), zizmor (workflow lint), detekt + actionlint via CodeRabbit",
+      "Contact channels: security@glycemicgpt.org (vulnerabilities/privacy), info@glycemicgpt.org (Code of Conduct), Discord https://discord.gg/QbyhCQKDBs"
+    ],
+    "permissions_and_platform_apis": [
+      "Android BLUETOOTH + Location permission \u2014 Location is required by Android for any BLE scan; both install.md and cant-pair-pump.md state prominently that the app does not track location",
+      "Android battery-optimization exemption (Settings \u2192 Battery \u2192 Battery optimization \u2192 Don't optimize; Samsung 'Sleeping apps' list) required for the background pump link to survive",
+      "Android unknown-sources install permission per source (sideload), or ADB with USB debugging + Developer Options",
+      "Wear OS: ADB debugging + Debug over Wi-Fi/Bluetooth on the watch; Watch Face Push API (Wear OS 6+) for phone\u2192watch face delivery; androidx.wear.watchface:watchface-push",
+      "Wear OS Data Layer via Google Play Services (play-services-wearable) as the phone\u2194watch transport; watch app declares NO internet permission",
+      "EncryptedSharedPreferences (tokens/credentials) and SQLCipher-encrypted Room database (glucose/insulin) on the phone; app-private storage for the watch's rolling render cache",
+      "Android AssetManager \u2014 the license viewer reads its documents from APK assets, requiring zero connectivity",
+      "BLE central role for Tandem; BLE PERIPHERAL/advertising role for Medtronic (phone advertises as 'Mobile 000001'); some phones cannot advertise as a peripheral at all and this is a documented hard failure with dedicated error copy",
+      "No Play Store / F-Droid distribution today \u2014 GitHub Releases only; the app checks github.com release API only when the user taps 'Check for updates', downloading from github.com / objects.githubusercontent.com"
+    ],
+    "notes": "SCOPE COVERAGE: all 20 markdown/mdx docs, all 7 _meta.json files, all 9 docs/licenses texts, notify-docs-update.yml, and all seven root policy documents were read in full. The eight docs/dev/ pages were read at frontmatter level plus spdx-header-policy.md in full (the only dev page that is legal-surface); their remaining content belongs to the CI/release, plugin, and Wear subsystem passes and is flagged as such rather than padded here. I followed the license pipeline out of docs into app/build.gradle.kts (both custom tasks in full), the root Licensee policy, the in-app viewer (LicensesScreen.kt, LicenseDocuments.kt, MarkdownText.kt), and its drift gate (LicenseAssetsTest.kt), plus the onboarding disclaimer gate, the attribution-check workflow, and the commit-msg hook, because those are where the docs' obligations are actually enforced.\n\nKEY PORT-RELEVANT FINDINGS:\n1. The website merges this repo's docs/ with the platform repo's docs/ into ONE namespace. Roughly a third of the relative links in published pages resolve only after that merge. An iOS docs tree must join the same namespace or rewrite every link.\n2. Publication is gated by two hand-maintained things and nothing else: frontmatter (title + description) and membership in the section's _meta.json pages array. Nothing in CI validates either. The pages array is an explicit ORDER, not a filter over the directory.\n3. The license pipeline is the strongest engineering constraint in this subsystem and must be rebuilt for iOS. Its non-negotiables: the shipped license screen reads GENERATED assets, never source strings; the component list comes from the resolved release dependency graph of EVERY module that ships a binary (four variants across three modules), so it cannot go stale; the build FAILS on an empty component list, an unclassified non-SPDX component, a blank source document, a missing README '## License' heading, or a license family with no bundled text. Licensee's allowlist is the other half of the gate. The iOS equivalent needs a generator over the resolved SwiftPM/CocoaPods graph plus a canonical-text bundle keyed by SPDX identifier, and an equivalent drift test.\n4. Documented deliberate non-decisions worth preserving: EPL-1.0 is intentionally NOT allowlisted (FSF GPLv3 incompatibility) with the one offending transitive excluded at the dependency; docs/THIRD_PARTY_LICENSES.md is deliberately NOT a runtime-dependency list; ADR 0003 deliberately chose a smoke test over a full DTO\u2194spec diff; the 20..500 consolidation is deliberately deferred because it edits safety validators; endpoint versioning is deliberately left un-normalized; display-only glucose clamps are deliberately outside the drift guard WITH a stated revisit trigger.\n5. Open attribution gap to carry forward: EcJpake.kt is an Apache-2.0 port whose file carries no copyright notice and no license identifier, while Apache-2.0 requires the notice travel with the file. The SPDX policy names the exact header to add. If that file is ported to Swift, the notice must travel with it.\n6. Gaps in this repo as of today: no .github/ISSUE_TEMPLATE and no PULL_REQUEST_TEMPLATE despite CONTRIBUTING instructing contributors to fill the PR template; docs/dev/monorepo-port-ledger.md is referenced by CONTRIBUTING but absent; ci.yml is still a bootstrap smoke test whose own comment claims it is 'currently the only workflow in the repository' while 18 others exist; repo slugs are inconsistent across policy docs (GlycemicGPT/* vs lumose-health/*), so a port should pick one canonical org/slug before copying links.\n7. Legal claims an iOS build must be able to keep truthfully: no telemetry in any distributed build (Sentry DSN empty in release, build FAILS if a DSN is supplied to CI); exactly four outbound connections, all user-chosen; watch stores no credentials and has no internet permission; no therapeutic write surface anywhere; GPL-3.0-only inbound=outbound with DCO and no CLA. Several of these are architecture commitments, not just prose."
+  },
+  "port": {
+    "subsystem": "Docs site, legal, and community policy surface (ios-unofficial: iPhone + Apple Watch, Swift)",
+    "ports_cleanly": [
+      {
+        "capability": "docs/ tree layout and section _meta.json contract",
+        "ios_approach": "Same schema verbatim: one _meta.json per section dir, {\"title\": string, \"pages\": [string]}, basenames without extension resolving to .md or .mdx, pages array IS the nav order (curated, not alphabetical), and no root docs/_meta.json (top-level ordering stays the website repo's job). Section set becomes adr, concepts, contract, daily-use, dev, ios (replaces mobile), troubleshooting, watch. Add the validator Android lacks: a CI script asserting every listed page exists on disk and every .md/.mdx in a section dir is listed. Zero platform friction \u2014 this is a filesystem convention consumed by a Node renderer, unaffected by Swift."
+      },
+      {
+        "capability": "Publication gate (frontmatter + pages-array membership)",
+        "ios_approach": "Both conditions port unchanged: YAML frontmatter with title: and description: between --- delimiters, plus the basename appearing in the owning section's pages array. Titles containing a colon stay quoted. Descriptions stay one-sentence and serve as subtitle/meta description. Root-level repo-internal documents (THIRD_PARTY_LICENSES.md, the port-provenance record) stay frontmatter-less and unlisted, so they are never published as pages. Close the Android gap by making frontmatter presence and pages membership a blocking CI check, and add a link checker (lychee in offline mode) run against the merged tree."
+      },
+      {
+        "capability": "Docs \u2192 website publication pipeline (notify-docs-update.yml)",
+        "ios_approach": "Portable byte-for-byte. Same trigger (push to main touching docs/** or the workflow itself, plus workflow_dispatch as the documented force-rebuild), same top-level and job-level permissions: {}, same actions/create-github-app-token pinned to a SHA with app-id/private-key from CI_APP_ID/CI_APP_PRIVATE_KEY, owner: github.repository_owner (dynamic so an org rename does not break the App installation lookup), repositories: website, then gh api repos/<owner>/website/dispatches -f event_type=docs-updated with client_payload[source] and [sha]. Only the source value changes. Fire-and-forget semantics and the main-only publish rule carry over unchanged."
+      },
+      {
+        "capability": "MDX pages with inline JSX (status-icons.mdx format)",
+        "ios_approach": "The renderer is the website's, not the app's, so .mdx with raw <svg> elements using JSX attribute syntax (viewBox, fill, aria-hidden, style={{...}}) works identically. Keep the file as the only .mdx page, keep the extension-tolerant link assumption (a link to ./status-icons.md resolving to .mdx), and keep the design rule that sync and reachability icons answer different questions and must not look alike. Only the documented icon semantics change (see needs_redesign)."
+      },
+      {
+        "capability": "docs/concepts/acknowledgments.md \u2014 attribution posture",
+        "ios_approach": "Same page, same load-bearing distinction. Tandem stays ARCHITECTURAL REFERENCE ONLY (jwoglom/pumpX2 and controlX2, MIT, studied; independent Swift port; no code imported; pumpX2 test vectors used only to validate parser correctness, with in-source citations in the Swift protocol/JPAKE/HKDF files). Medtronic stays the DIRECT PORT/DEPENDENCY exception under GPL-3.0 with palmarci's explicit relicensing permission. Retain credit to drfubar, Morten Fyhn Amundsen, Stenium, @planiitis, and the diabetes-OSS movement, plus the 'no closed-loop, and never will' statement and the 'correctness matters more than concision' correction invitation. ADD any Swift-ecosystem lineage actually consumed (LoopKit/CGMBLEKit/xDrip4iOS protocol work) with the same studied-vs-ported labeling."
+      },
+      {
+        "capability": "docs/THIRD_PARTY_LICENSES.md \u2014 scope rule and structure",
+        "ios_approach": "Scope rule ports verbatim: SOURCE LINEAGE ONLY, with the explicit 'do not expand this document into a runtime-dependency list' instruction retained and the redistributed-dependency obligation still discharged by the generated attribution asset. Sections carry: pumpX2/controlX2 (MIT, full text), Medtronic/OpenMinimed (GPL-3.0, four-repo role table, firmware-derived SAKE key material note), EC-JPAKE (particle-iot, Apache-2.0, full text minus the instructional APPENDIX), plus whatever encrypted-store component replaces SQLCipher as the both-lineage-and-runtime example. Stays frontmatter-less, stays unpublished, stays compiled into the app verbatim and gated by a test, so an edit is still an app change."
+      },
+      {
+        "capability": "docs/licenses/ \u2014 canonical license text bundle",
+        "ios_approach": "Mechanism unchanged: one .txt per license identifier, filename-minus-extension IS the lookup key (docs/licenses/<identifier>.txt), consumed by the attribution generator. GPL-3.0 stays out of this directory \u2014 the repo-root LICENSE is the GPL source and ships as its own asset. Non-SPDX families keep the bundled-by-name convention for POM-less/metadata-less packages. Canonical SPDX templates keep their <year> <owner> placeholders. Set membership changes with the Swift dependency graph; Apache-2.0, MIT, BSD-2-Clause and BSD-3-Clause are near-certain, and the Android-only families (CUP, ICU, SAX-PD, SAX-PD-2.0, BouncyCastle) drop out unless a Swift dependency reintroduces them."
+      },
+      {
+        "capability": "In-app license viewer (LicensesScreen equivalent) \u2014 REQUIRED product surface",
+        "ios_approach": "SwiftUI. Settings \u2192 App Info \u2192 'Open Source Licenses' row \u2192 NavigationStack destination titled 'Open Source Licenses' with a back affordance. Same three-state machine: Loading (ProgressView) \u2192 Loaded | Unavailable, with Unavailable showing 'License text could not be read from this build.' in the error color, treated as a packaging failure rather than a user state and logged. Loaded renders a ScrollView + LazyVStack with 16pt content padding and 12pt spacing, one row per paragraph so layout measures only on-screen content rather than ~670 GPL lines. .textSelection(.enabled) on the whole document replaces SelectionContainer. Scroll position preserved across rotation/scene restoration via @SceneStorage on a scroll anchor. Documents read from Bundle.main off the main actor; no connectivity required."
+      },
+      {
+        "capability": "License viewer markdown normalisation",
+        "ios_approach": "Three rules port unchanged. (1) Repository-relative links are reduced to their label text because such a path addresses a file that does not exist on device; targets carrying a URI scheme (including mailto:) are left intact even if the renderer declines to open them. (2) The generated component document splits at '## ' boundaries with the heading kept in its section and the preamble as section 0. (3) License texts and the GPL are rendered as PLAIN TEXT, never markdown \u2014 numbered clauses parse as list markers and indented lines as code blocks. On iOS: Text(verbatim:) for plain-text documents, AttributedString(markdown:) only for the notice and component documents, image syntax stripped, data detectors and automatic link detection OFF so 'some-file.md' is not linkified, and only http/https targets openable."
+      },
+      {
+        "capability": "LicenseAssetsTest \u2014 license drift gate",
+        "ios_approach": "XCTest reading the built bundle's licenses/ resources back and comparing against on-disk sources. Keep every assertion: shipped GPL text == repo LICENSE verbatim and >30,000 chars containing 'GNU GENERAL PUBLIC LICENSE' and 'Version 3, 29 June 2007'; shipped third-party == docs/THIRD_PARTY_LICENSES.md verbatim, >10,000 chars, starting '# Third-Party Licenses'; project notice >200 chars, starts '## License', is a verbatim substring of README.md, contains no later '\\n## ' (over-capture guard), and contains both 'Copyright (C) 2026 Josh Engelbrecht' and 'GPL-3.0-only'; component asset starts '# Redistributed Components' and names a fixed witness set including at least one watch-only package; heading-set closure against declared SPDX and non-SPDX heading sets; section-split count == '## ' line count + 1; non-blank UPSTREAM NOTICES block with a named stable witness package."
+      },
+      {
+        "capability": "Attribution generator output format",
+        "ios_approach": "Both output documents are plain text and port unchanged. runtime_dependencies.md: '# Redistributed Components', three fixed preamble paragraphs, 'Components: <N>.', then one '## <heading>' per license family sorted alphabetically where the heading is the component's first license identifier or the literal 'License terms available elsewhere'; each entry '- `identity` -- <name> -- carries a NOTICE' (name omitted when blank or equal to the identity, NOTICE suffix only when that component contributed one), then an indented scm URL line, then 'Also licensed under: X, Y', then 'Terms: <note>'. runtime_dependency_licenses.txt: 'LICENSE TEXTS AND UPSTREAM NOTICES' header, per identifier a 64-'=' separator / identifier / separator / bundled text, then a final 'UPSTREAM NOTICES' block of '--- identity ---' sections. De-duplicate by package identity so multi-target/multi-platform resolution collapses."
+      },
+      {
+        "capability": "Unmapped and unreproduced license maps",
+        "ios_approach": "The four-step fallback ports exactly: declared SPDX identifier \u2192 unmapped override \u2192 external-terms note \u2192 build failure. Two rules are load-bearing and must survive: the override is consulted ONLY when nothing was declared (a declared identifier always wins), and a component that is neither declared nor classified is a build failure, never an 'undeclared' placeholder. Contents change wholesale \u2014 Swift packages frequently ship a LICENSE file with no machine-readable declaration, so the unmapped map will be LARGER on iOS than on Android. The unreproduced map retains the pattern for terms that live elsewhere (Apple frameworks are first-party and out of scope; any GPL-3.0 Swift Medtronic module gets the same 'the license this application ships under' note)."
+      },
+      {
+        "capability": "CI treats license documents as app code",
+        "ios_approach": "Same dorny/paths-filter action, same pinned SHA, same principle: 'a change to one of these is an app change even though it is a document.' The iOS filter includes README.md, LICENSE, docs/THIRD_PARTY_LICENSES.md and docs/licenses/** alongside the Swift source roots, Package.swift, Package.resolved, the .xcodeproj/.xcworkspace, Info.plist/entitlements and the workflow itself; every other docs/** change skips the build entirely. Register those four license-bearing paths as declared inputs to the license test target so editing a license document invalidates a cached green result, exactly as the Gradle unit-test input registration does today."
+      },
+      {
+        "capability": "SPDX header policy (docs/dev/spdx-header-policy.md)",
+        "ios_approach": "Identifier stays GPL-3.0-only \u2014 explicitly not -or-later and not the deprecated bare GPL-3.0. Holder stays the individual, 'Copyright (C) 2026 Josh Engelbrecht'; 'Lumose Health' and 'GlycemicGPT' remain project/org names and must never appear as the holder. Canonical two-line block, verbatim: // for Swift (above the first import), # for shell (after the shebang) and YAML (top). An existing descriptive block comment is kept with the SPDX lines above it. Exclusion beats inclusion where both match; anything unmatched is not stamped; LICENSE is never edited. In-scope globs re-enumerated over Swift target directories, with each Package.swift listed individually rather than by recursive glob. Out of scope by design: Info.plist, .entitlements, .xcconfig, asset catalogs, .xcodeproj/.xcworkspace internals, Package.resolved, and ALL Markdown (prose carries its license via the repo LICENSE)."
+      },
+      {
+        "capability": "SPDX never-stamp trees and closing the EcJpake attribution gap",
+        "ios_approach": "The normative exclusion list and its objective test port verbatim: excluded if upstream code was COPIED OR PORTED into the file, in scope if upstream work was only STUDIED and reimplemented; when the test and the list disagree, treat as excluded and fix the list in the same PR; THIRD_PARTY_LICENSES.md is authoritative on conflict. The Swift Medtronic driver target is the excluded tree, stated at directory level deliberately even where some files are original. Swift files that merely CITE pumpX2 stay in scope. Critically, the Android OPEN GAP must be CLOSED on port, not carried: the Swift EC-JPAKE source is an Apache-2.0 port and must ship '// SPDX-License-Identifier: Apache-2.0' and '// Copyright 2022 Particle Industries, Inc.' in-file, because Apache-2.0 requires the notice travel with the file."
+      },
+      {
+        "capability": "PRIVACY.md \u2014 Sentry error-monitoring posture",
+        "ios_approach": "sentry-cocoa with an identical lockdown, and the guarantee gets STRONGER on iOS because there is no project-published binary at all. DSN compiled only from a builder-supplied value at build time on their own machine; empty string in every pipeline-produced build; the build FAILS OUTRIGHT if a DSN reaches CI; blank DSN is a no-op integration. Configuration: error events only \u2014 tracesSampleRate 0, no profiling, no session/release health, no Session Replay, no screenshots or view-hierarchy capture, no user-interaction tracking, automatic HTTP/navigation/UI/network breadcrumbs dropped wholesale, sendDefaultPii false, reporting IP replaced with a non-routable placeholder, and a glucose/token/email scrubber over every surviving string field. Report contents and the never-list carry verbatim. 'Default \u2014 nothing to opt out of' still holds; opting in sends to YOUR account."
+      },
+      {
+        "capability": "MEDICAL-DISCLAIMER.md \u2014 regulatory status and no-write surface",
+        "ios_approach": "Portable essentially verbatim. Not cleared, approved or certified by FDA, EU Notified Bodies (no CE marking under MDR 2017/745), Health Canada, TGA or any equivalent; 'NOT a medical device'; no person or entity is the 'manufacturer' under any framework. No Therapeutic Write Surface: Swift drivers READ glucose, IoB, basal, bolus history and pump hardware status and issue no therapeutic writes \u2014 no bolus dosing, no basal changes, no pump-setting modification \u2014 and no Swift capability protocol exposes an insulin-delivery primitive. Permitted non-therapeutic device-management operations remain exactly CGM calibration, BLE pair/unpair, and connect/disconnect, as session/lifecycle rather than therapy. The stricter-of-the-two conflict rule against the platform disclaimer is retained, and the health-data-processed enumeration carries over."
+      },
+      {
+        "capability": "In-app onboarding safety-acknowledgement gate",
+        "ios_approach": "SwiftUI TabView with .tabViewStyle(.page). Five pages, indices unchanged: WELCOME=0, FEATURES=1, DISCLAIMER=2, SERVER=3, LOGIN=4. Paging gesture disabled from the disclaimer page onward (index >= 2) so the acknowledgement is explicit, matching Android's userScrollEnabled = currentPage < PAGE_DISCLAIMER. Primary button on the disclaimer page reads 'I Understand', not 'Next'. Skip jumps TO the disclaimer, never past it. Disclaimer page shows a red warning symbol, headline 'Important Safety Information', and all five cards verbatim in a tinted error container: Experimental Software; AI Limitations; Photo Carb Estimates Are Guesses (never use a photo carb estimate to calculate an insulin dose or bolus); Not FDA Approved; Consult Your Healthcare Provider. Server page's Next enabled only on a successful connection test. Users who previously onboarded are re-run through it."
+      },
+      {
+        "capability": "SECURITY.md \u2014 disclosure process",
+        "ios_approach": "Ports unchanged. Scope narrowed to this repo's iPhone app, Apple Watch app and Tandem/Medtronic Swift drivers, with backend/web/sidecar routed to the platform repo's policy. Do NOT open a public issue. Two private channels both reaching the project lead: GitHub private vulnerability reporting at ../../security/advisories/new, or security@glycemicgpt.org. Escalate via the platform repo's README channels if no response within a few days. Required report contents port, with the app-version/commit-SHA field becoming source tag plus build number, and the 'requires physical proximity to a BLE device' question retained. Supported-versions wording changes only in substance: fixes land on develop and ship via the develop\u2192main promotion, and only the latest tagged source revision is supported, since there is no project-published binary to be 'on'."
+      },
+      {
+        "capability": "SECURITY.md \u2014 in-scope vulnerability classes (safety framing)",
+        "ios_approach": "All five classes port with the safety framing intact, most importantly class 1: incorrect BLE parsing producing a wrong glucose, IoB, or dosing-history value is explicitly a safety issue reportable through the private channel even though it is not a classic security bug. Class 2 is restated for iOS storage primitives (health data escaping the encrypted store, credentials escaping the Keychain), class 3 (pump serials, auth material, raw BLE payloads in logs), class 4 (any code path introducing a therapeutic write primitive onto a capability protocol) and class 5 (standard app issues) are unchanged. ADD iOS-specific classes: an over-permissive kSecAttrAccessible class, data written outside a protective NSFileProtection class, App Group container leakage, and anything reachable from a CBCentralManager state-restoration relaunch. The pre-decline of reports proposing the missing write capability be 'fixed' carries verbatim."
+      },
+      {
+        "capability": "CONTRIBUTING \u2014 DCO requirement",
+        "ios_approach": "Identical; nothing here is language- or platform-specific. Every commit carries a Signed-off-by: Name <email> trailer certifying rights under the DCO; git commit -s, --amend -s --no-edit for the last commit, interactive rebase for several. Real name and reachable email from git config, not an alias. DCO is a lightweight per-commit provenance attestation that does NOT grant relicensing rights, and there is NO CLA. Server-side enforcement is the DCO GitHub App via .github/dco.yml with require.members: true (no exemption tier \u2014 maintainers and the lead sign off like anyone else) and allowRemediationCommits.individual: true so one remediation commit can fix a whole PR's history. The local hook only warns; the App is authoritative and blocking."
+      },
+      {
+        "capability": "AI-attribution policy and its enforcement ladder",
+        "ios_approach": "attribution-check.yml ports unchanged, including its security design. pull_request_target on main/develop for opened/synchronize/reopened/edited, concurrency-grouped per PR with cancel-in-progress; it fetches PR commits into a remote-only ref and inspects commit messages and diff text with grep/sed only, NEVER checking out PR code into the working tree, so it cannot install dependencies from the branch or execute pushed code. Three severity layers unchanged (bot-whitelist-violating Co-Authored-By = CRITICAL; AI-tool-named co-author or Authored-By/Generated-By/AI-Generated-By = HIGH; matching added source lines = MEDIUM; PR description AI branding = HIGH), anchored bot whitelist, sticky comment posted only when detect produced a severity, and CRITICAL auto-close guarded on head-ref-is-develop AND same-repo. Only change: the scanned extension list becomes *.swift,*.m,*.h,*.sh,*.yml."
+      },
+      {
+        "capability": "Local commit-msg hook (.githooks/commit-msg)",
+        "ios_approach": "Copies over unchanged \u2014 it is a POSIX shell script operating on the commit message file, indifferent to the codebase language. Same two jobs in one hook (git runs only one commit-msg hook): sed -E -i.bak deletion of Co-Authored-By lines matching the AI-tool alternation written with character classes for portable case handling, deletion of Authored-By/Generated-By/AI-Generated-By trailers, then perl -0777 -pi -e to collapse the trailing blank lines the strips leave; then a non-blocking three-line stderr WARNING when no ^Signed-off-by: .+ <.+@.+>$ line is present. Always exits 0. Install by copy or git config core.hooksPath .githooks. Retain the deliberate asymmetry: the local hook's noreply@ pattern stays broader than the CI check, which must not treat a bare noreply@ as CRITICAL so a human co-author's PR is never auto-closed."
+      },
+      {
+        "capability": "CODE_OF_CONDUCT.md",
+        "ios_approach": "Contributor Covenant v2.1 verbatim with the same project-specific Pledge paragraph about building software for people managing a chronic illness and being especially patient with people who are stressed, tired, or scared. Scope: all community spaces for this repository (issues, pull requests, discussions) plus official public representation. Reports to the project lead at info@glycemicgpt.org, deliberately distinct from security@glycemicgpt.org. Four-rung enforcement ladder with named consequences (Correction, Warning, Temporary Ban, Permanent Ban), no time constants specified. Attribution to Contributor Covenant v2.1 and Mozilla's enforcement ladder retained."
+      },
+      {
+        "capability": "GOVERNANCE.md and CODEOWNERS",
+        "ios_approach": "GOVERNANCE.md stays a short stub delegating entirely to the canonical GOVERNANCE.md in lumose-health/.github, so it cannot drift between repos; it covers roles and permissions, contributor advancement, decision-making, funding, branch protection, code ownership and security governance. The Contributor/Committer/Maintainer/Project Lead role model stays named in CONTRIBUTING. CODEOWNERS keeps @jlengelbrecht as default owner of everything, with explicit rules for governance/policy files, SECURITY.md and .github/dco.yml, all workflows, release/promotion and renovate config, Package.swift and Package.resolved (replacing gradle/libs.versions.toml), and the Swift driver targets carrying the same rationale: safety-critical BLE parsing and SafetyLimits enforcement, lead review required on every change. Add the hardware-validating maintainer as an owner where physical validation is the gate."
+      },
+      {
+        "capability": "LICENSE and the inbound=outbound term",
+        "ios_approach": "Full GPL-3.0 text verbatim, SPDX GPL-3.0-only \u2014 version 3 only, deliberately without 'or any later version', so downstream recipients do not get the upgrade right. Shipped verbatim as a bundle resource named gpl-3.0.txt and never edited (its 'How to Apply These Terms' appendix is an instruction, not a template). CONTRIBUTING states the term explicitly: contributions are accepted under GPL-3.0 and distributed under GPL-3.0, and contributing plus DCO sign-off constitutes agreement. GPL-3.0 compatibility remains what makes the OpenMinimed-derived Medtronic code lawful. The fork-and-build model strengthens compliance rather than straining it: each user holds the corresponding source by construction, and GPLv3 \u00a76 Installation Information is satisfied because the user holds their own signing identity and can rebuild and reinstall a modified version."
+      },
+      {
+        "capability": "docs/contract/safety-constants.md \u2014 the three cross-repo constants",
+        "ios_approach": "Same SAFETY-CRITICAL page with the same three constants and their owners: mmol\u2194mg/dL factor 18.0156 (backend-owned), glucose-validity bound 20..500 mg/dL, Tandem epoch offset 1199145600 s (2008-01-01 UTC). Same rules: canonical glucose storage is mg/dL everywhere, mmol/L is display-only (\u00f7 18.0156, round last), alert/SSE numerics stay mg/dL. Same discipline that a legitimate change must land in every repo in one coordinated release, updating the page and the guard's enumeration in the same PR \u2014 now spanning THREE repos, so the page must list the iOS sites alongside the Android ones. Port SafetyConstantDriftGuardTest to XCTest over the Swift tree with the same comment-stripping behavior. Consolidate the 20..500 bound into ONE Swift definition rather than replicating Android's ~17 sites, and record the two Android off-by-one variants as deliberately corrected, not silently dropped."
+      },
+      {
+        "capability": "ADR 0001 \u2014 API versioning and app-compatibility signal",
+        "ios_approach": "Re-adopt verbatim as the iOS repo's ADR 0001, status Accepted. Decision 1: leave the historical versioned/unversioned endpoint split as-is and document it; never mutate an unversioned path in place \u2014 introduce a /v2 sibling and keep the old path until the shipped fleet ages out. Decision 2: the compatibility signal is an X-Contract-Version header or body field on /health, with the app pinning the CONTRACT_VERSION it was built against, vendored at contract/CONTRACT_VERSION as a monotonically increasing integer starting at 1, compared numerically, and anything unparseable or unreadable treated as ABSENT, never silently as compatible. The SCOPED fail-open behavior ports exactly (proceed on read/monitoring paths with a one-time dismissible warning; individual failing calls handled per-call, never by blocking the app; hard refusal would brick a legitimate self-hoster), as does the EXPLICIT CARVE-OUT that any future therapeutic or safety-critical write must be REFUSED when backend compatibility is unknown."
+      },
+      {
+        "capability": "CodeRabbit Medical-Safety review gate (.coderabbit.yaml)",
+        "ios_approach": "Ports with all three error-mode custom checks intact. 'No Hardcoded Secrets' unchanged, extended to App Store Connect API keys, .p8 files, provisioning profiles and certificates. 'Medical Safety Review' keeps every hard-fail verbatim: storing or comparing an mmol/L value as mg/dL (persisting 3.9 instead of ~70 silently suppresses low alerts), converting the wrong direction, permitting a stored mg/dL value outside 20-500 after conversion, or using any factor other than 18.0156 \u2014 and keeps the must-NOT-flag list (user-facing mmol/L display literals 3.9, 10.0, 22.2; an mmol/L input converted before storage). It also keeps verifying no auto-bolus or therapeutic device-command code exists and that AI suggestions carry safety disclaimers. 'BLE Protocol Safety' keeps timed-out and serialized GATT operations, handled state transitions, little-endian for Tandem, and no raw pump data, serials or auth material logged at info level. Tool list swaps detekt \u2192 SwiftLint; gitleaks, semgrep, osvScanner, actionlint, shellcheck and checkov stay. Review tone stays configured to ignore style/naming/formatting."
+      },
+      {
+        "capability": "Docs labeling and changelog surface",
+        "ios_approach": "auto-label.yml, autolabeler-config.json and changelog-pr-config.json port unchanged in shape. Path map becomes ios=the phone app target, watch=the watch app target, driver=the Swift driver targets, ci=.github/**, docs=[docs/**, **/*.md] excluding CHANGELOG.md, dependencies=[Package.swift, Package.resolved, renovate.json5], security=[SECURITY.md, the security workflows, the OSV config]. Changelog scopes: Documentation \ud83d\udcda (labels docs, documentation, hasSubCategories false) alongside iOS \ud83d\udcf1, Apple Watch \u231a, Drivers \ud83d\udd0c, Security \ud83d\udd12, CI & Build \ud83c\udfd7\ufe0f, Dependencies \ud83d\udce6, Uncategorized \u2753 \u2014 the Watch Face \ud83c\udfa8 scope is deleted. Sub-category priorities unchanged (Breaking Changes \ud83d\udca5 0, New Features \u2728 1, Bug Fixes \ud83d\udc1b 2, Performance \u26a1 3, Refactor \ud83d\udd27 4, Other Changes \ud83d\udcdd 99); excludeLabels and keepLabels unchanged. The invariant holds: a docs-only PR gets the Documentation section and skips the build unless it touches one of the four license-bearing paths."
+      },
+      {
+        "capability": "Provenance record (replacing docs/history-extraction.md)",
+        "ios_approach": "Same purpose and same publication posture \u2014 a frontmatter-less, unlisted, repo-internal auditable record \u2014 with new content, since the iOS repo is greenfield rather than filter-repo-extracted. It must state, per Swift module, which android-unofficial file and commit SHA it derives from and whether it was PORTED (copied and translated) or REIMPLEMENTED from protocol documentation only, because that is exactly the objective test the SPDX never-stamp list depends on and the input THIRD_PARTY_LICENSES.md needs. Also record any deliberate exclusions and post-merge fixups, and run gitleaks over all refs before the first push, exactly as the Android extraction did (233 commits, no leaks found)."
+      }
+    ],
+    "needs_redesign": [
+      {
+        "capability": "Cross-repo shared docs namespace (relative links leave this repo)",
+        "why": "The website merges this repo's docs/ tree with the platform repo's into ONE namespace; roughly eight relative links per published page (../get-started.md and its anchors, ../troubleshooting/bg-not-updating.md, ../concepts/what-this-software-is-and-isnt.md, ../concepts/privacy.md, ../daily-use/dashboard.md, ./connecting-medtronic.md) resolve only post-merge. Adding a third repo creates direct basename collisions: android-unofficial and ios-unofficial would both contribute mobile/install.md, troubleshooting/cant-pair-pump.md and daily-use/connecting-medtronic-pump.md into the same tree. Nothing in either repo detects the collision, and there is no link checker anywhere.",
+        "options": [
+          "Platform-scoped section directories (docs/ios/, docs/apple-watch/) so no basename is ever shared with the Android repo",
+          "A repo-level path prefix applied by the website at merge time, leaving both repos' internal layouts untouched",
+          "A separate iOS documentation site with its own root _meta.json and no merged namespace at all"
+        ],
+        "recommendation": "Option 1. Use docs/ios/ and docs/apple-watch/ as the platform-specific sections, keep adr/concepts/contract/daily-use/dev/troubleshooting as shared-shape sections with iOS-unique page basenames, and route every cross-repo link through a small stable anchor set the platform repo owns (get-started, concepts/privacy, concepts/what-this-software-is-and-isnt, daily-use/dashboard). Add a link check that runs in the website repo against the MERGED tree \u2014 it cannot be run correctly from inside this repo \u2014 plus an in-repo check for links that stay local. Pick one canonical org/slug before copying any absolute link forward; the Android repo currently carries six inconsistent slugs across its policy docs."
+      },
+      {
+        "capability": "docs/mobile/install.md \u2192 the iOS build-and-install contract",
+        "why": "Nothing in the Android page survives. There is no APK, no 'topmost release without the Pre-release label', no dev-latest debug pre-release, no 'Allow from this source' toggle, no adb install, no INSTALL_FAILED_USER_RESTRICTED, and no in-place upgrade that preserves settings and pairing. The Android page's 'no auto-update; stale-version banner' statement is false on iOS because TestFlight updates automatically. The distribution model itself is the page's subject and it has changed completely: the user builds and signs their own binary.",
+        "options": [
+          "A single fork-and-build runbook page",
+          "Runbook plus a maintained Xcode-only local-install path for developers",
+          "Both, plus a short prerequisites gate page so a user learns about the $99/yr Apple Developer requirement before investing effort"
+        ],
+        "recommendation": "Option 3. The page must cover, in order: prerequisites (Apple Developer Program membership, an App Store Connect API key, a GitHub account, iOS 17+/watchOS 10+ hardware); fork the repo; create an app record and choose a bundle-ID prefix; add the documented set of repository secrets (Issuer ID, Key ID, .p8 contents, Team ID, bundle-ID prefix, app name); run the Build and Upload to TestFlight workflow; accept the TestFlight invite on the iPhone; the 90-day TestFlight build expiry and the re-run needed before it lapses. Then onboarding (server URL then sign-in), then pairing. Preserve the Android page's genuinely portable content: the reachable-platform-URL requirement (http://<lan-ip>:3000 local or https://domain), the Tandem one-BLE-connection-at-a-time rule and unpair t:connect first, and the 'if the dashboard is still empty after 5 minutes' troubleshooting threshold. Replace the '<5%/day battery impact' figure with a measured iOS figure or omit it \u2014 do not inherit it. Delete the 'Today only Android is supported; iOS is on the roadmap' statement from the Android page in the same coordinated release."
+      },
+      {
+        "capability": "docs/mobile/wear-os.md \u2192 docs/apple-watch/setup.md",
+        "why": "The Android page's entire subject has no counterpart. There is no wear-device companion APK and no watchface APK, no Wear OS 5 vs 6 branching, no Watch Face Push API, no ADB-install-the-face path, and no 'tap Build number 7\u00d7, enable Debug over Wi-Fi, adb connect <ip>:<port>' workflow. On iOS the watch app is embedded in the phone app's bundle and installs automatically with it.",
+        "options": [
+          "Fold watch setup into the install page as a short section",
+          "A standalone watch page covering the watch app, complications, and the Smart Stack",
+          "Both \u2014 a short pointer in install plus the standalone page"
+        ],
+        "recommendation": "Option 3. The standalone page must state: the watch app installs automatically with the phone app from the same TestFlight build (no separate install); there is no custom watch face on watchOS, so the user manually adds a GlycemicGPT complication to an Apple-provided face (long-press face \u2192 Edit \u2192 tap a complication slot \u2192 choose GlycemicGPT); the Smart Stack widget is a second surface; which complication families are supported (accessoryCircular, accessoryCorner, accessoryRectangular, accessoryInline). Preserve the portable content: glucose, trend arrow (up/down/flat), IoB and time are rendered; refresh follows the ~5-minute glucose reading interval; the display shows '--' for glucose more than 5 minutes stale after fresh setup; the surface is explicitly read-only. Add that WatchConnectivity delivery is best-effort and complication timeline budget is system-managed, so the watch can be staler than the phone. State plainly that this page replaces the hardest step in the Android product with an automatic one."
+      },
+      {
+        "capability": "docs/troubleshooting/cant-pair-pump.md",
+        "why": "Three of the Android page's five prerequisites are Android-only. iOS requires NO Location permission for BLE scanning (only NSBluetoothAlwaysUsageDescription), has no user-visible battery-optimization exemption and no Samsung 'Sleeping apps' list, and has no force-stop affordance \u2014 the closest, swiping the app away in the app switcher, also tears down Core Bluetooth state restoration, which makes the Android 'force-stop then reopen' remedy actively harmful advice on iOS. The Android 11+ (API 30+) requirement becomes an iOS version floor.",
+        "options": [
+          "Direct rewrite substituting iOS causes for Android ones",
+          "Rewrite plus a diagnostics screen the page can point at, reporting CBManagerState, Bluetooth authorization status, Background App Refresh state, Low Power Mode, and last-seen-advertisement timestamp"
+        ],
+        "recommendation": "Option 2 \u2014 the diagnostics screen is what makes the page actionable, because iOS hides everything the Android page tells a user to inspect. Preserve verbatim: the ordering rule that the app must be scanning BEFORE the pump starts advertising; the pump 6-digit code timing out after a couple of minutes; the Tandem one-BLE-connection rule and unpair-t:connect-first; pump within a couple of metres; both batteries healthy; metal or magnetic phone cases as a documented cause; pump BLE flake remedied by a power cycle and a 10-second wait; and Tandem Mobi as protocol-compatible but unverified on hardware, at your own risk. Preserve the log-redaction warning before posting to Discord in full: emails, bearer/API tokens, auth headers, account IDs, pump serials and BLE device identifiers replaced with [REDACTED] or DM'd to a maintainer. Replace the force-stop remedy with 'toggle Bluetooth off and on, then reopen the app \u2014 do NOT swipe the app away'. Replace battery optimization with Background App Refresh on and Low Power Mode off."
+      },
+      {
+        "capability": "docs/daily-use/connecting-medtronic-pump.md",
+        "why": "The documented pairing mechanism depends on the PHONE advertising as a BLE peripheral with the exact local name 'Mobile 000001' while the PUMP initiates \u2014 advertise-and-wait, inverted from Tandem. On iOS, CBPeripheralManager includes CBAdvertisementDataLocalNameKey only while the app is in the FOREGROUND; once backgrounded, iOS moves advertising into the overflow area and drops the local name entirely, so a backgrounded iPhone is not discoverable by the name the pump looks for. The Android page's 'pairing is remembered; reconnect is automatic when back in range' claim therefore splits into two different guarantees on iOS.",
+        "options": [
+          "Document Medtronic pairing as an explicitly foreground, screen-on operation and reconnection as background-capable",
+          "Attempt bluetooth-peripheral background mode and document precisely which of discovery vs reconnection survives backgrounding",
+          "Mark Medtronic unsupported on iOS at v1"
+        ],
+        "recommendation": "Options 1 and 2 together: document initial pairing as foreground-and-screen-on, and document background reconnection as best-effort under the bluetooth-peripheral background mode, with the page stating the limitation rather than implying parity. Do NOT choose option 3 \u2014 parity is the stated product goal. Preserve: MiniMed 680G/770G/780G scope, explicitly beta and read-only; the contrast with CareLink cloud sync as a separate unrelated path; the waiting \u2192 connecting \u2192 connected flow states; one-phone-at-a-time with removal from MiniMed Mobile first; the read surface (sensor glucose, IoB, basal active rate, bolus history, reservoir, battery); the documented limitation that SmartGuard auto-basal micro-boluses are not yet fully attributed; and the IoB-as-the-pump-exposes-it caveat subject to display rounding. Preserve all five named failure strings and add an iOS-specific sixth for Bluetooth permission not granted; the existing 'This phone can't act as a Bluetooth accessory.' string maps cleanly onto the iOS foreground/background constraint."
+      },
+      {
+        "capability": "docs/mobile/status-icons.mdx content semantics",
+        "why": "Two of the three status icons change meaning. iOS has no persistent foreground service, so a blue solid 'Connected' state describes a CBPeripheral link the OS may suspend at any moment without user-visible signal \u2014 the icon can be truthful and stale simultaneously. Backend reachability and watch reachability also become distinct questions on iOS in a way the Wear OS Data Layer masked.",
+        "options": [
+          "Keep the three icons and restate their iOS semantics",
+          "Add a fourth watch-reachability indicator",
+          "Collapse sync and reachability into one indicator"
+        ],
+        "recommendation": "Option 1, plus an explicit 'last successful pump read' timestamp in the status row \u2014 this is the single most valuable addition, because it is the only element that cannot silently lie while the app is suspended. Reject option 3: the Android doc's design rule that sync ('is my data uploaded') and reachability ('can I reach the server right now') answer different questions and must not look alike is load-bearing and gets MORE important on iOS. Preserve the colour vocabulary (blue #2563eb solid connected, amber #d97706 transitional, red #dc2626 error or explicitly-resting-not-error), the rule that sync and reachability icons are hidden entirely in backend-optional local mode, the at-most-one-pump-brand-mark rule (Tandem or Medtronic) plus data-source marks, unbranded drivers showing no mark, and the horizontally-scrolling mark row."
+      },
+      {
+        "capability": "generateDependencyAttribution \u2014 the component-list generator",
+        "why": "There is no app.cash.licensee for Swift. Package.resolved records pins and revisions but no license metadata, SwiftPM emits no per-target license report, and many Swift packages ship a LICENSE file with no machine-readable declaration at all. The Android task's four-AttributionSource fan-out over release runtime classpaths has no analogue either.",
+        "options": [
+          "An SPM command plugin walking .build/checkouts (or DerivedData SourcePackages/checkouts) keyed by the Package.resolved pin list",
+          "A standalone Swift executable in a Tools/ package invoked as an Xcode pre-build script and from CI",
+          "LicensePlist as an off-the-shelf tool"
+        ],
+        "recommendation": "Option 2. Reject option 3: LicensePlist does not fail the build on an unclassified component, cannot enforce the no-empty-component-list rule, and has no policy allowlist \u2014 the fail-closed behavior IS the requirement here, not the file generation. The generator must reproduce every Android failure mode as a hard error: an empty component list ('would ship empty, which reads as this app redistributes nothing'); a component with no detectable SPDX identifier and no entry in the unmapped or unreproduced maps, named by package identity; a license family with no docs/licenses/<id>.txt, listing every missing family; and any checkout it cannot read. Resolution must be strict, never lenient \u2014 a failure breaks the build rather than silently dropping a NOTICE. It must cover EVERY target that ships in a binary (phone app, watch app, widget/complication extension, and every driver target), not just the phone app, because the Android pipeline's lesson is that five of six reproduced NOTICE files were reachable only through the watch module."
+      },
+      {
+        "capability": "NOTICE harvesting (Apache-2.0 \u00a74(d) discharge)",
+        "why": "The Android implementation opens each resolved .jar/.aar as a zip and matches an anchored (META-INF/)?NOTICE(\\.(txt|md))? regex, additionally descending into an .aar's nested classes.jar. SwiftPM dependencies are source checkouts on disk, not archives, so the mechanism becomes a filesystem walk \u2014 but the anchoring semantics must survive translation or the discharge becomes wrong.",
+        "options": [
+          "Match a NOTICE file only at the root of each package checkout",
+          "Root match plus a declared per-package extra-path allowlist for packages that place their notice elsewhere"
+        ],
+        "recommendation": "Option 1 with option 2 as an explicit, reasoned escape hatch. The load-bearing rule to preserve is why the Android regex is fully anchored: a NOTICE nested under a vendored dependency inside a checkout belongs to THAT dependency and is its obligation, not this project's \u2014 a naive recursive find would over-attribute. Preserve the rest of the behavior exactly: multiple notices within one package sorted by path and joined with a blank line; empty or whitespace-only notices dropped; an unreadable checkout raising a hard error rather than silently dropping attribution; the notices map sorted by package identity; and a named stable witness package asserted by the drift test so a silent regression to zero notices is impossible."
+      },
+      {
+        "capability": "Licensee allowlist policy \u2192 a Package.resolved license gate",
+        "why": "Licensee's allow() / allowUrl() / allowDependency(coordinates, because:) DSL has no SwiftPM analogue, and the Android policy's most important content is a set of DELIBERATE judgements that must not be lost in translation \u2014 particularly the intentional omission of EPL-1.0 and the rule that a version bump re-raises rather than inherits an exception.",
+        "options": [
+          "A checked-in license-policy.json (allowed SPDX identifiers, allowed URLs, per-package-and-exact-version exceptions each carrying a `because` reason) enforced by the same generator",
+          "LicensePlist configuration plus a manual review checklist",
+          "Rely on GitHub's dependency graph and Dependabot license surfacing"
+        ],
+        "recommendation": "Option 1 \u2014 one policy file at the repo root so the phone, watch and driver targets cannot disagree, exactly as the Android root build.gradle.kts declares it once for three modules. Carry forward as first-class, with the reasoning attached: EPL-1.0 stays OFF the allowlist because the FSF considers it incompatible with GPLv3 for a combined distributed work, and any EPL-licensed package must be excluded AT THE DEPENDENCY with a test proving the feature still works without it \u2014 never allowlisted and never handled by lowering a threshold. Allow the project's own licence URL (gnu.org gpl-3.0.txt) the same way. Every per-package exception is pinned to an exact version with a written reason, so a bump re-raises the judgement. Reject option 3: it produces no PR-blocking gate."
+      },
+      {
+        "capability": "generateLicenseAssets \u2014 the five shipped assets",
+        "why": "There is no androidComponents.onVariants hook, no assets/ directory, and no per-variant asset source to null-check. The Android task's safety property \u2014 that a variant which lost its asset source fails loudly rather than shipping a binary with no license text \u2014 has to be reconstructed from different primitives.",
+        "options": [
+          "An SPM build-tool plugin emitting into each target's resource bundle",
+          "An Xcode Run Script build phase writing into a Resources/licenses/ group",
+          "Commit the generated files to the repo"
+        ],
+        "recommendation": "Option 1 for SPM targets and option 2 for the app target; explicitly REJECT option 3, because committing generated assets breaks 'documents are the single source of truth', lets them go stale between dependency bumps, and turns the drift test into a tautology. Keep all five files and their exact names: project_license_notice.md (the README `## License` section including its heading, verbatim, up to the next `## `), third_party_licenses.md (docs/THIRD_PARTY_LICENSES.md whole), gpl-3.0.txt (repo-root LICENSE whole), runtime_dependencies.md and runtime_dependency_licenses.txt. Keep the rule that nothing is rewritten for display \u2014 normalisation belongs to the UI \u2014 so every asset stays an exact substring of its source and the drift test remains a plain equality check. Keep both hard failures: any whole-file source that is blank, and a README with no `## License` heading. Replace the per-variant checkNotNull with a per-configuration check covering Debug, Release and every fork's signing configuration, so no build path can ever ship a blank license screen."
+      },
+      {
+        "capability": "docs/dev/signing-and-secrets.md \u2014 the signing model",
+        "why": "The model inverts completely. Android keeps ONE project keystore and its passwords in 1Password, exposes exactly one GitHub secret (a read-only 1Password service-account token), and CI signs a project-owned APK. On iOS the project has NO signing identity at all \u2014 every user signs with their own Apple Developer account in their own fork. The 1Password vault, the op:// reference layout, the file-attachment-vs-text-field split, and the env-var contract into signingConfigs all become irrelevant.",
+        "options": [
+          "Per-fork App Store Connect API key plus fastlane match storing certificates in a private repo the user owns",
+          "Per-fork App Store Connect API key with Xcode automatic signing and cloud-managed certificates created in the workflow",
+          "Xcode Cloud"
+        ],
+        "recommendation": "Option 2. Automatic signing driven by an App Store Connect API key (Issuer ID, Key ID, base64 .p8), plus Team ID and a user-chosen bundle-ID prefix \u2014 six to eight repository secrets total, with no certificate, no provisioning profile and no private key committed anywhere in the repo or held by the project. Reject option 3 outright: Xcode Cloud is bound to a single Apple Developer account and its workflows do not fork, which is architecturally incompatible with the distribution model. Option 1 is viable but adds a second repo and an encryption passphrase per user for no gain under automatic signing. The rewritten page must state three guarantees plainly: the project never holds, requests, or transmits any user's Apple signing material; a leaked App Store Connect key compromises only that user's own account; and rotation is a one-secret change in the user's own fork."
+      },
+      {
+        "capability": "CONTRIBUTING \u2014 device-driver contribution path",
+        "why": "Both Android paths disappear. plugins/shipped/<device>/ Gradle modules become compile-time-linked SwiftPM targets, and the runtime-loaded plugins/example/ path is forbidden by iOS. The Android page also assumes a contributor can validate their own driver, which is false here: the lead has no iPhone and no Apple Watch, and Core Bluetooth does not exist in the Simulator.",
+        "options": [
+          "One SwiftPM target per device under Sources/Drivers/<Device>/ inside the app package",
+          "One local Swift package per device consumed as a path dependency"
+        ],
+        "recommendation": "Option 1 \u2014 a target is enough isolation, and a package per device multiplies Package.resolved churn and license-generator surface for no benefit. Preserve verbatim: the read-only capability set as Swift protocols (GLUCOSE_SOURCE, INSULIN_SOURCE, PUMP_STATUS, BGM_SOURCE, CALIBRATION_TARGET, BOLUS_CATEGORY_PROVIDER) with nothing else declarable; the hard SafetyLimits rule that a reading outside the limits must be DISCARDED \u2014 not returned, not emitted, not persisted \u2014 and the rejection LOGGED with the violated limit; unit tests required, especially on parsing and limits validation; the refusal to merge PRs introducing therapeutic write primitives and the refusal of contributions whose intent is to enable a device-control fork. ADD a step the Android page has no need for and which is now mandatory: a driver PR must name who will validate it on physical hardware and on which device, because Simulator validation cannot exercise BLE at all. Ship a simulated driver so parser correctness stays testable without hardware."
+      },
+      {
+        "capability": "CONTRIBUTING \u2014 setup, branching, commits, pre-submit checklist",
+        "why": "Prerequisites, build commands and local gate reproduction are entirely different toolchain. JDK 17 + Android SDK 35/36 + paired phone and watch emulators become macOS + Xcode + Simulator runtimes; ./gradlew assembleDebug / testDebugUnitTest / lintDebug become xcodebuild invocations.",
+        "options": [
+          "Direct substitution of prerequisites and commands",
+          "Substitution plus a Makefile or script wrapper so one command reproduces each CI gate locally"
+        ],
+        "recommendation": "Option 2 \u2014 the Android page's most useful property is that a contributor can reproduce every gate locally, and a wrapper is what preserves it across a much noisier toolchain. Prerequisites become macOS 15+, Xcode 16+, a Swift 6 toolchain, and iOS 18 / watchOS 11 Simulator runtimes. Quick start becomes fork, clone, add upstream, install the commit-msg hook (cp .githooks/commit-msg .git/hooks/ or git config core.hooksPath .githooks), then build and test both schemes. Branching, commits and the checklist port unchanged: develop and main, ALL contributor PRs target develop and never main, branch prefixes feat/ fix/ docs/ refactor/ ci/, Conventional Commits driving release-please with feat/fix/perf/docs/refactor/ci changelog-visible and chore/test hidden, and the pre-submit checklist (tests pass, lint clean with no new warnings, no hardcoded secrets, new functionality has tests, Conventional Commit format, every commit signed off, branch up to date with develop). ADD one line: Core Bluetooth does not exist in the Simulator, so any BLE-touching PR must state whether it was validated on hardware or against the simulated driver. Ship the .github/PULL_REQUEST_TEMPLATE.md and issue forms the Android repo is missing, with a hardware-validation field."
+      },
+      {
+        "capability": "CONTRIBUTING \u2014 required CI checks and fork-PR handling",
+        "why": "Five required checks map to different tools, and one maps to nothing. Semgrep's p/kotlin and p/java rulesets provide ZERO Swift coverage \u2014 porting the Security Scan Gate by name would produce a permanently green gate that scans nothing, which is worse than having no gate. The Android Gate's Gradle build becomes xcodebuild on macOS runners at roughly a 10\u00d7 minute multiplier, so the paths-filter fan-out stops being an optimisation and becomes a cost requirement. Fork PRs also stop being merely a contribution path and become the primary distribution mechanism.",
+        "options": [
+          "SwiftLint and SwiftFormat only",
+          "A real Swift security stack satisfying the Android gates in substance",
+          "Accept reduced security coverage and document it"
+        ],
+        "recommendation": "Option 2, satisfying substance rather than tool names. Concretely: **iOS Gate** \u2014 xcodebuild test on an iOS Simulator destination and a watchOS Simulator destination plus xcodebuild build for both schemes, gated behind a dorny/paths-filter fan-out with an always-running aggregation job that fails closed, exactly as android.yml does. **Security Scan Gate** \u2014 Semgrep p/swift and p/secrets (Semgrep's own registry supports Swift; the Kotlin/Java packs do not apply at all), plus swiftlint --strict with a security-focused custom rule set, plus a canary assertion that the scan actually parsed Swift files rather than reporting zero targets. **Dependency Scan Gate** \u2014 OSV-Scanner over the committed Package.resolved (OSV parses SwiftPM manifests), same fail-on-any-known-CVE policy, same osv-scanner.toml suppression file requiring a written reason and an ignoreUntil. **Attribution Check** \u2014 unchanged, including its pull_request_target design that never checks out PR code. **Workflow Lint / Workflow Security** \u2014 actionlint + shellcheck + SHA-pin guard, and zizmor at Medium+ with a rationale-per-entry allowlist and never a lowered threshold; both are language-agnostic and port as-is. Add an **Attribution Gate** for the license generator. Newly needed and absent from Android: an IPA/entitlements posture check is the analogue of the MobSF decision the Android repo declined \u2014 and its own stated revisit trigger (a write surface, or store distribution) does not fire here, so declining it again is consistent. Fork PRs must run every required check with no maintainer action."
+      },
+      {
+        "capability": "ADR 0002 / ADR 0003 \u2014 tolerant reader and contract-drift strategy",
+        "why": "The client half of ADR 0002 is stated in terms of Moshi. Swift Codable matches Moshi on the property that matters (unknown keys ignored, so additive backend drift is tolerated) but differs elsewhere: no @Json rename annotation (CodingKeys instead), stricter type-mismatch behavior, and default-value semantics that are expressed differently. ADR 0003's ContractSmokeTest and its field-presence coupling must be rebuilt in XCTest.",
+        "options": [
+          "Re-adopt both ADRs verbatim with a short Swift addendum",
+          "Write new iOS ADRs 0002 and 0003 keeping both decisions and all the reasoning",
+          "Build the full DTO\u2194OpenAPI structural diff that Android ADR 0003 deliberately declined"
+        ],
+        "recommendation": "Option 2. Keep both decisions and their reasoning intact. From ADR 0002 preserve: the backend's tolerant-reader behavior (legacy-value migration before validation, loose-typed pass-through fields) IS the cross-cadence compatibility mechanism, and only TWO directions are established \u2014 older app \u2192 newer backend, and newer backend \u2192 older app; newer app \u2192 older backend is NOT proven and is handled defensively per ADR 0001. From ADR 0003 preserve the proportionality argument for a smoke test over a structural diff, and the pin-refresh procedure: copy the platform's openapi.json byte-for-byte and bump contract/CONTRACT_VERSION. Reject option 3 for the same reason Android did. Critically, carry the KNOWN BLIND SPOT forward unchanged, because Swift behaves identically here: removal of a nullable or defaulted consumed field decodes to nil silently and is NOT caught by round-trip parsing. The known instance \u2014 Nightscout pump_events[].units, where a null DROPS the event and UNDERSTATES IoB \u2014 must stay covered by explicit field-presence coupling against the pinned spec, and the rule stands that any new nullable consumed field whose absence would silently degrade a safety surface must be added to that coupling."
+      },
+      {
+        "capability": "README device verification table (authoritative safety status)",
+        "why": "The medical disclaimer defers to this table as the authoritative per-device safety status, so it cannot be inherited across platforms \u2014 an iOS BLE stack is a different code path than the Android one, and a 'Verified' claim carried over would be a false safety claim about software nobody has run. iOS verification also starts materially worse: the team has one Tandem t:slim X2 on one maintainer's iPhone, no Medtronic hardware, no Tandem Mobi, and no Simulator path for any BLE at all.",
+        "options": [
+          "Publish an independent iOS table with honest per-device status from day one",
+          "Omit devices nobody can verify until a tester exists",
+          "Inherit the Android statuses with a blanket iOS caveat"
+        ],
+        "recommendation": "Option 1, and option 3 is not acceptable at any point. Add a column the Android table lacks \u2014 'validated on iOS hardware by / on date' \u2014 and make a named tester plus a date the precondition for any status better than 'unverified'. Expected v1 state: Tandem t:slim X2 verified on iOS hardware by the named maintainer; Tandem Mobi protocol-compatible, unverified on hardware, no tester; Medtronic MiniMed 680G/770G/780G beta, read-only, unverified on hardware, no tester. Port unchanged alongside it: the pre-Overview IMPORTANT SAFETY WARNING blockquote, the `## Disclaimer` section (use at your own risk, not FDA-approved, does not control any medical device, AI can be wrong, verify dosing and carb-ratio and correction-factor suggestions with your care team), and the `## License` section \u2014 still the ONLY README section packaged into the app, so its no-later-`## `-heading constraint and its exact content (project name and description, Copyright (C) 2026 Josh Engelbrecht, GPL-3.0 with SPDX GPL-3.0-only and no or-later, pointers to LICENSE and the SPDX header policy, inbound=outbound, the GPL no-warranty paragraph) are all still test-enforced."
+      },
+      {
+        "capability": "PRIVACY.md \u2014 the outbound-connection and storage claims",
+        "why": "Three of the four documented outbound connections change and one disappears entirely. The Wear OS Data Layer over Google Play Services becomes WatchConnectivity, which removes a third party from the path. The GitHub release-API 'Check for updates' connection has no iOS install path behind it. EncryptedSharedPreferences and the SQLCipher-encrypted Room database become Keychain and Data Protection. And a user-built app has no App Store privacy label and no Apple review of any of these claims.",
+        "options": [
+          "Restate the same claim structure with iOS transports and storage primitives",
+          "Restate plus add an App-Store-style disclosure table even though no store listing exists"
+        ],
+        "recommendation": "Option 1; option 2 implies a review that never happens. New claim set, keeping the same 'exactly N outbound connections, all user-chosen' structure: (1) the pump over BLE, direct and local \u2014 unchanged; (2) the self-hosted backend if configured, with the backend-optional local mode still fully functional (local BLE monitoring, on-device storage, local threshold alerts, zero network calls) \u2014 unchanged and load-bearing; (3) the watch over WatchConnectivity, an Apple-local transport carrying glucose, trend, IoB and alerts only, never credentials \u2014 and state explicitly that unlike Wear OS this involves no third-party services transport; (4) the GitHub release check becomes at most an explicitly user-initiated version comparison with no download, and Apple/TestFlight replaces it as the update mechanism, seeing the user's own Apple ID and install metadata under the user's OWN developer account. Storage claims: credentials in the Keychain with a device-only after-first-unlock accessibility class; glucose and insulin in an encrypted store under a file-protection class no weaker than complete-until-first-user-authentication; the watch keeping only a small rolling render cache in app-private storage, no credentials, and no network requests. Keep: no telemetry, no analytics, the platform repo's privacy page as canonical on conflict, and reporting through the SECURITY.md channels. Add the honest new sentence: these claims describe the source at a given tag; a user's own build is their own."
+      },
+      {
+        "capability": "MEDICAL-DISCLAIMER.md \u2014 warnings, distribution, forks, liability",
+        "why": "Two clauses become factually false and one becomes materially stricter. 'Project-owned unofficial builds are sideloaded from this repo's Releases page only; an APK from anywhere else is not covered' has no iOS analogue \u2014 there IS no project-owned build, and every binary is user-built. And Critical Warning #4's alert-delivery dependency list (BLE holding, Android scheduling background work, watch in range, phone charged) is Android-specific and understates iOS's constraints.",
+        "options": [
+          "Rewrite the two affected clauses and leave the rest",
+          "Rewrite plus obtain legal review of the every-user-is-the-builder posture before publishing fork-and-build instructions"
+        ],
+        "recommendation": "Option 2 \u2014 see questions_for_pm; the Android disclaimer already reserves 'users become the manufacturer of their own personal medical device' for fork users following the Loop/AndroidAPS precedent, and on iOS that description arguably fits every user. Warning #4's iOS list must be strictly MORE conservative and must never be weakened: alerts depend on the BLE link holding, iOS not having suspended or terminated the app, Core Bluetooth state restoration successfully relaunching it, Background App Refresh being enabled, Low Power Mode being off, the user's Focus / Do Not Disturb / notification-summary / per-app mute settings, and the watch being in range \u2014 and a user-built non-App-Store app cannot use the Critical Alerts entitlement, so notifications are silenceable by ordinary device settings. The supplement-not-replacement claim and the instruction to keep the pump's and CGM's own alerts enabled stay verbatim and become more load-bearing. Preserve unchanged: the five Critical Warnings' structure, the AI limitation list (hallucination, misinterpreting glucose data, outdated guidance, missing context), all AI content labelled suggestions not medical advice, the third-party-fork refusal, the untested-device clause (protocol compatibility does not guarantee correct operation; verify IoB, glucose and basal against the manufacturer's official app; the README table is authoritative), the caps-then-GPL-\u00a715/16/17 liability grounding, the EU/UK/Australia jurisdictional note, and the statement that the PRIMARY risk mitigation is the monitoring-only design rather than the disclaimer."
+      },
+      {
+        "capability": "docs/dev/ section \u2014 the eight developer-reference pages",
+        "why": "Five of the eight document Android, Gradle and GitHub-Actions mechanics with materially different iOS answers; two need renaming to match the new architecture; one ports with new globs. The section shape, frontmatter contract and curated non-alphabetical order all survive \u2014 the contents do not.",
+        "options": [
+          "Re-author page by page keeping the section structure",
+          "Collapse into fewer, longer pages",
+          "Defer the section until after v1"
+        ],
+        "recommendation": "Option 1; the section is how a maintainer reproduces every gate, and deferring it strands the CI subsystem. Page mapping: instrumented-tests-ci \u2192 XCUITest on Simulator destinations, PLUS an explicit statement of the hardware-test gap, since Core Bluetooth does not exist in the Simulator and no CI runner can exercise BLE. security-testing \u2192 the Swift gate stack with its own honest 'kept vs dropped vs newly-needed' table (kept: SAST, dependency CVE, secret scanning, workflow hardening; dropped: everything targeting a running server; newly needed: a Swift-capable SAST, since the Kotlin/Java packs cover nothing here). dependency-updates \u2192 Renovate's SwiftPM support over Package.swift and Package.resolved, with the same Tier-A/Tier-B auto-merge policy and the same note about why a lockfile-equivalent must be committed for the CVE gate to have anything to scan. release-and-promotion \u2192 the develop\u2192main promotion, release-please versioning, changelog PR and sync-back all survive; what changes is that the release produces a TAG and no binary artifact. signing-and-secrets \u2192 per-fork Apple credentials, above. plugin-architecture \u2192 driver-architecture for compile-time SwiftPM targets. wear-os-architecture \u2192 watch-architecture (phone app plus watch app, WatchConnectivity, WidgetKit complications, Smart Stack). spdx-header-policy \u2192 ports with new globs. ADD one page the Android repo has no need for: fork-and-build.md, the maintainer-side reference for the per-user TestFlight pipeline, its secret contract, and its failure modes."
+      }
+    ],
+    "impossible": [
+      {
+        "capability": "A project-published, project-signed installable binary (app-release.apk from the topmost non-pre-release, and the dev-latest debug pre-release)",
+        "why": "Apple permits installation only via the App Store, TestFlight, ad-hoc or enterprise provisioning bound to a specific team and enumerated devices, or a development build signed for a registered device. There is no signed-artifact-on-a-releases-page model at any tier. A TestFlight group belongs to exactly one App Store Connect team, external testing requires Apple's Beta App Review, and the project has deliberately chosen no App Store listing \u2014 which is also what keeps GPL-3.0-only workable, since the App Store's terms conflict with GPLv3's anti-DRM and installation-information provisions. The Android two-track model (signed release APK for users, debug APK from a dev-latest pre-release for developers) therefore has no counterpart on either track.",
+        "closest_alternative": "The fork-and-build model already chosen, following Loop and xDrip4iOS: the project publishes SOURCE at signed git tags, and each user's own fork runs a GitHub Actions workflow that signs with the user's own Apple Developer account and uploads to that user's own internal TestFlight (up to 100 internal testers, 90-day build expiry, no Beta App Review). The docs replace 'download the topmost release without the Pre-release label' with 'run your fork's release workflow against tag vX.Y.Z', and the release-vs-dev-latest distinction becomes tag-build vs main-branch-build in the user's own fork. This is also strictly stronger for GPL compliance: every user provably holds the corresponding source and their own signing key."
+      },
+      {
+        "capability": "Custom watch face (the watchface module, Watch Face Format, and the phone-pushes-the-face Watch Face Push API)",
+        "why": "watchOS has no third-party watch faces. Apple exposes no public API to author, install, push, or replace a face; there is no format analogous to Watch Face Format, no counterpart to androidx.wear.watchface:watchface-push, and no counterpart to the Wear OS 5 versus 6 branching the Android page documents. This is not a permissions or entitlement gap that a request could close \u2014 the surface does not exist for developers at any tier. Everything downstream of it disappears too: the separate watchface-release.apk, the two-variant watchface build (digitalFull and analogMechanical) that the Android attribution generator resolves as two of its four AttributionSources, and the entire ADB-install-the-face workflow.",
+        "closest_alternative": "WidgetKit complications in the accessoryCircular, accessoryCorner, accessoryRectangular and accessoryInline families, which the user manually adds to an Apple-provided face, plus a Smart Stack widget with relevance hinting, plus the full watch app for the richer view. Every data element the Android face renders is preserved \u2014 glucose, trend arrow up/down/flat, IoB, time \u2014 as is the ~5-minute glucose-interval cadence, the '--' staleness threshold, and the strictly read-only posture. What is genuinely lost: control of the whole face surface, any guarantee of placement (the user chooses the face and the slot), and guaranteed refresh cadence (complication timeline reloads are budgeted by the system). The docs must state all three losses rather than implying parity."
+      },
+      {
+        "capability": "ADB-based install, sideloading, and the separate watch-app install workflow",
+        "why": "iOS and watchOS expose no adb equivalent, no unknown-sources permission, no Developer Options unlocked by tapping Build number seven times, no Debug over Wi-Fi or Bluetooth pairing that surfaces an <ip>:<port>, and no way to install an app onto the watch independently of the phone. INSTALL_FAILED_USER_RESTRICTED, the work-device policy-block case, and the 'Wear OS forbids APK download from the watch browser' constraint the Android docs call the hardest step in the whole product all have no analogue.",
+        "closest_alternative": "The watch app is embedded in the phone app's bundle and installs automatically when the user installs the phone app from TestFlight. The entire Android watch-install page collapses to 'accept the TestFlight invite, then long-press your watch face, tap Edit, and add the GlycemicGPT complication.' This is a strict simplification and the docs should say so explicitly \u2014 the single hardest documented step in the Android product is removed. For developers, Xcode's Devices and Simulators window installs directly to a connected iPhone, which is the nearest thing to the adb path and belongs in the developer section, not the user-facing install page."
+      },
+      {
+        "capability": "In-app 'Check for updates' that downloads and installs a newer build",
+        "why": "iOS forbids an application from fetching and executing code that was not signed into its bundle; there is no counterpart to downloading an APK from github.com or objects.githubusercontent.com and installing it, and no in-place upgrade path an app can trigger. The Android page's related claims \u2014 no auto-update, a stale-version banner, and an in-place APK upgrade that preserves settings, login and pairing \u2014 are all either impossible or inverted, since TestFlight updates automatically and installs are managed by the system.",
+        "closest_alternative": "TestFlight delivers updates automatically once the user's fork uploads a new build. The app may at most compare its own embedded source tag against the upstream repository's latest tag and display a non-actionable banner: 'a newer version is available \u2014 re-run your fork's build workflow.' PRIVACY.md's fourth outbound connection changes character accordingly: it stops being an install path and becomes, at most, an explicitly user-initiated version check that downloads nothing. The app should additionally surface its own TestFlight build expiry date, which is a real staleness signal the Android app has no need for."
+      },
+      {
+        "capability": "Guaranteed or undismissable alert delivery, and the Critical Alerts entitlement",
+        "why": "UNNotificationInterruptionLevel.critical requires the com.apple.developer.usernotifications.critical-alerts entitlement, which Apple grants only by reviewed request against a specific App Store Connect app record, and which is not realistically obtainable for a user-built, non-App-Store, explicitly-unofficial app \u2014 and every user's fork would need its own grant against its own bundle ID. Separately, iOS has no foreground service: there is no mechanism to keep a process alive indefinitely. BGTaskScheduler runs at the system's discretion and cannot guarantee a 5-minute cadence; Core Bluetooth background delivery is event-driven only; and CBCentralManager state restoration hands back the peripherals and scan state but explicitly cannot resume arbitrary work, so an app relaunched into the background must reconstruct its own context and may be terminated again. Android's battery-optimization exemption, which the Android docs present as the fix for a dropping background link, has no user-facing counterpart at all.",
+        "closest_alternative": "A layered, honestly-described alerting posture: .timeSensitive interruption level (breaks through Focus, but not through the user muting the app or disabling its notifications), a Live Activity while a pump session is active so glucose stays visible on the Lock Screen and in the Dynamic Island, an audible in-app alarm while the app is foreground, the bluetooth-central background mode with CBCentralManagerOptionRestoreIdentifierKey so the OS relaunches the app on peripheral events, and a watch-side complication as an independent surface. MEDICAL-DISCLAIMER Critical Warning #4 must be made STRICTER on iOS and must never be weakened: the supplement-not-replacement framing and the instruction to keep the pump's and CGM's own alerts enabled are the actual safety mechanism, and the docs must not imply the app can be relied on as a primary alarm."
+      },
+      {
+        "capability": "Runtime-loaded plugin contribution path (plugins/example/)",
+        "why": "iOS forbids loading executable code that was not signed into the app bundle at build time. There is no counterpart to DexClassLoader, dlopen of a downloaded binary is rejected at load, and any mechanism that fetched and executed a driver at runtime would be both a signing violation and a code-injection surface in an app handling glucose data. This is a settled platform rule, not a v1 scope cut, and is already reflected in the product decision that drivers are compile-time-linked Swift modules.",
+        "closest_alternative": "Every driver is a compile-time-linked SwiftPM target under Sources/Drivers/. The CONTRIBUTING step describing runtime-loaded plugins as a separate advanced path not compiled into official builds is DELETED rather than adapted, and the docs should state the tradeoff plainly: adding a new device on iOS requires a source change, a merged PR, and a rebuild by each user, not a dropped-in plugin. One mitigating property of the distribution model is that a user who wants an unmerged driver can already build their own fork with it \u2014 which is the same affordance the plugin path provided, arrived at differently."
+      },
+      {
+        "capability": "Battery-optimization exemption as a documented, user-performable action",
+        "why": "iOS has no per-app battery-optimization allowlist, no Samsung-style 'Sleeping apps' list, and no user-facing setting that grants an app durable background execution. The Android docs make this exemption a prerequisite in two separate published pages (install.md and cant-pair-pump.md) because without it the background pump link drops; there is nothing on iOS a user can toggle that provides the equivalent guarantee. The related '<5%/day battery impact' figure is an Android measurement of an Android background model and cannot be carried over.",
+        "closest_alternative": "Document what the user CAN control and be explicit about what they cannot: enable Background App Refresh for the app, keep Low Power Mode off, and do not swipe the app away in the app switcher (which suspends Core Bluetooth state restoration until the next manual launch, and is therefore the exact opposite of the Android 'force-stop then reopen' remedy). Pair this with an in-app diagnostics screen surfacing CBManagerState, Bluetooth authorization, Background App Refresh status, Low Power Mode and a last-seen-advertisement timestamp, since iOS hides all of it. Replace the battery figure with a measured iOS number gathered on the maintainer's hardware, or publish none at all \u2014 do not inherit the Android one."
+      }
+    ],
+    "ios_requirements": [
+      "The published docs tree must use one _meta.json per section directory with the schema {\"title\": string, \"pages\": [string]}, entries as basenames without extension, the array order as the rendered nav order, and no root docs/_meta.json.",
+      "CI must fail a documentation PR when a page under a section directory lacks title: or description: frontmatter, is present on disk but absent from its section's pages array, or is listed in a pages array but absent from disk.",
+      "CI must fail a documentation PR containing an internal link that resolves to nothing, evaluated against the merged multi-repo website namespace rather than this repo alone.",
+      "iOS documentation pages must not share page basenames with the Android repository's pages; platform-specific content must live in platform-scoped section directories.",
+      "A push to main touching docs/** must dispatch a docs-updated repository event to the website repo using a GitHub App token minted with no GITHUB_TOKEN scopes, with a manual re-dispatch available to force a rebuild after a failed run.",
+      "A user must be able to go from a fresh fork to a working app on their own iPhone using only the published build-and-install page: Apple Developer Program membership, an App Store Connect API key, a documented set of repository secrets, one workflow run, and a TestFlight invite.",
+      "The build-and-install page must state the 90-day TestFlight build expiry and the exact action required to refresh it before it lapses.",
+      "The app must surface its own build expiry date and source tag in Settings so a user can see staleness without consulting TestFlight.",
+      "The project must never hold, request, or transmit any user's Apple signing material; all signing credentials must live only in the user's own fork's repository secrets, and a leaked credential must compromise only that user's own Apple account.",
+      "The build pipeline must produce a signed, TestFlight-uploadable build from a fork in which no project-owned secret is present.",
+      "The app must ship an in-app license viewer reachable from Settings, with distinct Loading, Loaded and Unavailable states, full text selection, preserved scroll position across rotation and scene restoration, and no network requirement.",
+      "The license viewer must display, in order: the project license notice, the third-party source-lineage document, one section per redistributed-component license family, the bundled license texts, and the complete GPL-3.0 text.",
+      "License texts and the GPL must be rendered as plain text and never as markdown, and repository-relative links in any displayed document must be reduced to their label text while scheme-bearing targets including mailto: are preserved.",
+      "The shipped license assets must be generated from the resolved dependency graph on every build, covering every target that ships in a binary including the watch app and any widget extension; committed pre-generated assets must not be accepted.",
+      "The build must fail \u2014 not warn \u2014 when the resolved component list is empty, when a component has no SPDX identifier and no classification entry, when a license family has no bundled text file, when a whole-file source document is blank, or when README.md has no `## License` heading.",
+      "The build must fail when a dependency's license is not on the checked-in allowlist; EPL-1.0 must not be allowlisted, and an EPL-licensed transitive must be excluded at the dependency with a test proving the affected feature still works.",
+      "Every per-package license exception must be pinned to an exact version and carry a written reason, so a version bump re-raises the judgement rather than inheriting it.",
+      "An automated test must assert byte-for-byte equality between each shipped license asset and its on-disk source, must fail on any component-document heading outside the declared SPDX and non-SPDX heading sets, and must assert a named stable witness component and a non-empty upstream-notices block.",
+      "Editing README.md, LICENSE, docs/THIRD_PARTY_LICENSES.md or docs/licenses/** must invalidate cached test results and trigger the application build gate; every other docs change must skip it.",
+      "Every in-scope Swift, shell and workflow file must carry the SPDX identifier GPL-3.0-only and the copyright line naming the individual holder; ported upstream trees must be excluded from that stamp and must instead carry their own upstream notice in-file, specifically including Apache-2.0 and the Particle Industries copyright on the EC-JPAKE source.",
+      "A published acknowledgments page must state, per upstream project, whether its code was studied and reimplemented or copied and ported, and must name the license and any explicit relicensing permission relied on.",
+      "A repo-internal, unpublished provenance record must state, per Swift module, which Android source file and commit it derives from, or that it was reimplemented from protocol documentation only.",
+      "The published medical disclaimer must state that no therapeutic write surface exists anywhere, that no capability protocol exposes an insulin-delivery primitive, and that permitted device-management operations are exactly CGM calibration, BLE pair and unpair, and connect and disconnect.",
+      "The published alert-delivery warning must enumerate every iOS-specific condition that alert delivery depends on, and must state that app alerts are a supplement to the pump's and CGM's own alerts, never a replacement, and that device alerts must remain enabled.",
+      "No product surface may claim that alerts are guaranteed, undismissable, or capable of overriding the user's own notification, Focus, or mute settings.",
+      "The published README must carry an iOS-specific per-device verification table including a 'validated on iOS hardware by / on date' column, and the medical disclaimer must defer to that table; no device status may be inherited from the Android table.",
+      "Onboarding must present a safety-acknowledgement page that cannot be skipped or swiped past, requires an explicit 'I Understand' action, and shows all five disclaimer cards including the warning never to calculate an insulin dose from a photo carb estimate; users who previously completed onboarding must be re-run through it whenever the disclaimer changes.",
+      "The published privacy document must enumerate every outbound connection by name, state that each is user-chosen, and state that with no backend configured the app performs local BLE monitoring, on-device storage and local threshold alerts with zero network calls.",
+      "Any error-monitoring integration must compile with an empty DSN in every pipeline-produced build, must fail the build outright if a DSN reaches CI, and must transmit no glucose, health, identifier, credential, device-serial, database or HTTP-body data.",
+      "Credentials must be stored in the Keychain with a device-only, after-first-unlock accessibility class; health data must be stored under a file-protection class no weaker than complete-until-first-user-authentication; the watch must store no credentials and must make no network requests.",
+      "Security reports must have two private channels and no public issue path, and the policy must classify a BLE parsing defect that produces a wrong glucose, IoB or dosing-history value as a report for that channel rather than an ordinary bug.",
+      "The security policy must pre-decline, in writing, any report proposing that the absent therapeutic-write capability be added.",
+      "Every commit must carry a valid Signed-off-by trailer, enforced server-side with no exemption tier and a one-remediation-commit allowance, with no CLA and no relicensing rights granted.",
+      "Pull requests must be blocked when AI attribution appears in commit trailers, in added source lines, or in the PR description, using the same three-severity ladder and anchored bot allowlist, with .swift included in the scanned extension set.",
+      "Required pull-request checks must cover, in substance: build and unit tests on iOS and watchOS Simulator destinations, Swift static analysis with security rules that demonstrably parse Swift, dependency CVE scanning over the committed dependency lockfile, license attribution generation, AI attribution, and workflow lint plus workflow security scanning.",
+      "The Swift static-analysis gate must fail closed if the scanner errors, and must fail if it reports zero scanned Swift files.",
+      "Fork-originated pull requests must run every required check with no maintainer action, and no privileged check may check out pull-request code into a writable working tree.",
+      "A driver contribution must declare which capability protocols it implements from the read-only set, must discard and log any reading outside SafetyLimits rather than returning, emitting or persisting it, must include parsing and limits-validation tests, and must name who will validate it on physical hardware.",
+      "The three cross-repo safety constants \u2014 18.0156, the 20 to 500 mg/dL validity bound, and the 1199145600-second Tandem epoch offset \u2014 must each exist as exactly one Swift definition, be documented on a single contract page listing every consuming site, and be guarded by a test that fails when a duplicate or divergent definition appears.",
+      "Glucose must be stored and compared in mg/dL at every persisted field, bound, threshold, alert comparison, dedup key and safety check; mmol/L must exist only at display and input boundaries, converted with the single sanctioned factor and rounded last.",
+      "The app must vendor a monotonic CONTRACT_VERSION integer and a byte-for-byte-pinned OpenAPI document, must treat an absent or unparseable backend compatibility signal as absent rather than compatible, must fail open on read and monitoring paths with a one-time dismissible warning, and must refuse any future safety-critical write when backend compatibility is unknown.",
+      "Contract tests must assert the presence of every nullable consumed field whose absence would silently degrade a safety surface, explicitly including the Nightscout pump-event insulin-units field whose absence drops the event and understates IoB.",
+      "The repository must ship a code of conduct with a reporting address distinct from the security address, a governance stub delegating to the organisation-level document, a CODEOWNERS file requiring lead review on driver, workflow, policy and release-configuration changes, and pull-request and issue templates including a hardware-validation field.",
+      "Documentation-only pull requests must receive a docs label and a Documentation changelog section without triggering the application build gate, except when they touch one of the four license-bearing paths.",
+      "The watch setup page must state that the watch app installs automatically with the phone app, that a complication must be added manually to an Apple-provided face, and that watchOS provides no custom watch face and no equivalent of pushing a face from the phone.",
+      "An in-app diagnostics surface must report Bluetooth manager state and authorization, Background App Refresh status, Low Power Mode, and the last-seen-advertisement and last-successful-pump-read timestamps, so troubleshooting documentation has something actionable to point at."
+    ],
+    "risks": [
+      {
+        "risk": "The license asset pipeline has no off-the-shelf Swift equivalent with the Android version's fail-closed behavior. LicensePlist and similar tools generate files but warn rather than fail on an unclassified component, an empty component list, or a missing license text \u2014 so a naive tool swap silently converts five build-breaking guarantees into zero.",
+        "severity": "high",
+        "mitigation": "Build the generator as a small in-repo Swift executable and write the five failure modes as tests of the generator itself before the first TestFlight build exists. Port LicenseAssetsTest as an XCTest against the built bundle on day one, so no build path can ever ship a blank or stale license screen."
+      },
+      {
+        "risk": "Because every user builds and signs their own binary, the project cannot verify what any installed build actually contains. A user could compile in a Sentry DSN, add a therapeutic write, or edit the disclaimer, and the result would still look and be called GlycemicGPT. Every legal claim in PRIVACY.md and MEDICAL-DISCLAIMER.md is a claim about source, not about the binary anyone is running.",
+        "severity": "high",
+        "mitigation": "State the boundary explicitly in both documents: these claims describe the source at tag vX.Y.Z; your build is yours. Keep the CI DSN-rejection check so the upstream pipeline itself cannot produce a telemetry build, keep the no-write-surface assertions in the CodeRabbit gate and the capability protocol definitions, and publish which claims are architecturally enforced versus prose."
+      },
+      {
+        "risk": "Docs namespace collision. The website merges this repo's docs with the platform repo's; adding iOS produces duplicate basenames (install, cant-pair-pump, connecting-medtronic-pump) and silently wrong link resolution, and nothing in any repo detects it because there is no link checker and no cross-repo validation anywhere today.",
+        "severity": "medium",
+        "mitigation": "Platform-scoped section directories so no basename is ever shared, a small stable shared-anchor set owned by the platform repo, and a link check that runs in the website repo against the merged tree. Pick one canonical org/slug before copying any absolute link forward \u2014 the Android policy docs currently carry six inconsistent slugs."
+      },
+      {
+        "risk": "Semgrep's p/kotlin and p/java rulesets provide zero Swift coverage, so a name-for-name port of the Security Scan Gate would produce a permanently green required check that scans nothing \u2014 strictly worse than having no gate, because it manufactures false assurance for a health-data app.",
+        "severity": "high",
+        "mitigation": "Name the substitute stack explicitly in docs/dev/security-testing.md \u2014 Semgrep p/swift and p/secrets, swiftlint --strict with security rules, OSV-Scanner over Package.resolved \u2014 and add a canary step asserting the scan actually parsed a non-zero number of Swift files. Keep the existing fail-closed-on-scanner-error logic and the non-blocking unparseable-file warning, both of which port as-is."
+      },
+      {
+        "risk": "The alert-delivery claim is the highest-consequence prose in the repository, and iOS is materially weaker than Android on every dependency it names. An inherited Critical Warning #4 would overstate reliability for a user who reasonably treats the app as a glucose alarm.",
+        "severity": "high",
+        "mitigation": "Rewrite Warning #4 before any hardware testing begins, not after, so no tester ever reads the Android version. Enumerate every iOS condition including Focus, per-app mute, state restoration and app-switcher dismissal, and add a CodeRabbit Medical Safety rule that flags any diff weakening alerting language in the disclaimer or the app."
+      },
+      {
+        "risk": "No one on the team has Medtronic hardware or a Tandem Mobi, the lead has no iPhone and no Apple Watch, and Core Bluetooth does not exist in the Simulator. The iOS device verification table therefore starts nearly empty, and the medical disclaimer defers to that table as authoritative safety status.",
+        "severity": "high",
+        "mitigation": "Publish the table with honest empty statuses from the first commit, make a named tester and a date the precondition for any status better than 'unverified on hardware', and build a simulated driver so parser correctness and safety-limit rejection stay testable in CI without hardware. Add the hardware-validation field to the PR template so the gap is visible on every driver change."
+      },
+      {
+        "risk": "macOS runners cost roughly ten times Linux minutes, and the Android repo's Security Scan Gate runs unconditionally on every PR by design so the required status always reports. Naively porting that pattern to xcodebuild makes the build gate expensive enough that a maintainer is tempted to weaken it.",
+        "severity": "medium",
+        "mitigation": "Keep the paths-filter fan-out plus always-running aggregation-gate pattern for the build and test gate so the required check still reports on skipped runs, and run the cheap Linux-native gates \u2014 attribution check, workflow lint, workflow security, dependency scan, Swift SAST \u2014 unfiltered on every PR."
+      },
+      {
+        "risk": "TestFlight builds expire after 90 days. A user who stops rebuilding loses a working glucose monitor, and unlike a sideloaded APK there is no version that simply keeps running.",
+        "severity": "medium",
+        "mitigation": "Document the expiry prominently on the install page rather than in a footnote, surface the build's own expiry date in the app's Settings screen with escalating prominence as it approaches, and consider a scheduled workflow in the fork template that rebuilds automatically."
+      },
+      {
+        "risk": "CBPeripheralManager drops the advertised local name once the app is backgrounded, and the Medtronic pairing flow depends on the phone advertising as exactly 'Mobile 000001'. Publishing the Android page's 'pairing is remembered; reconnect is automatic when back in range' claim unchanged would be wrong for initial discovery.",
+        "severity": "medium",
+        "mitigation": "Document Medtronic pairing as an explicitly foreground, screen-on operation and reconnection as best-effort in background; verify the split on hardware before publishing the page; and add a named error string for the Bluetooth-permission and background-advertising cases alongside the five existing ones."
+      },
+      {
+        "risk": "The Android repo instructs contributors to fill out a PR template that does not exist, references docs/dev/monorepo-port-ledger.md which does not exist, and carries a ci.yml whose own comment claims it is the only workflow while eighteen others exist. Copying CONTRIBUTING and the workflow set forward carries all three defects into a new repository.",
+        "severity": "low",
+        "mitigation": "Ship .github/PULL_REQUEST_TEMPLATE.md and issue forms in the first commit, replace the port-ledger reference with the provenance record that actually exists, and audit every workflow header comment for inherited stale claims before the repo goes public."
+      },
+      {
+        "risk": "GPL-3.0-only combined with a per-user Apple Developer account places each user in the position of builder, signer and distributor-to-self. The Android disclaimer reserves the 'user becomes the manufacturer of their own personal medical device' framing for third-party forks that add device control; on iOS that description may fit every single user of the software.",
+        "severity": "high",
+        "mitigation": "Obtain legal review of the disclaimer's distribution and manufacturer clauses before the fork-and-build instructions are published, not after the first user builds. Until reviewed, the install page should state the builder relationship factually without asserting a legal conclusion in either direction."
+      }
+    ],
+    "questions_for_pm": [
+      "On Android the project publishes a signed binary from its own Releases page, and MEDICAL-DISCLAIMER.md reserves the 'users become the manufacturer of their own personal medical device' framing (citing the Loop/AndroidAPS precedent) for third-party forks that add device control. On iOS there is no project-published build at all: every user forks the source, signs with their own Apple Developer account, and installs into their own TestFlight. Does the iOS disclaimer need counsel review on whether that framing now describes every user rather than only fork users \u2014 and if counsel says it does, does that change whether the project publishes fork-and-build instructions publicly, or only how the disclaimer is worded? This is the one determination in this subsystem that cannot be made from the Android repo, Apple's platform rules, or the stated product context, and it gates the two highest-traffic published pages (the install runbook and the medical disclaimer)."
+    ]
+  }
+}

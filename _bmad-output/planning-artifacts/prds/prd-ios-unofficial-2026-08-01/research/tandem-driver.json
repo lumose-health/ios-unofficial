@@ -1,0 +1,805 @@
+{
+  "key": "tandem-driver",
+  "label": "Tandem t:slim X2 and Mobi BLE driver",
+  "map": {
+    "subsystem": "Tandem t:slim X2 and Mobi BLE driver (plugins/shipped/tandem) \u2014 GATT transport, JPAKE/V1 pairing, Tandem message framing + CRC16, status/history read protocol, parsers, connection state machine and reconnect policy",
+    "capabilities": [
+      {
+        "name": "GATT service and characteristic UUID map",
+        "behavior": "Pump service 0000fdfb-0000-1000-8000-00805f9b34fb. Vendor characteristics (base 7B83FFFx-9F77-4E5C-8064-AAE2C24838B9): FFF6 CURRENT_STATUS (unsigned status reads), FFF7 QUALIFYING_EVENTS, FFF8 HISTORY_LOG, FFF9 AUTHORIZATION, FFFC CONTROL, FFFD CONTROL_STREAM. CCCD 00002902-0000-1000-8000-00805F9B34FB. DIS 0000180A with 2A29 manufacturer, 2A24 model, 2A25 serial, 2A28 software-rev \u2014 all four DIS characteristics and the DIS service are declared but never read anywhere in the codebase. NOTIFICATION_CHARACTERISTICS = [FFF6, FFF7, FFF8, FFF9, FFFC, FFFD]; all six get CCCD writes but only FFF9 (auth), FFF6 (status) and FFF8 (history) have handlers \u2014 FFF7/FFFC/FFFD notifications fall through to a debug log line and are discarded.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/protocol/TandemProtocol.kt"
+        ]
+      },
+      {
+        "name": "BLE scan and pump discovery",
+        "behavior": "BleScanner.scan() returns a callbackFlow over BluetoothLeScanner.startScan with one ScanFilter on ParcelUuid(0000fdfb-\u2026) and ScanSettings SCAN_MODE_LOW_LATENCY. Dedupes by MAC address in an in-memory set for the life of the flow; emits DiscoveredPump(name = device.name ?: \"Tandem Pump\", address, rssi). onScanFailed closes the flow with IllegalStateException(\"BLE scan failed: <errorCode>\"). stopScan on collector cancel. No timeout, no RSSI floor, no rescan-on-empty. TandemDevicePlugin maps DiscoveredPump to DiscoveredDevice with pluginId com.glycemicgpt.tandem. Model detection is separate: TandemPumpModel.fromAdvertisedName whitespace-normalizes and prefix-matches case-insensitively \u2014 \"tslim X2\" or \"t:slim X2\" \u2192 TSLIM_X2 (hasScreen=true), \"Tandem Mobi\" \u2192 MOBI (hasScreen=false), else UNKNOWN (hasScreen=null).",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/connection/BleScanner.kt",
+          "android-unofficial/plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/model/TandemPumpModel.kt"
+        ]
+      },
+      {
+        "name": "Tandem message framing (Packetize.encode)",
+        "behavior": "Raw message = [0]=opcode, [1]=txId, [2]=cargoLen (uint8), [3..]=cargo, then 2-byte CRC16 little-endian appended (low byte first). CRC is computed over bytes 0..(3+cargoLen-1), i.e. header+cargo, not the CRC itself. Cargo >255 bytes throws IllegalArgumentException. The raw message is then split into BLE chunks of chunkSize bytes: each chunk is [0]=packets-remaining in the LOWER nibble (upper nibble 0), [1]=txId, [2..]=payload fragment. payloadPerChunk = chunkSize-2; totalChunks = ceil(rawSize/payloadPerChunk); packetsRemaining counts down to 0 on the last chunk. CHUNK_SIZE_SHORT=18 is used for every write in the shipped code (status, history, all auth). CHUNK_SIZE_LONG=40 is declared but unused outside tests.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/protocol/Packetize.kt"
+        ]
+      },
+      {
+        "name": "CRC-16/CCITT-FALSE",
+        "behavior": "Bitwise CRC-16 with polynomial 0x1021, init 0xFFFF, no final XOR, no reflection, MSB-first: for each byte crc ^= (byte<<8), then 8 iterations of (crc&0x8000 ? (crc<<1)^0x1021 : crc<<1) masked to 0xFFFF. Verified vectors: empty input \u2192 0xFFFF; \"123456789\" \u2192 0x29B1; single 0x00 byte \u2192 0xE1F0. toBytes emits little-endian [low, high] \u2014 0x29B1 \u2192 [0xB1, 0x29]. compute(data, offset, length) supports sub-ranges. Packetize.parseHeader recomputes over bytes 0..3+cargoLen and compares against (raw[3+len] | raw[4+len]<<8); any mismatch returns null and the whole message is dropped (logged as PARSE_FAIL to the debug logger).",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/protocol/Crc16.kt",
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/protocol/Packetize.kt"
+        ]
+      },
+      {
+        "name": "Inbound packet reassembly (PacketAssembler)",
+        "behavior": "Stateful accumulator. feed(notification): returns false if notification.size<2. packetsRemaining = notification[0] & 0x0F; txId = notification[1] & 0xFF. First feed latches expectedTxId. If a later chunk's txId differs, the buffer is reset and expectedTxId re-latched to the new txId (previous partial message silently discarded). Payload bytes 2.. are appended. Returns true when packetsRemaining==0; caller then calls assemble() to get the concatenated raw bytes and reset(). There is no length check against the declared cargoLen, no per-chunk sequence validation beyond the remaining-counter, and no timeout on a stalled partial message.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/protocol/PacketAssembler.kt"
+        ]
+      },
+      {
+        "name": "Connection bring-up sequence",
+        "behavior": "connect(address, pairingCode): cancels any pending reconnect job, closes the passive autoConnect GATT, sets CONNECTING, autoReconnect=true, resets counters (on user connect only), clears assemblers/queues/pending requests, then device.connectGatt(context, autoConnect=false, TRANSPORT_LE). On STATE_CONNECTED: refreshGattCache via reflected BluetoothGatt.refresh(), requestConnectionPriority(CONNECTION_PRIORITY_HIGH) (7.5\u201315 ms interval \u2014 the pump drops connections at slower default intervals), then requestMtu(185). onMtuChanged success \u2192 discoverServices(); failure \u2192 close GATT, clear queue, DISCONNECTED (no reconnect scheduled from this path). onServicesDiscovered success \u2192 enqueue CCCD enable for AUTHORIZATION first, set AUTHENTICATING, start auth, then enqueue CCCDs for the remaining five characteristics. Discovery failure only logs and returns \u2014 nothing recovers it.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/connection/BleConnectionManager.kt"
+        ]
+      },
+      {
+        "name": "Serialized GATT operation queue",
+        "behavior": "All characteristic writes and CCCD descriptor writes go through a single ConcurrentLinkedQueue<GattOperation> guarded by an AtomicBoolean operationInFlight \u2014 Android's stack allows only one outstanding GATT op. drainOperationQueue() CAS-acquires the flag, polls one op, and issues it; onCharacteristicWrite / onDescriptorWrite release the flag and drain the next, regardless of status (failures are logged, not retried). Missing service or characteristic releases the flag and recurses to the next op. Null GATT clears the entire queue. Characteristic writes use WRITE_TYPE_DEFAULT (write-with-response). Descriptor writes always use ENABLE_NOTIFICATION_VALUE \u2014 indications are never enabled anywhere in this driver. API 33+ uses the value-passing overloads, below 33 the deprecated setValue/write pair.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/connection/BleConnectionManager.kt"
+        ]
+      },
+      {
+        "name": "Authentication mode selection (V1 vs JPAKE, bootstrap vs confirmation)",
+        "behavior": "startAuthentication runs on every connection including reconnects \u2014 without app-level auth the pump silently ignores all status requests even with a valid BLE bond. code = pendingPairingCode ?: credentialStore.getPairingCode(); null code \u2192 AUTH_FAILED immediately. isReconnect = (pendingPairingCode == null && credentialStore.isPaired()). If code.length <= 10 \u2192 JPAKE (firmware v7.7+, 6-digit code); else \u2192 V1 legacy (16-char code). Within JPAKE: if isReconnect and a saved derived secret hex exists \u2192 CONFIRMATION mode (skip rounds 1a/1b/2, send round 3 built from the saved secret, 2 round trips); otherwise BOOTSTRAP mode (full 5 round trips, pump must be in pairing mode). A 30 s AUTH_TIMEOUT_MS job is armed before the first write.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/connection/BleConnectionManager.kt"
+        ]
+      },
+      {
+        "name": "JPAKE handshake state machine",
+        "behavior": "JpakeStep: IDLE \u2192 ROUND_1A_SENT \u2192 ROUND_1A_RECEIVED \u2192 ROUND_1B_SENT \u2192 ROUND_1B_RECEIVED \u2192 ROUND_2_SENT \u2192 ROUND_2_RECEIVED \u2192 CONFIRM_3_SENT \u2192 CONFIRM_3_RECEIVED \u2192 CONFIRM_4_SENT \u2192 COMPLETE; any state/size violation \u2192 FAILED. Opcodes on FFF9: 32/33 (1a), 34/35 (1b), 36/37 (2), 38/39 (session key), 40/41 (key confirm). Every request cargo begins with appInstanceId=1 as 2-byte LE. 1a cargo = 2 + clientRound1[0..165) = 167 B; 1b cargo = 2 + clientRound1[165..330) = 167 B; round 2 cargo = 2 + clientRound2[0..165) = 167 B; round 3 cargo = 2 B; round 4 cargo = 50 B. Responses: 1a/1b need \u2265167 B (server challenge = bytes 2..167), round 2 needs \u22652 B, round 3 needs \u226518 B, round 4 needs \u226550 B.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/auth/JpakeAuthenticator.kt"
+        ]
+      },
+      {
+        "name": "JPAKE round 3/4 session key and confirmation",
+        "behavior": "Round 3 request triggers EcJpake.deriveSecret() (bootstrap) or loads the saved secret (confirmation) and sends only appInstanceId. Round 3 response layout: appInstanceId(2) + deviceKeyNonce(8) + deviceKeyReserved(8); serverNonce3 = bytes 2..10. Round 4 request: clientNonce4 = 8 SecureRandom bytes; hkdfKey = Hkdf.build(salt=serverNonce3, ikm=derivedSecret) (32 B); digest = HMAC-SHA256(data=clientNonce4, key=hkdfKey); cargo = appInstanceId(2) + nonce(8) + 8 zero reserved + digest(32) = 50 B. Round 4 response: serverNonce4 = bytes 2..10, serverDigest = bytes 18..50; client recomputes HMAC-SHA256(serverNonce4, hkdfKey) and compares with ByteArray.contentEquals (not constant-time). Match \u2192 COMPLETE \u2192 onAuthSuccess; mismatch \u2192 FAILED and saved JPAKE credentials are cleared.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/auth/JpakeAuthenticator.kt",
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/crypto/Hkdf.kt",
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/crypto/HmacSha256Util.kt"
+        ]
+      },
+      {
+        "name": "EC-JPAKE cryptographic core",
+        "behavior": "Thread-spec EC-JPAKE on BouncyCastle P-256, SHA-256, curve id 23, roles CLIENT/SERVER with ASCII ids \"client\"/\"server\". Secret = BigInteger(1, pairingCodeAsciiBytes). Points are serialized uncompressed (getEncoded(false), 65 B) with a 1-byte length prefix; scalars are fixed 32-byte big-endian with a 1-byte length prefix \u2014 the fixed length is deliberate, because stripping leading zeros caused a ~1.6 % ArrayIndexOutOfBounds on the fixed 165-byte split offsets. Round 1 = 2\u00d7(point + ZKP) = 330 B; round 2 = 1\u00d7(point + ZKP) = 165 B (SERVER also prefixes a 3-byte curve id; CLIENT reads it). ZKP hash = SHA-256 over length-prefixed G, V, X and the id, reduced mod n; verification recomputes G\u00b7r + X\u00b7h and rejects mismatch. mulSecret blinds with a random 16-byte b: (b\u00b7n + s)\u00b7x mod n. deriveSecret = SHA-256(x-coordinate of K).",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/crypto/EcJpake.kt"
+        ]
+      },
+      {
+        "name": "HKDF and HMAC helpers",
+        "behavior": "Hkdf.build(salt, ikm) = RFC 5869 Extract-then-Expand with HmacSHA256, empty info, L=32: PRK = HMAC(salt, ikm); OKM = T(1) where T(i) = HMAC(PRK, T(i-1) || info || i) with i a single octet; ceil(L/32)=1 block. An empty key is replaced by 32 zero bytes. HmacSha256Util.hmacSha256(data, key) is a plain JCE HmacSHA256 \u2014 pumpX2's mod255 byte transform is deliberately omitted because (b+256)&255 is an identity on unsigned bytes. HmacHelper (V1 auth only) computes HmacSHA1 with the ASCII pairing code as the key and returns a 20-byte digest; buildChallengeResponse(pairingCode, challengeKey) = hmacSha1(key=codeAscii, data=challengeKey).",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/crypto/Hkdf.kt",
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/auth/HmacHelper.kt"
+        ]
+      },
+      {
+        "name": "V1 legacy authentication (firmware < 7.7)",
+        "behavior": "AuthState: IDLE \u2192 CHALLENGE_SENT \u2192 RESPONSE_SENT \u2192 AUTHENTICATED | FAILED. Opcode 16 CentralChallengeRequest, cargo 10 B = appInstanceId (random 0..0xFFFE, 2 B LE) + 8 SecureRandom challenge bytes. Opcode 17 response, 30 B: bytes 0-1 appInstanceId echo, 2-21 centralChallengeHash (20 B, unverified by this client), 22-29 hmacKey. Client computes HMAC-SHA1(key = ASCII pairing code, data = hmacKey[8]) and sends opcode 18 PumpChallengeRequest, cargo 22 B = appInstanceId + 20-byte digest. Opcode 19 response, 3 B: bytes 0-1 appInstanceId echo (never checked), byte 2 == 1 \u2192 AUTHENTICATED, anything else \u2192 FAILED. Short cargo (<30 / <3) or wrong state \u2192 FAILED/null.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/auth/TandemAuthenticator.kt",
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/auth/AuthState.kt"
+        ]
+      },
+      {
+        "name": "Auth success: credential persistence and session init",
+        "behavior": "onAuthSuccess cancels the auth timeout, zeroes reconnectAttempt / rapidDisconnectCount / encryptionFailureCount / consecutiveReconnectFailures, resets reconnectPhase to FAST, closes the autoConnect GATT, sets hadSuccessfulSession=true. If a pendingPairingCode exists it saves (address, code) via PumpCredentialProvider.savePairing and clears the pending code. If the JPAKE derived secret and server nonce are present it persists both as lowercase hex via saveJpakeCredentials \u2014 this is what enables confirmation-mode reconnect without pairing mode. Then it fires the init sequence and arms a 500 ms POST_AUTH_SETTLE_MS job that promotes AUTHENTICATING \u2192 CONNECTED only if still AUTHENTICATING. The settle is kept short deliberately: the pump drops idle connections at roughly 30 s.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/connection/BleConnectionManager.kt",
+          "android-unofficial/plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/pump/PumpCredentialProvider.kt"
+        ]
+      },
+      {
+        "name": "Post-auth initialization sequence",
+        "behavior": "sendInitSequence writes three fire-and-forget requests on FFF6 with fresh txIds and empty cargo, in order: opcode 32 ApiVersionRequest, opcode 84 PumpVersionRequest, opcode 54 TimeSinceResetRequest. Responses are never awaited or parsed (no pendingRequests entry is created, so their notifications log \"unsolicited status response\"). The stated reason for sending them is that pumpX2 does \u2014 without them the pump drops the connection after a handful of status responses. Note the deliberate opcode-space overlap: 32/33 is ApiVersion on FFF6 but Jpake1a on FFF9, 34/35 is CGM EGV on FFF6 but Jpake1b on FFF9, 36/37 is InsulinStatus on FFF6 but Jpake2 on FFF9, 40/41 is CurrentBasalStatus on FFF6 but Jpake4 on FFF9. The pump disambiguates purely by characteristic.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/connection/BleConnectionManager.kt",
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/protocol/TandemProtocol.kt"
+        ]
+      },
+      {
+        "name": "Connection state machine",
+        "behavior": "ConnectionState enum: DISCONNECTED, SCANNING, CONNECTING, AUTHENTICATING, AUTH_FAILED, CONNECTED, RECONNECTING (SCANNING is never emitted by this driver). Transitions: connect() \u2192 CONNECTING; onServicesDiscovered \u2192 AUTHENTICATING; +500 ms after auth success \u2192 CONNECTED; GATT disconnect \u2192 DISCONNECTED then (if autoReconnect) \u2192 RECONNECTING; scheduled retry \u2192 CONNECTING. AUTH_FAILED is terminal for auto-reconnect (autoReconnect=false, timers cancelled, autoConnect GATT closed) and is reached from: missing pairing code, any JPAKE/V1 step rejection, auth timeout with no prior successful session, 3 rapid pre-CONNECTED disconnects with status 0x13, status 0x05 before CONNECTED, status 0x08 before CONNECTED with no prior session, 20 consecutive status-0x08 failures, or 3 zero-response connections. sendStatusRequest throws IllegalStateException unless state == CONNECTED.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/connection/BleConnectionManager.kt",
+          "android-unofficial/plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/model/PumpModels.kt"
+        ]
+      },
+      {
+        "name": "Tiered reconnection and backoff policy",
+        "behavior": "Two phases guarded by autoConnectLock. FAST: reconnectAttempt = min(attempt+1, 10); delay = min(1000 << min(attempt,5), 32000) \u2192 2 s, 4 s, 8 s, 16 s, 32 s then 32 s flat. On reaching attempt 10 the phase flips to SLOW, opens the passive autoConnect GATT, and uses 120 000 ms. SLOW: 120 000 ms periodic forever, plus a re-opened autoConnect=true GATT (kernel-side reconnect, no CPU wake); the timer is an explicit fallback for devices with buggy autoConnect. Retries call connectInternal(resetCounters=false) so counters and phase survive. Rationale recorded in code: the pump is a medical device, so unless the user explicitly unpaired, reconnection continues indefinitely; only the bond-loss detectors stop it. The autoConnect callback, on STATE_CONNECTED+GATT_SUCCESS, closes itself and launches a full connectInternal on the IO scope (never on the binder thread).",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/connection/BleConnectionManager.kt",
+          "android-unofficial/plugins/shipped/tandem/src/test/java/com/glycemicgpt/mobile/ble/connection/ReconnectSchedulerTest.kt"
+        ]
+      },
+      {
+        "name": "Bond-loss and failure detection",
+        "behavior": "Named GATT statuses: 0x05 INSUFFICIENT_AUTHENTICATION, 0x08 INSUFFICIENT_ENCRYPTION, 0x13 CONN_TERMINATE_PEER_USER. Status 0x13 before reaching CONNECTED/AUTHENTICATING: if hadSuccessfulSession, treat as pump idle-timeout and keep reconnecting (consecutiveReconnectFailures capped at 100, logging only); otherwise rapidDisconnectCount++ and at 3 \u2192 AUTH_FAILED. Status 0x05 before CONNECTED \u2192 removeBond + AUTH_FAILED immediately. Status 0x08: if never fully connected and no prior successful session \u2192 removeBond + AUTH_FAILED; otherwise encryptionFailureCount++ (bond deliberately preserved \u2014 removing it would force a manual re-pair with the pump in pairing mode, and sleep/wake renegotiation failures self-resolve) and only at MAX_ENCRYPTION_FAILURES=20 \u2192 AUTH_FAILED with the bond intact. Reaching CONNECTED with receivedAnyNotification==false increments zeroResponseConnectionCount; at 3 \u2192 removeBond + AUTH_FAILED. Any notification resets that counter to 0.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/connection/BleConnectionManager.kt"
+        ]
+      },
+      {
+        "name": "Unpair, bond removal, and GATT cache refresh",
+        "behavior": "unpair(): read paired address, disconnect() (which sets autoReconnect=false, hadSuccessfulSession=false, cancels auth/settle/reconnect jobs, clears queue and pending requests, closes GATT, sets DISCONNECTED), credentialStore.clearPairing(), then removeBond(address). removeBond uses reflection on the hidden BluetoothDevice.removeBond() and only fires when bondState == BOND_BONDED; failures are swallowed with a warning. refreshGattCache uses reflected BluetoothGatt.refresh() on every STATE_CONNECTED \u2014 Android caches GATT services after bonding and a stale cache silently drops notifications. autoReconnectIfPaired() returns silently with no stored address; otherwise resets reconnectPhase to FAST, closes the autoConnect GATT and calls connect(address, pairingCode=null), which forces JPAKE confirmation mode using the saved derived secret.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/connection/BleConnectionManager.kt"
+        ]
+      },
+      {
+        "name": "Status request/response transport on FFF6",
+        "behavior": "sendStatusRequest(opcode, cargo, timeoutMs=5000) requires state==CONNECTED. txId comes from an AtomicInteger masked &0xFF (wraps at 256); a colliding pending entry is evicted and cancelled. A CompletableDeferred<ByteArray> is registered under the txId, the message is chunked at CHUNK_SIZE_SHORT=18 and enqueued on FFF6, and the caller awaits inside withTimeout; the finally block always removes the pending entry. Inbound FFF6 notifications are routed by peeking byte 1 (txId) into a per-txId PacketAssembler held in a ConcurrentHashMap, so interleaved multi-chunk responses from concurrent requests do not corrupt each other. On completion the assembler entry is removed, Packetize.parseHeader validates CRC, and the cargo completes the deferred keyed by the response txId; unmatched responses are logged as unsolicited and dropped.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/connection/BleConnectionManager.kt"
+        ]
+      },
+      {
+        "name": "History-log stream transport on FFF8",
+        "behavior": "requestHistoryLogStream(cargo, timeoutMs=10000) resets a dedicated PacketAssembler + buffer under a lock, installs a CompletableDeferred<List<ByteArray>>, sends opcode 60 with a 5-byte cargo on FFF6, and ignores the 2-byte ACK that comes back on FFF6 (registered as a throwaway pending request). The pump then streams N independent Tandem-framed packets on FFF8; each is reassembled, its cargo extracted via parseHeader (falling back to the raw reassembled bytes if the header/CRC does not parse), appended to historyLogBuffer, and a 500 ms HISTORY_LOG_IDLE_TIMEOUT_MS job is restarted. When the idle timer fires, the whole buffer is delivered as a list of per-packet cargos. Everything (buffer, idle job, deferred) is mutated under synchronized(historyLogAssembler); the deferred is re-read before completion so a timed-out request is not resolved.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/connection/BleConnectionManager.kt"
+        ]
+      },
+      {
+        "name": "History-log pagination and progressive cursoring",
+        "behavior": "Step 1: opcode 58 \u2192 HistoryLogRange(firstSeq, lastSeq) \u2014 these are record INDICES, not event sequence numbers. windowStart = fullSync ? firstSeq : max(firstSeq, lastSeq - 2000 + 1) (HISTORY_LOOKBACK_INDICES=2000 \u2248 12\u201324 h). fetchStart = nextHistoryIndex if it falls in windowStart..lastSeq, else windowStart. If lastSeq < firstSeq \u2192 empty. Step 2: loop while currentIndex <= lastSeq AND collected < maxRecords AND now < deadline; batchSize = min(20, lastSeq-currentIndex+1); one requestHistoryLogStream per batch; parse every FFF8 packet; if zero records parsed \u2192 break; else currentIndex += batchSize and delay 200 ms. Caps: normal 200 records / 15 000 ms, full sync 500 records / 25 000 ms. nextHistoryIndex = currentIndex is persisted in memory after the loop (including after a break or exception), so the next poll resumes there. Deduplication is deferred to the DB insert (IGNORE on unique timestamp).",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/connection/TandemBleDriver.kt"
+        ]
+      },
+      {
+        "name": "HistoryLogRequest cargo encoding (opcode 60)",
+        "behavior": "buildHistoryLogCargo(startIndex, count) allocates 5 bytes little-endian: putInt(startIndex) then one byte count.coerceIn(1, 255). Verified: startIndex 0x04030201, count 5 \u2192 [01 02 03 04 05]; count 300 clamps to 255; count 0 clamps to 1; Int.MAX_VALUE round-trips. HistoryLogStatusResponse (opcode 59) cargo is 12 bytes LE: numEntries (uint32, read and discarded), firstSeq (int32), lastSeq (int32) \u2014 extra trailing bytes are ignored, <12 bytes returns null. Real pump sample: 8c 97 04 00 | 00 20 0f 00 | 8b b7 13 00 \u2192 numEntries 300940, firstSeq 991232, lastSeq 1292171. Sequence values are unsigned on the wire but stored as signed Int; current pump magnitudes (~1.3 M) are far below Int.MAX.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/connection/TandemBleDriver.kt",
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/messages/StatusResponseParser.kt"
+        ]
+      },
+      {
+        "name": "TANDEM_EPOCH_OFFSET and pump-time conversion",
+        "behavior": "TANDEM_EPOCH_OFFSET = 1199145600 (2008-01-01T00:00:00Z). pumpTimeToInstant(pumpTimeSec): rawEpochSec = pumpTimeSec + 1199145600; LocalDateTime.ofEpochSecond(rawEpochSec, 0, ZoneOffset.UTC); then .atZone(ZoneId.systemDefault()).toInstant(). The UTC offset is deliberate \u2014 the pump counts seconds since local-midnight 2008-01-01, so interpreting the sum at UTC recovers the correct local wall-clock fields, which are then localized with the phone's zone. Verified vectors for pumpTime 471039176 (local 2022-12-04T18:32:56): America/New_York \u2192 epoch 1670202776, Europe/Berlin \u2192 1670181176, UTC \u2192 1670184776. Applied to CGM EGV, LastBolusStatus and all history-derived readings. Raw HistoryLogRecord.pumpTimeSeconds is stored unconverted on purpose. This constant is a documented cross-repo safety constant mirrored in the backend's tandem_regions.py.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/messages/StatusResponseParser.kt",
+          "android-unofficial/docs/contract/safety-constants.md"
+        ]
+      },
+      {
+        "name": "IoB read (opcode 108/109)",
+        "behavior": "17-byte cargo, all little-endian: [0-3] mudaliarIOB milliunits, [4-7] timeRemainingSeconds (skipped), [8-11] mudaliarTotalIOB (skipped), [12-15] swan6hrIOB milliunits, [16] iobType. iobType==1 (SWAN_6HR, Control-IQ on) selects swan6hrIOB; every other value including unknown ones falls back to mudaliarIOB. Result iob = milliunits / 1000f. Cargo <17 bytes \u2192 null \u2192 driver throws IllegalStateException wrapped in Result.failure. The returned timestamp is Instant.now(), not a pump timestamp \u2014 there is no staleness signal on the IoB value itself. Verified: mudaliar 2500 / swan 1500 with iobType 1 \u2192 1.5 U.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/messages/StatusResponseParser.kt"
+        ]
+      },
+      {
+        "name": "Basal read and activity-mode caching",
+        "behavior": "CurrentBasalStatusResponse (opcode 40/41), 9-byte LE cargo: [0-3] profileBasalRate (skipped), [4-7] currentBasalRate milliunits/hr, [8] basalModifiedBitmask. rate = currentBasalRate/1000f; isAutomated = modified != 0; timestamp = Instant.now(). getBasalRate then refreshes the activity mode only every ACTIVITY_MODE_REFRESH_CYCLES=3 calls (Math.floorMod on an AtomicInteger, so Int overflow is handled) via opcode 104/105 ControlIQInfoV1 \u2014 byte 5 currentUserModeType: 0\u2192NONE, 1\u2192SLEEP, 2\u2192EXERCISE, 3 (EatingSoon) \u2192 NONE with a log line because there is no SDK enum yet, anything else \u2192 NONE with a warning; cargo <6 bytes \u2192 NONE. The cached mode is reused on the other two cycles and is reset to NONE on driver connect(). Mode-fetch failure degrades to the previous cached value.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/messages/StatusResponseParser.kt",
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/connection/TandemBleDriver.kt"
+        ]
+      },
+      {
+        "name": "Live CGM read (EGV opcode 34/35 + HomeScreenMirror 56/57)",
+        "behavior": "CurrentEGVGuiDataResponse, 8-byte LE cargo: [0-3] pump timestamp seconds, [4-5] glucose mg/dL uint16, [6] egvStatusId, [7] signed trendRate (a rate of change, explicitly NOT an arrow enum, and unused). Accepts egvStatus 1 VALID, 2 LOW, 3 HIGH; rejects 0 INVALID and \u22654 UNAVAILABLE by returning null. Rejects glucose outside limits.minGlucoseMgDl..maxGlucoseMgDl. Timestamp via pumpTimeToInstant. The arrow is fetched separately from HomeScreenMirrorResponse byte 0: 1\u2192DOUBLE_UP, 2\u2192SINGLE_UP, 3\u2192FORTY_FIVE_UP, 4\u2192FLAT, 5\u2192FORTY_FIVE_DOWN, 6\u2192SINGLE_DOWN, 7\u2192DOUBLE_DOWN, else UNKNOWN (0 = NO_ARROW). Mirror failure degrades the arrow to UNKNOWN without failing the read; EGV failure fails the whole call. Mirror also yields basalStatusIconId (byte 5) and apControlStateIconId (byte 6), currently parsed but unused downstream.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/messages/StatusResponseParser.kt",
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/connection/TandemBleDriver.kt"
+        ]
+      },
+      {
+        "name": "Last bolus status read (opcode 48/49, V1 and V2)",
+        "behavior": "Size-driven offset: exactly 17 bytes \u2192 baseOffset 0 (V1); \u226520 bytes \u2192 baseOffset 1 with a status prefix expected to be 0x01 (mismatch logs a warning but still parses); 18 or 19 bytes and anything <17 \u2192 empty list. Fields from baseOffset, LE: [0-3] bolusId (skipped), [4-7] pump timestamp, [8-11] deliveredVolume milliunits, [12] bolusStatusId, [13] bolusSourceId, [14] bolusTypeBitmask, [15-16] extendedBolusDuration minutes (unused). Only bolusStatusId==3 COMPLETED is reported (0 UNKNOWN, 2 CANCELED, 4 ERROR dropped). Rejects deliveredMilliUnits > limits.maxBolusDoseMilliunits and any timestamp before `since`. units = mu/1000f; isAutomated = source==7; isCorrection = (typeBitmask & 0x0A) != 0. correctionUnits and mealUnits are forced to 0 because this response carries no breakdown \u2014 GUI food-only boluses land in UNKNOWN here and are re-categorized when the history log arrives.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/messages/StatusResponseParser.kt"
+        ]
+      },
+      {
+        "name": "Reservoir and battery reads (t:slim X2 vs Mobi divergence)",
+        "behavior": "InsulinStatusResponse (opcode 36/37): documented 4-byte cargo [0-1] currentInsulinAmount uint16 in WHOLE UNITS (not milliunits), [2] isEstimate, [3] insulinLowAmount; the parser only requires \u22652 bytes and reads the uint16, ignoring the estimate flag and low threshold. Battery: V1 (opcode 52/53, 2 bytes: [0] abc internal, [1] ibc percentage) is always tried FIRST and its result returned on success; V2 (opcode 144/145, 11 bytes: [0] abc, [1] ibc, [2] chargingStatus, rest unknown) is used only as a fallback. The ordering is deliberate \u2014 V2 causes GATT_ERROR (133) on t:slim X2 and kills the connection before any fallback could run, while Mobi needs V2 for the charging flag. Both clamp percentage to 0..100; V1 always reports isCharging=false.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/messages/StatusResponseParser.kt",
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/connection/TandemBleDriver.kt"
+        ]
+      },
+      {
+        "name": "Pump version, features and settings reads",
+        "behavior": "PumpVersionResponse (opcode 84/85), exactly 48 bytes LE: armSwVer u32, mspSwVer u32, configABits u32, configBBits u32, serialNum u32, partNum u32, pumpRev 8-char fixed string (trailing NUL/space trimmed), pcbaSN u32 at 32, pcbaRev 8-char string at 36, modelNum u32 at 44. Test vectors: X2 model 1000354, serial 90556643, armSwVer 105900; Mobi model 1004000, serial 1226976, armSwVer 3628697757 (requires unsigned widening). PumpFeaturesV1 (opcode 78/79), 8-byte uint64 LE bitmask \u2192 map {dexcomG5 bit0, dexcomG6 bit1, basalIQ bit2, controlIQ bit10}; <8 bytes \u2192 empty map, and getPumpHardwareInfo degrades gracefully to an empty feature map. PumpSettings (opcode 82/83): three consecutive int32-LE length-prefixed UTF-8 strings \u2014 firmware, serial, model; minimum 12 bytes; any bad length prefix returns null.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/messages/StatusResponseParser.kt"
+        ]
+      },
+      {
+        "name": "History record formats and stream cargo parsing",
+        "behavior": "Primary FFF8 format is 26 bytes/record: [0-1] eventTypeId u16 LE, [2-5] pumpTimeSec u32 LE, [6-9] recordIndex i32 LE, [10-25] 16-byte event data. parseHistoryLogStreamCargo tries headerSize 0 then 2 (some packets carry a 2-byte count/flags prefix); a candidate is accepted only when (size-header) \u2265 26 and (size-header) % 26 == 0, and its result is returned even if empty so the 18-byte path cannot reinterpret the same bytes. Per record, seqNum==0 or eventTypeId > MAX_KNOWN_EVENT_TYPE=512 are skipped. The full 26 bytes are stored as Base64 NO_WRAP in HistoryLogRecord.rawBytesB64. Fallback 18-byte format (opcode 61 on FFF6): [0-3] seq i32, [4-5] eventType u16, [6-9] pumpTime u32, [10-17] 8-byte payload, filtered by seq > sinceSequence (always called with 0 from the stream path).",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/messages/StatusResponseParser.kt"
+        ]
+      },
+      {
+        "name": "CGM extraction from history logs",
+        "behavior": "Filters eventTypeId \u2208 {16 LidBgReadingTaken, 399 LidCgmDataG7}. Payload slice is bytes 10..min(18, size) for \u226526-byte records and 10..18 for 18-byte records \u2014 i.e. always 8 bytes. Type 16: glucose = uint16 LE at offset 0; remaining 6 bytes are status flags and ignored. Type 399 (G7): byte 2 must be status 0x01 (valid) or the record is dropped (calibrating / sensor error produce garbage); glucose = uint16 LE at offset 6-7; byte 3 is a signed trend rate, byte 4 a 0x20 type flag. Both reject glucose outside limits.minGlucoseMgDl..maxGlucoseMgDl (defaults 20..500). trendArrow is always UNKNOWN from history. Timestamps come from record.pumpTimeSeconds via pumpTimeToInstant. Output sorted ascending by timestamp.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/messages/StatusResponseParser.kt",
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/messages/TandemHistoryLogParser.kt"
+        ]
+      },
+      {
+        "name": "Bolus extraction from history logs (event 280)",
+        "behavior": "Requires a \u226526-byte raw record; payload = bytes 10..26 (16 B). Layout LE: [0-1] bolusId, [2] deliveryStatus (0 Completed, 1 Started), [3] bolusType bitmask, [4] bolusSource, [5] remoteId, [6-7] requestedNow mu, [8-9] correction portion mu, [10-11] requestedLater (extended) mu, [12-13] reserved, [14-15] deliveredTotal mu. Rejects deliveryStatus != 0, deliveredTotal == 0, and deliveredTotal > limits.maxBolusDoseMilliunits (default 25 000). isCorrection = (type & 0x0A) != 0; isAutomated = source == 7 only. correction is clamped to deliveredTotal; mealPortion = (!isAutomated && total > clampedCorrection) ? total - clampedCorrection : 0 \u2014 derived from delivered, not requested, so parts never exceed the whole under partial delivery. units/correctionUnits/mealUnits = mu/1000f. Sorted by timestamp.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/messages/StatusResponseParser.kt"
+        ]
+      },
+      {
+        "name": "Basal extraction from history logs (event 279)",
+        "behavior": "Requires a \u226526-byte raw record; payload = bytes 10..26. Layout LE: [0-1] commandedRateSourceRaw (0 Suspended, 1 Profile, 2 TempRate, 3 Algorithm, 4 Temp+Algorithm), [2-3] unknown, [4-5] profileBasalRate mu/hr, [6-7] commandedRate mu/hr (the actual delivery, and the one read), [8-9] algorithm/temp rate, [10-15] padding. Minimum payload for the standalone parser is 8 bytes. Rejects commandedRate > limits.maxBasalRateMilliunits (default 15 000 = 15 U/hr, Tandem hardware max); a suspended zero rate is explicitly valid and kept. isAutomated = source \u2208 {0, 3, 4}; source 1 Profile and 2 TempRate are not automated. rate = mu/1000f, activityMode always NONE (not present in the history payload), timestamp via pumpTimeToInstant. Sorted by timestamp.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/messages/StatusResponseParser.kt"
+        ]
+      },
+      {
+        "name": "Bolus category derivation and platform mapping",
+        "behavior": "deriveTandemCategory(source, typeBitmask, correctionMu, mealMu), first match wins: source==7 \u2192 CONTROL_IQ; source==2 \u2192 OVERRIDE; meal>0 && correction>0 \u2192 BG_FOOD; meal>0 \u2192 FOOD_ONLY; correction>0 || (type & 0x0A)!=0 \u2192 BG_ONLY; else UNKNOWN. Source-name mapping: 0 GUI, 1 AUTO_PILOT, 2 AUTO_POP_UP, 7 ALGORITHM, else UNKNOWN_<id>. TandemBolusCategoryProvider declares {CONTROL_IQ, BG_FOOD, BG_ONLY, FOOD_ONLY, OVERRIDE, QUICK, UNKNOWN} and maps to platform categories: CONTROL_IQ\u2192AUTO_CORRECTION, BG_FOOD\u2192FOOD_AND_CORRECTION, BG_ONLY\u2192CORRECTION, FOOD_ONLY\u2192FOOD, OVERRIDE\u2192OVERRIDE, QUICK\u2192OTHER, UNKNOWN\u2192OTHER. QUICK is declared and mapped but never produced by the parser. The correction bit is checked as 0x0A because 0x08 is the correction component in history logs and 0x02 the correction type in status responses.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/messages/StatusResponseParser.kt",
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/plugin/TandemBolusCategoryProvider.kt"
+        ]
+      },
+      {
+        "name": "SafetyLimits validation bounds",
+        "behavior": "SafetyLimits(minGlucoseMgDl=20, maxGlucoseMgDl=500, maxBasalRateMilliunits=15 000, maxBolusDoseMilliunits=25 000). The constructor's require() block enforces absolute floors/ceilings that no backend configuration can widen: min \u2265 20, max \u2264 500, min < max, basal in 1..15 000, bolus in 1..25 000. safeOf() is the lenient factory for untrusted input \u2014 it coerces instead of throwing (min into 20..499, max into (min+1)..500, basal into 1..15 000, bolus into 1..25 000). Separately, CgmReading's own init requires glucoseMgDl in 20..500 and BolusEvent requires 0 \u2264 units/correctionUnits/mealUnits \u2264 25 U, so an out-of-range value that slipped past a parser would throw at construction. The 20\u2013500 bound and the mmol factor 18.0156 are cross-repo safety constants guarded by SafetyConstantDriftGuardTest.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/pump/SafetyLimits.kt",
+          "android-unofficial/plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/model/PumpModels.kt",
+          "android-unofficial/docs/contract/safety-constants.md"
+        ]
+      },
+      {
+        "name": "Plugin surface and capability wiring",
+        "behavior": "TandemDevicePlugin id com.glycemicgpt.tandem, name \"Tandem Insulin Pump\", version 1.0.0, protocolName \"Tandem\", description \"Tandem insulin pumps (t:slim X2, Mobi) with Dexcom CGM\". Declares GLUCOSE_SOURCE, INSULIN_SOURCE, PUMP_STATUS, BOLUS_CATEGORY_PROVIDER. onActivated \u2192 autoReconnectIfPaired(); onDeactivated and shutdown \u2192 disconnect(). connect(address, config) reads config[\"pairingCode\"]. settingsDescriptor is empty and observeDashboardCards emits an empty list \u2014 deliberately, because the generic pump settings card already renders pairing status and Unpair. TandemGlucoseSource.observeReadings() is a naive polling flow: getCgmStatus(), emit on success, delay POLL_INTERVAL_MS=60 000, forever (failures are skipped silently, no backoff). pairingProfile is a constant default and pairingFault is always null, because Tandem is BLE central (phone scans, user taps a pump) and has no advertise-and-wait fault to surface.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/plugin/TandemDevicePlugin.kt",
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/plugin/TandemGlucoseSource.kt",
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/plugin/TandemPumpStatus.kt",
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/plugin/TandemPluginFactory.kt"
+        ]
+      },
+      {
+        "name": "Read-only design constraint",
+        "behavior": "PumpDriver and this implementation expose no control operations at all: no bolus delivery, no basal change, no pump-setting write, no temp rate. Every opcode implemented is a status/read request or an authentication message; CONTROL (FFFC) and CONTROL_STREAM (FFFD) are subscribed for notifications but never written to and their notifications are discarded. The interface comment and the repo README both state this is a permanent product decision (\"it does not, and will not, issue therapeutic writes\"). The UUID table and message format are documented as derived from studying jwoglom/pumpX2 (MIT) with no runtime dependency on it. The consumer ProGuard rules keep only the BouncyCastle classes EcJpake touches (ECNamedCurveTable, ECParameterSpec, BigIntegers, math.ec.**) and explicitly avoid registering BC as a global JCE provider so Tink/EncryptedSharedPreferences are not disturbed.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/pump/PumpDriver.kt",
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/connection/TandemBleDriver.kt",
+          "android-unofficial/plugins/shipped/tandem/consumer-proguard-rules.pro"
+        ]
+      },
+      {
+        "name": "Debug packet logging",
+        "behavior": "Every TX (status request, history request) and every parsed RX on FFF6/FFF9 is reported to a DebugLogger with direction, opcode, human name from TandemProtocol.opcodeName, txId, space-separated cargo hex and cargo size; parse failures log opcodeName \"PARSE_FAIL\"/\"AUTH_PARSE_FAIL\" with an error string. TandemBleDriver.runStatusRequest additionally calls updateLastPacket with the parsed domain object's toString on success or the exception message on failure. The DebugLogger contract explicitly requires implementations to retain cargoHex/parsedValue only in debug builds and never persist them unencrypted, because these fields carry glucose readings, insulin doses, pump serials and BLE identifiers. Timber logs mirror the same data under BLE_RAW tags at debug level.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/pump/DebugLogger.kt",
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/connection/BleConnectionManager.kt"
+        ]
+      },
+      {
+        "name": "Opcode table (complete, as implemented)",
+        "behavior": "Status/read on FFF6 (response = request+1): 32/33 ApiVersion, 34/35 CurrentEGVGuiData, 36/37 InsulinStatus, 40/41 CurrentBasalStatus, 48/49 LastBolusStatus, 52/53 CurrentBatteryV1, 54/55 TimeSinceReset, 56/57 HomeScreenMirror, 58/59 HistoryLogStatus, 60/61 HistoryLog, 78/79 PumpFeaturesV1, 82/83 PumpSettings, 84/85 PumpVersion, 86/87 PumpGlobals (declared, never sent), 104/105 ControlIQInfoV1, 108/109 ControlIQIOB, 144/145 CurrentBatteryV2. Auth on FFF9: 16/17 CentralChallenge, 18/19 PumpChallenge, 32/33 Jpake1a, 34/35 Jpake1b, 36/37 Jpake2, 38/39 Jpake3SessionKey, 40/41 Jpake4KeyConfirm. Corrected values are called out in comments: PumpSettings was wrongly 90, PumpVersion wrongly 78, TimeSinceReset wrongly 80, HistoryLogStatus wrongly 26, PumpGlobals wrongly 88. Timeouts: STATUS_READ_TIMEOUT_MS 5000, HISTORY_LOG_TIMEOUT_MS 10000. REQUIRED_MTU 185.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/protocol/TandemProtocol.kt"
+        ]
+      }
+    ],
+    "safety_critical": [
+      "Glucose validity bounds 20..500 mg/dL are enforced in four independent places for this driver: SafetyLimits (min/max plus absolute ceilings that configuration cannot widen), parseCgmEgvResponse, parseCgmEventPayload, parseCgmG7EventPayload, and again by CgmReading's own init require. A widened or dropped check admits sensor garbage into the dashboard, alerts and AI analysis. The bound is a cross-repo constant guarded by SafetyConstantDriftGuardTest and mirrored in the backend.",
+      "TANDEM_EPOCH_OFFSET = 1199145600 plus the deliberate ZoneOffset.UTC \u2192 ZoneId.systemDefault() two-step. Getting this wrong shifts every CGM/bolus/basal timestamp by the phone's UTC offset (up to 14 h), which corrupts staleness detection, alert timing, IOB decay reasoning and chart ordering. Verified vectors exist for negative, positive and zero offset zones.",
+      "TandemBleDriver.getCgmStatus calls StatusResponseParser.parseCgmEgvResponse(cargo) WITHOUT passing SafetyLimits, so the live CGM read path silently validates against the 20..500 defaults rather than the user's configured limits. Only the history-extraction path receives the caller's limits. Any port must decide deliberately which behavior is intended.",
+      "The live basal read (parseBasalStatusResponse, opcode 41) applies no rate ceiling at all \u2014 unlike the history path, which rejects commandedRate > maxBasalRateMilliunits (15 000 mu/hr). A corrupt or misframed 9-byte cargo can display an arbitrary basal rate up to 4.29e6 U/hr.",
+      "Insulin unit conversions: IOB, basal rate, bolus volume and correction/meal portions are all milliunits \u00f7 1000f. Reservoir (InsulinStatusResponse) is the exception \u2014 it is WHOLE UNITS as a uint16 and must NOT be divided. Mixing these up misreports dose or reservoir by 1000x.",
+      "Bolus dose cap: parseLastBolusStatusResponse and parseBolusDeliveryPayload both reject > maxBolusDoseMilliunits (default/absolute 25 000 mu = 25 U); BolusEvent's init throws above 25 U. Only bolusStatusId==3 (COMPLETED) and deliveryStatus==0 (Completed) are reported \u2014 Started/Canceled/Error events must never be counted as delivered insulin.",
+      "BLE protocol correctness: CRC-16/CCITT-FALSE (0x1021, init 0xFFFF, little-endian on the wire) is the only integrity check on every message; a CRC bug would let corrupted glucose or dose bytes through as valid. PacketAssembler has no length check against the declared cargo length and no stall timeout, so a lost final chunk leaves a partial buffer that is only cleared by a txId change or an explicit reset.",
+      "txId is 8-bit and wraps every 256 requests. Status responses are matched purely by txId with no opcode check, so a late response from a wrapped-around transaction could in principle satisfy a different pending request. The code mitigates by evicting/cancelling colliding pending entries but does not verify that the response opcode matches the request opcode + 1.",
+      "JPAKE round-4 key confirmation compares the server HMAC with ByteArray.contentEquals, which is not constant-time; and the V1 handshake never verifies the pump's centralChallengeHash (bytes 2-21 of the opcode-17 response), so the V1 path authenticates the client to the pump but not the pump to the client.",
+      "Bond-loss policy is patient-affecting: removeBond() forces a manual re-pair that requires the pump to be physically put into pairing mode. The code deliberately NEVER removes the bond on INSUFFICIENT_ENCRYPTION once hadSuccessfulSession is true, tolerating up to 20 consecutive failures first, because sleep/wake renegotiation failures self-resolve. Reproducing that restraint matters \u2014 an aggressive iOS port would strand users without pump data.",
+      "Battery opcode ordering: V2 (144) is known to return GATT_ERROR 133 on t:slim X2 and kill the connection before any fallback can run. V1 (52) must be tried first; V2 is a fallback only. Reversing the order breaks the whole session, not just the battery read.",
+      "No staleness signal on several readings: IoBReading, BasalReading (live), ReservoirReading and BatteryStatus all carry Instant.now() rather than a pump timestamp, so a stale value cached by a failing poll is indistinguishable from a fresh one at the model layer. Only CGM and bolus carry true pump time.",
+      "History cursoring correctness: opcode 58's firstSeq/lastSeq are record INDICES, not event sequence numbers, and opcode 60 takes a start INDEX. Treating them as sequence numbers silently skips or re-reads records. The sinceSequence argument to getHistoryLogs is not used to filter the 26-byte FFF8 path at all \u2014 deduplication relies entirely on the DB insert's IGNORE on a unique timestamp index."
+    ],
+    "external_dependencies": [
+      "org.bouncycastle:bcprov-jdk18on:1.84 (pinned in gradle/libs.versions.toml and plugins/shipped/tandem/gradle.lockfile) \u2014 used only for P-256 EC point arithmetic via ECNamedCurveTable/ECParameterSpec/ECPoint/BigIntegers; deliberately NOT registered as a global JCE provider so Tink / EncryptedSharedPreferences are unaffected. A Swift port needs equivalent P-256 arbitrary point arithmetic (arbitrary base point G, point add/multiply, uncompressed encode/decode) \u2014 CryptoKit alone is insufficient.",
+      "javax.crypto Mac: HmacSHA256 (HKDF + JPAKE key confirmation), HmacSHA1 (V1 auth). java.security.MessageDigest SHA-256 (EC-JPAKE ZKP hash and derived secret). java.security.SecureRandom for all nonces and EC key pairs.",
+      "android.util.Base64 with NO_WRAP for HistoryLogRecord.rawBytesB64 encode/decode (this is why full history record parsing is only covered by on-device instrumented tests, not JVM unit tests).",
+      "Android BLE stack: BluetoothManager/Adapter, BluetoothLeScanner, BluetoothGatt (+ two reflected hidden APIs: BluetoothDevice.removeBond() and BluetoothGatt.refresh()), TRANSPORT_LE, CONNECTION_PRIORITY_HIGH, MTU negotiation, CCCD descriptor writes.",
+      "kotlinx.coroutines (CoroutineScope(SupervisorJob()+Dispatchers.IO), CompletableDeferred, withTimeout, StateFlow, callbackFlow), Dagger Hilt for DI (TandemPumpModule binds TandemPluginFactory into a PluginFactory set), Timber for logging.",
+      "Module targets: compileSdk 35, minSdk 30 (Android 11+), JVM target 17. Tests use JUnit 4, MockK, kotlinx-coroutines-test."
+    ],
+    "permissions_and_platform_apis": [
+      "BLUETOOTH_SCAN / BLUETOOTH_CONNECT (Android 12+) and legacy BLUETOOTH/BLUETOOTH_ADMIN plus ACCESS_FINE_LOCATION for scanning \u2014 all BLE call sites are annotated @SuppressLint(\"MissingPermission\"); the driver itself never requests or checks permissions.",
+      "Battery-optimization exemption is documented as a hard requirement for the connection to survive backgrounding (docs/troubleshooting/cant-pair-pump.md), plus Samsung's separate \"Sleeping apps\" list.",
+      "Reflected hidden APIs: BluetoothDevice.removeBond() (bond removal on unpair and on genuine bond loss) and BluetoothGatt.refresh() (clear the cached GATT service database on every connect). Both are wrapped in try/catch and degrade to a warning.",
+      "Passive autoConnect=true GATT is used as a kernel-side background reconnect mechanism during the SLOW phase \u2014 no CPU wake or polling required. iOS has no direct equivalent of this exact mechanism.",
+      "Tandem pumps allow exactly one BLE connection at a time; t:connect or any other connected app blocks this driver entirely, and pumps only advertise while in pairing mode."
+    ],
+    "notes": "Coverage is complete for plugins/shipped/tandem (all 20 main sources and all 13 test files read, plus the pump-driver-api types they import and the two docs that record decisions). Depth is uniform; nothing was truncated for budget.\n\nLoad-bearing documented decisions, with stated reasons:\n- ZoneOffset.UTC in pumpTimeToInstant is intentional (pump emits local wall-clock seconds + a UTC-based epoch constant).\n- HistoryLogRecord.pumpTimeSeconds is stored raw and explicitly NOT converted at that layer; the cloud consumer of raw_events was removed in \"PR1c\" and the backend now discards them \u2014 the bytes are kept only for local replay/diagnostics.\n- Battery V1-before-V2 ordering exists because V2 (144) triggers GATT_ERROR 133 on t:slim X2 and kills the connection before fallback.\n- The bond is NEVER removed when hadSuccessfulSession is true (medical device; manual re-pair requires physical pairing mode; sleep/wake encryption failures are transient) \u2014 hence MAX_ENCRYPTION_FAILURES=20.\n- Slow-phase reconnection runs indefinitely rather than giving up, for the same medical-device reason.\n- EC-JPAKE scalars use fixed 32-byte encoding because variable-length encoding caused a ~1.6% ArrayIndexOutOfBounds on the fixed 165/330-byte split offsets.\n- pumpX2's mod255 transform before HMAC-SHA256 is deliberately omitted as a proven no-op.\n- BouncyCastle is used as a plain library, never registered as a JCE provider, to avoid disturbing Tink/EncryptedSharedPreferences.\n- The plugin contributes no settings sections and no dashboard cards on purpose (the generic pump card already renders pairing status + Unpair).\n- ControlIQInfoV1 mode 3 (EatingSoon) is knowingly mapped to NONE and logged, pending an SDK enum \u2014 that log line is the revisit trigger.\n- Activity mode is refreshed only every 3rd getBasalRate call specifically to avoid eating into the pump's ~30 s idle-timeout budget.\n\nKnown code/comment inaccuracies found while reading (not bugs, but they will mislead a porter): TandemProtocol line 134-135 says opcode 41 is \"also used by OPCODE_INSULIN_STATUS_REQ\" \u2014 41 is actually OPCODE_CURRENT_BASAL_STATUS_RESP (InsulinStatus is 36/37). parseInsulinStatusResponse documents a 4-byte cargo but only requires 2. parseHomeScreenMirrorResponse documents 9 bytes but only requires 7. StatusResponseParser.parseBasalStatusResponse's comment says Control-IQ mode comes from HomeScreenMirror (57) while the driver actually sources it from ControlIQInfoV1 (105). ReconnectSchedulerTest asserts the pure backoff formula summing to 222 s over attempts 1\u201310, but the shipped scheduler switches to the 120 s SLOW interval at attempt 10, so the real fast phase is attempts 1\u20139 \u2248 190 s.\n\nOut-of-scope but relevant cadence (app module, PumpPollingOrchestrator): fast loop 15 000 ms (IoB + basal + CGM, sized as a keep-alive because the pump drops idle connections at ~30 s), medium and slow loops 300 000 ms, 500 ms request stagger, 500 ms initial delay, 2 min backfill cap, 20 min initial full-sync cap. The plugin's own TandemGlucoseSource polling flow uses 60 000 ms and is a separate, simpler path.\n\nVerification status per README: t:slim X2 is Verified; Tandem Mobi is \"Protocol-compatible (unverified on hardware)\". The two pumps share one driver, one UUID set and one handshake; the only shipped divergences are the battery V1/V2 ordering, the pairing-code source (X2 screen vs Mobi printed on the pump body), model detection by advertised-name prefix, and differing PumpVersion test vectors (X2 modelNum 1000354, Mobi 1004000)."
+  },
+  "port": {
+    "subsystem": "Tandem t:slim X2 and Mobi BLE driver (GATT transport, JPAKE/V1 pairing, framing + CRC16, status/history read protocol, parsers, connection state machine and reconnect policy) \u2014 Android `plugins/shipped/tandem` \u2192 Swift `TandemPumpDriver` module for iOS + watchOS",
+    "ports_cleanly": [
+      {
+        "capability": "GATT service and characteristic UUID map",
+        "ios_approach": "Same UUIDs as CBUUIDs: service fdfb, vendor chars FFF6/FFF7/FFF8/FFF9/FFFC/FFFD on base 7B83FFFx-9F77-4E5C-8064-AAE2C24838B9. Two deletions, both correct: the CCCD (0x2902) constant disappears \u2014 iOS writes the descriptor itself via setNotifyValue and forbids direct 2902 writes \u2014 and the DIS 180A block is dropped since Android never reads it. Subscribe to all six characteristics to preserve wire behavior, keep handlers only for FFF9/FFF6/FFF8, and log-and-drop FFF7/FFFC/FFFD exactly as today. Discovery must call discoverCharacteristics after discoverServices; there is no combined callback."
+      },
+      {
+        "capability": "Tandem message framing (Packetize.encode)",
+        "ios_approach": "Pure byte manipulation, no platform API. Swift struct over `[UInt8]`/`Data`: opcode, txId, cargoLen uint8, cargo, CRC16 appended little-endian over bytes 0..<3+cargoLen. Cargo >255 throws. Chunking at CHUNK_SIZE_SHORT=18 with packets-remaining in the low nibble of byte 0 and txId in byte 1. Keep CHUNK_SIZE_LONG=40 defined-but-unused for test parity. Port PacketizeTest verbatim to XCTest/swift-testing; it runs on a macOS CI runner with no device."
+      },
+      {
+        "capability": "CRC-16/CCITT-FALSE",
+        "ios_approach": "Pure Swift, bitwise, poly 0x1021, init 0xFFFF, no reflection, no final XOR, MSB-first; toBytes emits [low, high]. Port the three verified vectors (empty\u21920xFFFF, \"123456789\"\u21920x29B1, single 0x00\u21920xE1F0) as the first tests written. Use UInt16 with explicit `&<<`/`&*` overflow operators \u2014 Swift traps on overflow where Kotlin wraps, which is the single most likely silent port defect in this file."
+      },
+      {
+        "capability": "Inbound packet reassembly (PacketAssembler)",
+        "ios_approach": "Pure Swift stateful accumulator, semantics preserved exactly: reject <2 bytes, packetsRemaining = byte0 & 0x0F, txId = byte1, latch expectedTxId on first feed, reset-and-relatch on txId change, append bytes 2..., signal complete at packetsRemaining==0. Deliberately keep the absent length check and absent stall timeout at this layer so behavior matches; the stall is already bounded upstream by the 5 s/10 s request timeouts. Isolate in an actor or confine to the CoreBluetooth delegate queue."
+      },
+      {
+        "capability": "Serialized GATT operation queue",
+        "ios_approach": "Keep the single-in-flight queue: CoreBluetooth's write-with-response completion still arrives on didWriteValueFor and ordering discipline is still required. Two simplifications: descriptor-write operations vanish (setNotifyValue + didUpdateNotificationStateFor replaces the ENABLE_NOTIFICATION CCCD write), and the API-33 branch vanishes. Keep WRITE_TYPE_DEFAULT semantics via .withResponse. Keep failure-is-logged-not-retried. Implement as an actor draining a queue on the central's dispatch queue; nil-peripheral clears the queue as today."
+      },
+      {
+        "capability": "Tandem model detection from advertised name",
+        "ios_approach": "Unchanged pure logic on the advertisement's local name: whitespace-normalize, case-insensitive prefix match, \"tslim X2\"/\"t:slim X2\"\u2192TSLIM_X2 (hasScreen true), \"Tandem Mobi\"\u2192MOBI (hasScreen false), else UNKNOWN (hasScreen nil). Source the string from CBAdvertisementDataLocalNameKey in the scan callback rather than peripheral.name, because peripheral.name is the cached GAP name and can be stale or absent for a restored peripheral."
+      },
+      {
+        "capability": "Authentication mode selection (V1 vs JPAKE, bootstrap vs confirmation)",
+        "ios_approach": "Pure decision logic, unchanged: run auth on every connection including reconnects; nil code \u2192 AUTH_FAILED; code.count <= 10 \u2192 JPAKE else V1; isReconnect = (no pending code && stored pairing exists); JPAKE confirmation mode when isReconnect and a saved derived-secret hex exists, otherwise bootstrap. Arm the 30 s AUTH_TIMEOUT before the first write using a Task with sleep, cancelled on success. Only the credential lookup changes underneath (Keychain, covered separately)."
+      },
+      {
+        "capability": "JPAKE handshake state machine (framing, opcodes, sizes)",
+        "ios_approach": "Direct port of the 11-state enum and every size gate. Opcodes on FFF9 32/33, 34/35, 36/37, 38/39, 40/41; appInstanceId=1 as 2-byte LE prefix on every request; cargo sizes 167/167/167/2/50; response minimums 167/167/2/18/50; any state or size violation \u2192 FAILED. This is arithmetic and state, not platform API. Port JpakeAuthenticatorTest as-is with a stub EC core so the state machine is tested independently of the curve arithmetic."
+      },
+      {
+        "capability": "JPAKE round 3/4 session key and confirmation",
+        "ios_approach": "CryptoKit covers all of it: HKDF<SHA256>.deriveKey(inputKeyMaterial: derivedSecret, salt: serverNonce3, info: Data(), outputByteCount: 32), then HMAC<SHA256>. Offsets unchanged (serverNonce3 = bytes 2..<10; round-4 cargo = 2+8+8 zeros+32 = 50; serverNonce4 = 2..<10, serverDigest = 18..<50). Two free upgrades: nonces from SecRandomCopyBytes, and the digest comparison becomes constant-time (CryptoKit's HMAC isValidAuthenticationCode) instead of contentEquals. Clear saved JPAKE credentials on mismatch, as today."
+      },
+      {
+        "capability": "HKDF and HMAC helpers",
+        "ios_approach": "CryptoKit one-for-one: HKDF<SHA256> (extract-then-expand, empty info, L=32) replaces the hand-rolled Hkdf; HMAC<SHA256> replaces HmacSha256Util; HMAC<Insecure.SHA1> replaces HmacHelper for V1 auth (Insecure.SHA1 is available and is the correct choice here \u2014 the protocol mandates it). The Android empty-key\u219232-zero-bytes workaround exists only because JCE rejects empty Mac keys; RFC 2104 zero-pads identically, so CryptoKit needs no equivalent. Keep pumpX2's mod255 transform omitted (proven no-op)."
+      },
+      {
+        "capability": "V1 legacy authentication (firmware < 7.7)",
+        "ios_approach": "Direct port: 4-state machine; opcode 16 with 10-byte cargo (random appInstanceId 0..0xFFFE LE + 8 random bytes); opcode 17 response 30 bytes with the same offsets; HMAC-SHA1 keyed by the ASCII pairing code over hmacKey[8]; opcode 18 with 22-byte cargo; opcode 19 response 3 bytes, byte 2 == 1 \u2192 AUTHENTICATED. Preserve the existing gaps for parity (centralChallengeHash unverified, appInstanceId echo unchecked) but record both in code comments as known one-way-authentication limitations."
+      },
+      {
+        "capability": "Post-auth initialization sequence",
+        "ios_approach": "Unchanged: three fire-and-forget writes on FFF6 with fresh txIds and empty cargo \u2014 32 ApiVersion, 84 PumpVersion, 54 TimeSinceReset \u2014 with no pending-request entries, so responses log as unsolicited. Keep them; they are what stops the pump dropping the session. Keep the FFF6-vs-FFF9 opcode overlap (32/34/36/40) resolved purely by characteristic; on iOS this means the routing switch must key on CBCharacteristic.uuid before opcode, never the reverse."
+      },
+      {
+        "capability": "Status request/response transport on FFF6",
+        "ios_approach": "Same design: 8-bit txId from an atomic counter, colliding pending entry evicted and cancelled, per-txId PacketAssembler in a dictionary so interleaved multi-chunk responses cannot corrupt each other, CRC-validated cargo completes the awaiting continuation, unmatched responses logged and dropped. Swift mapping: CompletableDeferred \u2192 CheckedContinuation held in an actor; withTimeout(5000) \u2192 Task.timeout via withThrowingTaskGroup or a race with Task.sleep; the finally-removes-pending guarantee becomes a `defer` block. Requires state == CONNECTED, as today."
+      },
+      {
+        "capability": "History-log stream transport on FFF8",
+        "ios_approach": "Same shape: dedicated assembler + buffer, a 500 ms idle timer restarted on each packet, delivery of the whole buffer as a list of per-packet cargos when the timer fires, and the throwaway pending entry that swallows the 2-byte ACK on FFF6. Swift replaces `synchronized(historyLogAssembler)` with an actor and the idle timer with a cancellable Task; keep the re-read-the-deferred-before-completing check so a timed-out request is never resolved. Keep the fallback to raw reassembled bytes when parseHeader fails."
+      },
+      {
+        "capability": "History-log pagination and progressive cursoring",
+        "ios_approach": "Logic ports unchanged: opcode 58 \u2192 firstSeq/lastSeq as record INDICES; windowStart = fullSync ? firstSeq : max(firstSeq, lastSeq-1999); fetchStart from nextHistoryIndex when in range; batches of min(20, remaining); break on zero parsed; 200 ms inter-batch delay; caps 200/15 000 ms normal and 500/25 000 ms full sync; nextHistoryIndex persisted even after break or throw. Dedup stays at the DB layer. The only iOS caveat is where this loop is allowed to run (see background-execution redesign), not what it computes."
+      },
+      {
+        "capability": "HistoryLogRequest cargo encoding and HistoryLogStatus parse",
+        "ios_approach": "Pure byte work. 5-byte cargo: Int32 LE startIndex + one clamped count byte (1...255). HistoryLogStatusResponse: 12 bytes LE, numEntries uint32 read and discarded, firstSeq/lastSeq Int32; extra trailing bytes ignored; <12 \u2192 nil. Port the verified vectors including the real pump sample (numEntries 300940, firstSeq 991232, lastSeq 1292171). Read multi-byte fields with explicit little-endian loads from Data, never `withUnsafeBytes { $0.load(as:) }` \u2014 that traps on unaligned Data slices in Swift."
+      },
+      {
+        "capability": "TANDEM_EPOCH_OFFSET and pump-time conversion",
+        "ios_approach": "Constant 1199145600 unchanged. Reproduce the deliberate two-step exactly: form the raw epoch second, interpret its calendar fields in UTC, then re-interpret those same wall-clock fields in TimeZone.current. In Foundation: build DateComponents from the UTC interpretation, then resolve with a Calendar whose timeZone is TimeZone.current. Port all three verified vectors (pumpTime 471039176 \u2192 1670202776 New_York, 1670181176 Berlin, 1670184776 UTC) as a required test. Keep HistoryLogRecord.pumpTimeSeconds stored raw and unconverted."
+      },
+      {
+        "capability": "IoB read (opcode 108/109)",
+        "ios_approach": "Unchanged 17-byte LE parse: mudaliarIOB [0-3], timeRemaining [4-7] skipped, mudaliarTotal [8-11] skipped, swan6hrIOB [12-15], iobType [16]; iobType==1 selects swan6hr, every other value falls back to mudaliar; iob = milliunits/1000; <17 bytes \u2192 nil \u2192 thrown error. Timestamp stays Date() (see staleness risk). Port the mudaliar 2500 / swan 1500 / type 1 \u2192 1.5 U vector."
+      },
+      {
+        "capability": "Basal read and activity-mode caching",
+        "ios_approach": "Unchanged: 9-byte LE cargo, currentBasalRate at [4-7] milliunits/hr, modified bitmask at [8], rate = mu/1000, isAutomated = bitmask != 0. Activity mode refreshed only every 3rd getBasalRate call \u2014 keep the floor-modulo on an atomic counter so wraparound is safe \u2014 via opcode 104/105 byte 5: 0\u2192NONE, 1\u2192SLEEP, 2\u2192EXERCISE, 3 (EatingSoon)\u2192NONE with a log line as the revisit trigger, else NONE with a warning; <6 bytes \u2192 NONE. Cache reset to NONE on connect; fetch failure keeps the previous value."
+      },
+      {
+        "capability": "Live CGM read (EGV 34/35 + HomeScreenMirror 56/57)",
+        "ios_approach": "Unchanged 8-byte LE EGV parse: pump timestamp [0-3], glucose uint16 [4-5], egvStatusId [6], signed trendRate [7] (a rate, not an arrow, unused). Accept status 1/2/3, reject 0 and >=4. Range-check against SafetyLimits. Arrow fetched separately from HomeScreenMirror byte 0 with the 1..7 mapping and UNKNOWN otherwise; mirror failure degrades the arrow only, EGV failure fails the read. Keep basalStatusIconId and apControlStateIconId parsed-but-unused."
+      },
+      {
+        "capability": "Last bolus status read (opcode 48/49, V1 and V2)",
+        "ios_approach": "Unchanged size-driven offset: exactly 17 \u2192 baseOffset 0; >=20 \u2192 baseOffset 1 with a 0x01 prefix expected (mismatch warns but still parses); 18, 19 and <17 \u2192 empty. Fields from baseOffset LE as today. Only bolusStatusId==3 reported. Reject deliveredMilliUnits > maxBolusDoseMilliunits and timestamps before `since`. isAutomated = source==7; isCorrection = (typeBitmask & 0x0A) != 0; correctionUnits and mealUnits forced to 0 because this response carries no breakdown."
+      },
+      {
+        "capability": "Reservoir and battery reads including the X2/Mobi divergence",
+        "ios_approach": "Unchanged, and the ordering is load-bearing: battery V1 (52/53, 2 bytes) tried FIRST and returned on success, V2 (144/145, 11 bytes with the charging flag) only as fallback, because V2 kills the connection on t:slim X2. Encode that ordering as a named constant plus a test that asserts request order, not just results. Reservoir: uint16 at [0-1] in WHOLE UNITS, never divided by 1000; parser requires only >=2 bytes though 4 are documented. Both battery paths clamp 0...100; V1 always isCharging=false."
+      },
+      {
+        "capability": "Pump version, features and settings reads",
+        "ios_approach": "Unchanged. PumpVersion (84/85) exactly 48 bytes LE with all ten fields at the documented offsets, 8-char fixed strings trimmed of NUL/space. Use UInt32 throughout \u2014 the Mobi armSwVer vector 3628697757 exceeds Int32 and is exactly the case a careless Int port breaks; port both the X2 (model 1000354, serial 90556643) and Mobi (model 1004000, serial 1226976) vectors. PumpFeaturesV1 (78/79) uint64 LE bitmask \u2192 {dexcomG5 b0, dexcomG6 b1, basalIQ b2, controlIQ b10}, <8 bytes \u2192 empty and degrade gracefully. PumpSettings (82/83) three Int32-LE length-prefixed UTF-8 strings, min 12 bytes."
+      },
+      {
+        "capability": "History record formats and stream cargo parsing",
+        "ios_approach": "Unchanged 26-byte record layout and the header-size probe: try headerSize 0 then 2, accept only when (size-header) >= 26 and divides evenly by 26, and return that result even when empty so the 18-byte path cannot reinterpret the bytes. Skip seqNum==0 and eventTypeId > 512. Base64 is the one real simplification: android.util.Base64 NO_WRAP becomes Data.base64EncodedString(), which wraps nothing by default \u2014 so the full history parser, which on Android needs on-device instrumented tests, becomes a plain unit test on the CI runner. Keep the 18-byte fallback for opcode 61."
+      },
+      {
+        "capability": "CGM extraction from history logs",
+        "ios_approach": "Unchanged: event types 16 and 399 only; always an 8-byte payload slice from offset 10. Type 16 glucose = uint16 LE at payload offset 0. Type 399 (G7) requires byte 2 == 0x01 or the record is dropped, glucose = uint16 LE at payload offsets 6-7, byte 3 signed trend, byte 4 the 0x20 type flag. Both range-checked against the caller's SafetyLimits. trendArrow always UNKNOWN from history. Timestamps via the pump-time conversion. Output sorted ascending."
+      },
+      {
+        "capability": "Bolus extraction from history logs (event 280)",
+        "ios_approach": "Unchanged 16-byte payload from offset 10, all LE. Reject deliveryStatus != 0, deliveredTotal == 0, deliveredTotal > maxBolusDoseMilliunits. isCorrection = (type & 0x0A) != 0; isAutomated = source == 7 only. Preserve the derived-from-delivered arithmetic exactly: correction clamped to deliveredTotal, mealPortion = (!isAutomated && total > clampedCorrection) ? total - clampedCorrection : 0 \u2014 this is what stops the parts exceeding the whole under partial delivery. Divide by 1000 for units."
+      },
+      {
+        "capability": "Basal extraction from history logs (event 279)",
+        "ios_approach": "Unchanged: payload from offset 10, commandedRateSourceRaw at [0-1], commandedRate (the actual delivery) at [6-7] \u2014 not profileBasalRate at [4-5]. Standalone parser minimum payload 8 bytes. Reject commandedRate > maxBasalRateMilliunits (15 000); a suspended zero rate is valid and kept. isAutomated = source in {0, 3, 4}, with 1 (Profile) and 2 (TempRate) explicitly not automated. activityMode always NONE. Sorted by timestamp."
+      },
+      {
+        "capability": "Bolus category derivation and platform mapping",
+        "ios_approach": "Pure logic, first-match-wins order preserved: source==7 \u2192 CONTROL_IQ; source==2 \u2192 OVERRIDE; meal>0 && correction>0 \u2192 BG_FOOD; meal>0 \u2192 FOOD_ONLY; correction>0 || (type & 0x0A)!=0 \u2192 BG_ONLY; else UNKNOWN. Source names 0 GUI, 1 AUTO_PILOT, 2 AUTO_POP_UP, 7 ALGORITHM, else UNKNOWN_<id>. The provider's seven declared categories map to platform categories exactly as today, including QUICK\u2192OTHER despite QUICK never being produced. Keep 0x0A documented as 0x08 (history correction component) | 0x02 (status correction type)."
+      },
+      {
+        "capability": "SafetyLimits validation bounds",
+        "ios_approach": "Swift struct with a throwing/failable init enforcing the same absolute floors and ceilings no configuration can widen (min >= 20, max <= 500, min < max, basal 1...15 000, bolus 1...25 000) plus a lenient `safe(...)` factory that coerces untrusted input identically. Domain-model invariants stay too: CgmReading rejects glucose outside 20...500 and BolusEvent rejects units outside 0...25 at construction, so the four-layer defence survives. Port SafetyConstantDriftGuardTest as a Swift test asserting the constants against docs/contract/safety-constants.md, including the 18.0156 mmol factor."
+      },
+      {
+        "capability": "Read-only design constraint",
+        "ios_approach": "Strengthened, not weakened: the Swift PumpDriver protocol declares only read/status operations, so a therapeutic write is a compile error rather than a policy violation. Subscribe to FFFC/FFFD for wire parity and never write to them. The attribution note (UUIDs and framing derived from studying jwoglom/pumpX2, MIT, no runtime dependency) carries over verbatim into the Swift module header and THIRD_PARTY_LICENSES. The consumer-proguard-rules.pro concern disappears entirely \u2014 Swift has no R8/reflection-stripping problem and no global JCE provider to disturb."
+      },
+      {
+        "capability": "Opcode table (complete, as implemented)",
+        "ios_approach": "Straight translation to a Swift enum with raw UInt8 values, keeping every corrected-value comment (PumpSettings was wrongly 90, PumpVersion 78, TimeSinceReset 80, HistoryLogStatus 26, PumpGlobals 88) because those comments are the record of hard-won corrections. Keep PumpGlobals 86/87 declared-but-unsent. Keep both timeouts (5 000 / 10 000 ms). REQUIRED_MTU 185 survives only as a documented expectation, not a request (see MTU entry under impossible). Model the FFF6 and FFF9 opcode spaces as two distinct enums so the 32/34/36/40 overlap cannot be confused at a call site."
+      },
+      {
+        "capability": "Debug packet logging",
+        "ios_approach": "OSLog/Logger replaces Timber, and it is a privacy upgrade rather than a port tax: interpolated dynamic values are redacted as <private> by default in device logs, so cargoHex, glucose values, doses, serials and BLE identifiers do not leak into sysdiagnose unless explicitly marked .public. Keep the same record shape \u2014 direction, opcode, human opcode name, txId, space-separated cargo hex, cargo size \u2014 and the PARSE_FAIL / AUTH_PARSE_FAIL sentinels. Keep the in-app debug logger's contract that parsed values are retained only in debug builds and never persisted unencrypted."
+      }
+    ],
+    "needs_redesign": [
+      {
+        "capability": "BLE scan, pump discovery, and stable device identity",
+        "why": "Android keys everything off the pump's MAC address, which iOS never exposes. CoreBluetooth gives a per-app, per-iOS-device CBPeripheral.identifier UUID instead. iOS also has no ScanSettings tiers, no location permission requirement, and background scanning is throttled and requires an explicit service-UUID filter. Separately, the pump only advertises while in pairing mode, so scanning is a pairing-time activity only \u2014 post-pairing reconnect must never depend on a scan result.",
+        "options": [
+          "Key credentials and reconnect on CBPeripheral.identifier, reconnect via retrievePeripherals(withIdentifiers:), and treat scanning as pairing-only.",
+          "Additionally probe retrieveConnectedPeripherals(withServices: [fdfb]) at launch to recover a peripheral already connected by the system.",
+          "Store a secondary fingerprint (advertised local name + pump serial from opcode 84) so a changed identifier can be re-bound to the same pump record after a rebuild/reinstall."
+        ],
+        "recommendation": "Do all three. Identifier is the primary key; the serial-number fingerprint is the recovery path. Keep the fdfb service filter (required for background scanning anyway), keep MAC-free dedup by identifier, keep DiscoveredPump(name from CBAdvertisementDataLocalNameKey, rssi). Drop the scan-failure error path \u2014 CoreBluetooth reports unavailability through CBManagerState, not a scan error code \u2014 and surface poweredOff/unauthorized/unsupported to the user instead. Add a scan timeout and a 'put the pump in pairing mode first' instruction, because iOS shows nothing at all until the pump advertises."
+      },
+      {
+        "capability": "Connection bring-up sequence",
+        "why": "Four of the six Android bring-up steps have no CoreBluetooth counterpart: GATT cache refresh, connection-priority request, MTU request, and explicit CCCD writes. iOS also bonds implicitly \u2014 the OS pairing dialog appears the first time an encrypted characteristic is touched, and cannot be triggered or observed programmatically.",
+        "options": [
+          "Minimal sequence: connect \u2192 didConnect \u2192 discoverServices([fdfb]) \u2192 discoverCharacteristics \u2192 setNotifyValue(true) on FFF9 first, start auth, then the remaining five.",
+          "Add an explicit readiness gate that checks peripheral.maximumWriteValueLength(for: .withResponse) >= 20 before writing, replacing the MTU-failure path.",
+          "Add a first-connection UX step that warns the user an iOS pairing dialog will appear and must be accepted."
+        ],
+        "recommendation": "All three. Keep the ordering guarantee that FFF9 notify is enabled and auth is started before the other five subscriptions, since that ordering is what beats the pump's idle timeout. Replace the MTU-failure-is-fatal branch with the write-length check (iOS auto-negotiates 185 ATT MTU, and the driver chunks at 18 bytes regardless, so the requirement is satisfied without an API). Treat discoverServices/discoverCharacteristics failure as a real recoverable error with a scheduled retry \u2014 the Android code only logs it and strands the connection, which is a latent bug worth fixing in the port."
+      },
+      {
+        "capability": "Connection state machine",
+        "why": "The seven-state enum is fine, but iOS adds mandatory states Android does not have: the central manager can be poweredOff, unauthorized, unsupported or resetting, and a restored-from-termination launch arrives in a state where peripherals exist but no user action initiated them. Rendering any of these as DISCONNECTED tells the user 'pump not connected' when the truth is 'Bluetooth is off' or 'you denied Bluetooth permission'.",
+        "options": [
+          "Add BLUETOOTH_UNAVAILABLE and PERMISSION_DENIED as distinct surfaced states alongside the existing seven.",
+          "Fold them into DISCONNECTED with a separate reason field.",
+          "Keep Android's exact enum and surface CBManagerState only in diagnostics."
+        ],
+        "recommendation": "Add the two distinct states. Drop SCANNING (never emitted today) or keep it and finally use it during pairing. Preserve every existing transition and preserve AUTH_FAILED as terminal for auto-reconnect. Preserve the 500 ms post-auth settle before promoting AUTHENTICATING \u2192 CONNECTED, and preserve the precondition that a status request throws unless state == CONNECTED."
+      },
+      {
+        "capability": "Tiered reconnection and backoff policy",
+        "why": "The FAST ladder (2/4/8/16/32 s then 32 s flat) and the SLOW 120 s timer both depend on the app running to fire a timer. On iOS a backgrounded app is suspended and neither Timer nor Task.sleep fires; BGTaskScheduler gives ~30 s of app-refresh at system-chosen times, nowhere near a 2 s ladder. The passive autoConnect=true GATT has no direct name on iOS but has an exact functional equivalent that is actually better.",
+        "options": [
+          "Replace the whole ladder with a single indefinite centralManager.connect(peripheral, options: nil) \u2014 iOS connection requests never time out and are honoured by the system while the app is suspended or terminated, relaunching the app on success when state restoration is configured.",
+          "Keep the FAST ladder for the foreground only, and switch to the indefinite connect() the moment the app leaves the foreground.",
+          "Keep timers everywhere and accept that reconnection stops when the app is suspended."
+        ],
+        "recommendation": "Option 2. Foreground: keep the exact FAST ladder and its counters so user-visible reconnect behavior matches Android. Background: cancel timers, issue one indefinite connect(), and let CoreBluetooth do the kernel-side work \u2014 this is the true analogue of the SLOW-phase autoConnect GATT and preserves the medical-device 'never stop trying' policy without any CPU wake. Keep reconnectAttempt/phase state across both so the ladder resumes where it left off on foregrounding. Also port ReconnectSchedulerTest, and fix its known off-by-one (the real fast phase is attempts 1\u20139, ~190 s, not 1\u201310/222 s)."
+      },
+      {
+        "capability": "Bond-loss and failure detection",
+        "why": "The entire policy is keyed on Android GATT status bytes 0x05, 0x08 and 0x13, which CoreBluetooth does not expose. iOS reports CBError/CBATTError domains with a coarser vocabulary (peerRemovedPairingInformation, encryptionTimedOut, connectionTimeout, peripheralDisconnected, insufficientAuthentication, insufficientEncryption) and gives no bond-state query at all \u2014 there is no equivalent of BOND_BONDED.",
+        "options": [
+          "Map by nearest CBError: 0x13 \u2192 CBError.peripheralDisconnected; 0x05 \u2192 CBATTError.insufficientAuthentication / CBError.peerRemovedPairingInformation; 0x08 \u2192 CBATTError.insufficientEncryption / CBError.encryptionTimedOut.",
+          "Abandon error-code classification and drive the policy purely off behavioral signals: time-to-disconnect, whether auth completed, and whether any notification ever arrived.",
+          "Hybrid: behavioral signals as the primary classifier, CBError as a refinement."
+        ],
+        "recommendation": "Hybrid. The three behavioral counters port cleanly and carry most of the value: rapidDisconnectCount (3 rapid pre-CONNECTED disconnects \u2192 AUTH_FAILED), encryptionFailureCount with MAX=20, and zeroResponseConnectionCount (3 connections with no notification \u2192 pairing invalid), all reset by a successful session or any notification. Critically, preserve the restraint: never treat a post-successful-session failure as bond loss, and tolerate 20 consecutive encryption failures before giving up. On iOS the cost of getting this wrong is higher than on Android, because the recovery action (forget the device in Settings, put the pump in pairing mode, re-pair) cannot be automated at all."
+      },
+      {
+        "capability": "Unpair and credential teardown",
+        "why": "unpair() today is disconnect + clear credentials + removeBond(). The removeBond half is impossible on iOS (listed separately); what needs redesign is the flow around it, because leaving a stale iOS pairing behind while clearing app credentials produces a state Android never has: the OS still holds a bond the app cannot see or use.",
+        "options": [
+          "Clear app-side credentials and show a mandatory guided step: Settings \u2192 Bluetooth \u2192 the pump \u2192 Forget This Device, plus 'also forget the pump on the pump itself'.",
+          "Clear app-side credentials only and stay silent about the OS bond.",
+          "Block unpair until the user confirms they completed the Settings step."
+        ],
+        "recommendation": "Option 1, non-blocking but prominent, with a deep link to App-Prefs Bluetooth if available and plain instructions if not. Keep the rest identical: cancel auto-reconnect, cancel auth/settle/reconnect tasks, clear the operation queue and pending requests, cancel the peripheral connection, set DISCONNECTED, clear Keychain items. Also expose a 'Repair pump' entry point that runs the same teardown, since on iOS re-pairing is the universal recovery for anything the driver cannot fix."
+      },
+      {
+        "capability": "Auth-success credential persistence",
+        "why": "Android stores the pairing code and the JPAKE derived secret + server nonce as hex through PumpCredentialProvider (EncryptedSharedPreferences). iOS has no equivalent; the choice of Keychain accessibility class directly determines whether background reconnection can authenticate, because the auth handshake must run in a background wake with the device possibly locked.",
+        "options": [
+          "Keychain generic passwords with kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly and kSecAttrSynchronizable = false.",
+          "kSecAttrAccessibleWhenUnlockedThisDeviceOnly \u2014 strictly safer, but reconnect+auth fails whenever the phone is locked, which is most of the time.",
+          "Store secrets in the encrypted local database alongside pump data."
+        ],
+        "recommendation": "Option 1, and it is not a close call: WhenUnlocked breaks the product, and ThisDeviceOnly is mandatory so a pump pairing secret never syncs to another device via iCloud Keychain or a restored backup. Everything else in onAuthSuccess ports unchanged \u2014 cancel the auth timeout, zero all four counters, reset the phase to FAST, set hadSuccessfulSession, persist the pairing on first success, persist the JPAKE derived secret and server nonce (this is what enables confirmation-mode reconnect), then fire the init sequence and arm the 500 ms settle. Note that Keychain items survive app deletion, which is a genuine benefit for a fork-and-build audience that reinstalls often."
+      },
+      {
+        "capability": "EC-JPAKE cryptographic core",
+        "why": "BouncyCastle's ECNamedCurveTable/ECPoint arithmetic has no Swift equivalent. CryptoKit and swift-crypto expose P-256 only as ECDH/ECDSA primitives; neither exposes point addition, scalar multiplication of an arbitrary base point, or the raw field arithmetic the ZKPs need. ECDH can be abused to get a scalar-times-point but returns only the x-coordinate, which is insufficient. This is the single largest genuinely-new engineering item in the subsystem.",
+        "options": [
+          "Vendor a pure-Swift P-256 implementation (point add, scalar mul with arbitrary base, uncompressed 65-byte encode/decode, mod-n arithmetic) over a BigInt type such as swift-numerics or attaswift/BigInt \u2014 roughly 400\u2013700 lines, no C dependency, fully unit-testable on CI.",
+          "Wrap BoringSSL or OpenSSL 3 EC_POINT via an SPM system/binary target \u2014 battle-tested arithmetic, but adds a C toolchain dependency, complicates the fork-and-build GitHub Actions pipeline, and increases build fragility for users signing with their own accounts.",
+          "Reimplement over an existing Swift EC package that already exposes point arithmetic."
+        ],
+        "recommendation": "Option 1. The fork-and-build distribution model makes a pure-Swift, dependency-light package far more valuable than a marginally faster C one, and this code runs a handful of times per pairing so performance is irrelevant. Preserve every wire-format decision exactly: uncompressed 65-byte points with a 1-byte length prefix, scalars fixed at 32 bytes big-endian with a 1-byte length prefix (the fixed length is load-bearing \u2014 variable length broke the 165/330-byte split offsets ~1.6% of the time), curve id 23, ASCII ids client/server, ZKP hash = SHA-256 over length-prefixed G, V, X and the id reduced mod n, mulSecret blinded with a random 16-byte b as (b\u00b7n + s)\u00b7x mod n, derivedSecret = SHA-256 of K's x-coordinate. Validate with differential test vectors generated from the Kotlin implementation with a seeded RNG, plus a Kotlin-client-vs-Swift-server cross-handshake test. Use CryptoKit's P256 x963Representation only as an on-curve validity check for decoded points."
+      },
+      {
+        "capability": "Sustained connection, keep-alive cadence, and poll scheduling",
+        "why": "Everything the driver reads is polled \u2014 the pump pushes nothing unsolicited \u2014 and the pump drops idle connections at roughly 30 s. Android holds this open with a connectedDevice foreground service and a 15 s fast loop. iOS has no foreground services; with the bluetooth-central background mode the connection itself survives, but a suspended app cannot initiate a write, and CoreBluetooth only grants runtime when an event arrives from the peripheral. A poll-only peripheral therefore generates no wakeups, the app never runs, the 30 s idle timer expires, and the pump disconnects.",
+        "options": [
+          "Hold the connection and poll only in the foreground; in the background let the pump time out and rely on the disconnect event itself to wake the app, immediately re-issuing an indefinite connect() so the next connection event wakes it again.",
+          "Poll aggressively in the foreground and use BGProcessingTask/BGAppRefreshTask for opportunistic background catch-up.",
+          "Attempt to keep a permanent connection alive in the background and accept whatever cadence iOS grants."
+        ],
+        "recommendation": "Option 1 as the architecture, with option 2 as a supplement for backfill. Design the driver around a connect \u2192 auth \u2192 burst-read (IoB, basal, CGM, plus history when due) \u2192 disconnect cycle whose whole duration fits comfortably inside a background wake, rather than a long-lived connection with a slow poll loop. Because the history log preserves everything, gaps between wakes are recoverable \u2014 this is exactly why the pagination cursor matters more on iOS than on Android. Do NOT promise Android's 15 s background cadence in the PRD; state honestly that background freshness is best-effort and foreground freshness matches Android. Also plan for a Live Activity or a time-sensitive notification as the user-visible signal that data has gone stale, since the app cannot silently guarantee freshness."
+      },
+      {
+        "capability": "Background relaunch and state restoration",
+        "why": "Android's process can be revived by a foreground service and its BLE callbacks survive. iOS instead relaunches a terminated app into the background on a CoreBluetooth event, but only if the central was created with CBCentralManagerOptionRestoreIdentifierKey, and willRestoreState hands back peripherals with no application context and only a few seconds of runtime \u2014 it cannot resume arbitrary work such as an in-flight history pagination loop or a half-finished JPAKE handshake.",
+        "options": [
+          "Persist a minimal, restoration-safe resume record (peripheral identifier, pump identity, nextHistoryIndex cursor, auth mode) and on restore do nothing but re-attach delegates and re-arm the connection.",
+          "Restore and immediately re-drive a full auth + read burst.",
+          "Skip restoration entirely and require the user to open the app."
+        ],
+        "recommendation": "Option 1, then let the ordinary connection flow take over once a real connect event arrives. Treat every restored connection as a fresh session: re-run authentication from scratch (Android already does this on every reconnect, so this is parity, not a compromise), reset all assemblers and pending requests, and never assume an in-flight request survived. The nextHistoryIndex cursor, which Android holds only in memory, must become durable on iOS precisely because the process is killed routinely \u2014 that is a real behavior improvement the port should make deliberately."
+      },
+      {
+        "capability": "Plugin surface and capability wiring",
+        "why": "TandemDevicePlugin is discovered at runtime through Hilt multibinding into a PluginFactory set. iOS forbids dynamic code loading, so the driver becomes a compile-time-linked Swift package conforming to a driver protocol, and registration must be a static list.",
+        "options": [
+          "A static registry array in the app target enumerating every linked driver module.",
+          "Compile-time registration via a protocol with a static `descriptor` plus a hand-maintained array.",
+          "Swift macro or build-plugin generated registry."
+        ],
+        "recommendation": "Option 2 \u2014 an explicit array is honest about what is linked and reviewable in a diff, which matters for a source-distributed medical monitoring app. Preserve the plugin's declared identity verbatim (id com.glycemicgpt.tandem, name, version, protocolName, description) and its four capabilities (GLUCOSE_SOURCE, INSULIN_SOURCE, PUMP_STATUS, BOLUS_CATEGORY_PROVIDER). Map onActivated \u2192 autoReconnectIfPaired and onDeactivated/shutdown \u2192 disconnect onto app lifecycle. Keep the empty settings descriptor and empty dashboard-card list \u2014 the generic pump card already renders pairing status and Unpair. Replace TandemGlucoseSource's naive 60 s polling flow with an AsyncStream fed by the shared connection scheduler, because two independent pollers competing for a single-connection pump is worse on iOS than on Android."
+      },
+      {
+        "capability": "Pump data on Apple Watch",
+        "why": "Not a limitation of watchOS BLE \u2014 watchOS does have CoreBluetooth \u2014 but of the pump: Tandem pumps accept exactly one BLE connection at a time, so a Watch that connects steals the connection from the iPhone. Compounding it, watchOS has no bluetooth-central background mode and no CBCentralManager state restoration, so a watch-side driver could not maintain a session anyway.",
+        "options": [
+          "Watch is a pure consumer: iPhone owns the pump connection and pushes readings over WatchConnectivity, with complications and Smart Stack fed from the transferred data.",
+          "Watch as an alternate connection owner when the phone is out of range, with an explicit handoff.",
+          "Independent watchOS app with its own pump connection."
+        ],
+        "recommendation": "Option 1, unequivocally. Use WCSession updateApplicationContext for latest-value state (coalescing, survives being backgrounded) and transferCurrentComplicationUserInfo for complication-driving updates, with a defined budget-exhaustion fallback. Complications and Smart Stack widgets render from the last transferred snapshot with an explicit staleness age \u2014 never a stale number with no age. Option 2 should be explicitly ruled out in the PRD: connection stealing during a handoff race would leave both devices unable to read the pump."
+      },
+      {
+        "capability": "Simulator-untestable driver validation",
+        "why": "CoreBluetooth does not exist in the iOS Simulator, and the lead developer has a pump and a Mac but no iPhone. Without a substitute, essentially none of this subsystem is exercisable by the person writing it, and every change would queue behind the one maintainer with hardware.",
+        "options": [
+          "A protocol-level transport abstraction with a scripted fake peripheral that replays captured pump traffic, driving the real state machine, auth, framing and parsers in the Simulator and on CI.",
+          "A macOS harness target that links the identical Swift driver package and talks to a real t:slim X2 over the Mac's own Bluetooth \u2014 CoreBluetooth is fully available on macOS.",
+          "Rely solely on the maintainer's iPhone."
+        ],
+        "recommendation": "Both 1 and 2, and treat them as first-class deliverables rather than test scaffolding. Define the driver's dependency on CoreBluetooth as a narrow protocol (scan, connect, discover, subscribe, write, notify, disconnect, state) so a FakeTransport can drive the entire stack in unit tests and a SimulatedPump can drive the whole app in the Simulator. The macOS bench is the higher-leverage item: it lets the lead developer validate real JPAKE pairing, real framing and real history paging against his own pump with no iPhone at all, leaving Daniel's hardware for iOS-specific behavior \u2014 background wakes, state restoration, Keychain-while-locked, watch delivery \u2014 which is exactly the set the Mac cannot cover. Caveat the bench honestly: the pump's single-connection limit means the Mac and the iPhone cannot both be paired-and-connected at once."
+      },
+      {
+        "capability": "Security and dependency gates for this module",
+        "why": "The Android gates for this code are Semgrep --config p/kotlin,p/java,p/secrets, OSV-Scanner v2.3.3 over committed Gradle lockfiles, and a pinned bcprov-jdk18on 1.84. Semgrep's registry has no maintained Swift ruleset, so 'run Semgrep' is not portable; the requirement is the substance, not the tool name.",
+        "options": [
+          "SAST: CodeQL with language: swift on a macOS runner (GitHub's supported Swift analysis) as the direct replacement for Semgrep p/kotlin+p/java.",
+          "Secrets: keep Semgrep --config p/secrets (language-agnostic regexes, works unchanged on Swift) and/or gitleaks \u2014 a true name-for-name carryover.",
+          "Dependencies: OSV-Scanner v2 already parses Package.resolved, so the same tool and the same osv-scanner.toml suppression discipline carry over verbatim once Package.resolved is committed and pinned to exact versions.",
+          "Lint/quality: SwiftLint plus swift build -warnings-as-errors as the rough analogue of detekt/ktlint; periphery for dead code.",
+          "Workflow supply chain: zizmor and the workflow-lint/workflow-security jobs are language-agnostic and carry over unchanged."
+        ],
+        "recommendation": "CodeQL(swift) + Semgrep p/secrets + OSV-Scanner on a committed, exact-pinned Package.resolved + SwiftLint, and state plainly in the PRD that CodeQL's Swift coverage is narrower than Semgrep's Kotlin rules \u2014 the compensating control is that this module's risk surface is memory-safe parsing and crypto, both of which are better covered by the ported vector tests and a differential test against the Kotlin EC-JPAKE than by any generic ruleset. Two Android-specific gates simply disappear: consumer ProGuard rules (no R8) and the instrumented-test requirement for Base64 (Foundation Base64 unit-tests on CI). Note that if the pure-Swift EC option is chosen there is no third-party crypto dependency left to scan at all, which is a meaningful supply-chain improvement over pinning BouncyCastle."
+      }
+    ],
+    "impossible": [
+      {
+        "capability": "BluetoothGatt.refresh() \u2014 clearing the cached GATT service database on every connect",
+        "why": "There is no public or private CoreBluetooth API to invalidate the OS service cache, and no reflection escape hatch on iOS. iOS caches a bonded peripheral's service database and will not re-discover on its own. The Android driver calls refresh() on every STATE_CONNECTED specifically because a stale cache silently drops notifications \u2014 the exact failure mode iOS is also susceptible to.",
+        "closest_alternative": "Rely on the standards-based mechanism: implement peripheral(_:didModifyServices:) and re-run discovery when the pump sends a GATT Service Changed indication (0x2A05). Handle characteristic references going invalid after any reconnect by re-discovering rather than caching CBCharacteristic objects across sessions. For a genuinely stale cache the only user-facing remedy is forgetting the device in iOS Settings, which iOS clears the cache on \u2014 so this becomes a documented troubleshooting step rather than an automatic recovery."
+      },
+      {
+        "capability": "BluetoothDevice.removeBond() \u2014 programmatic bond removal",
+        "why": "iOS exposes no API to enumerate, inspect or delete Bluetooth pairings. The user must do it manually in Settings \u2192 Bluetooth \u2192 Forget This Device. Three Android code paths depend on removeBond (status 0x05 before CONNECTED, status 0x08 with no prior successful session, and three zero-response connections) and none of them can be automated.",
+        "closest_alternative": "Detect the same conditions with the same counters, then surface a specific, actionable recovery instruction instead of acting: clear app-side credentials, set AUTH_FAILED, and tell the user exactly which two things to do (forget the pump in iOS Settings, then put the pump into pairing mode and re-pair). Because the automatic remedy is gone, the Android restraint policy matters even more \u2014 do not trip this state on transient encryption failures once a successful session has occurred."
+      },
+      {
+        "capability": "requestConnectionPriority(CONNECTION_PRIORITY_HIGH) \u2014 forcing a 7.5\u201315 ms connection interval",
+        "why": "CoreBluetooth gives the central no control over connection interval, latency or supervision timeout. Only the peripheral may request parameters, via an L2CAP Connection Parameter Update Request, and iOS applies its own policy to what it accepts (Apple's accessory guidelines constrain acceptable intervals to multiples of 15 ms with a minimum of 15 ms). The Android code requests HIGH priority because the pump drops connections at slower intervals.",
+        "closest_alternative": "None on the central side. The mitigating fact is that Tandem ships an official iOS t:connect app, so the pump firmware demonstrably negotiates workable parameters with iOS and requests them itself. Verify empirically on Daniel's hardware whether the session survives; if it does not, the only remaining lever is the connect \u2192 burst-read \u2192 disconnect cycle, which keeps each session short enough that interval-driven timeouts do not accumulate."
+      },
+      {
+        "capability": "requestMtu(185) and treating MTU negotiation failure as fatal",
+        "why": "iOS negotiates the ATT MTU automatically at connection setup and exposes no request API. There is no MTU callback and therefore no MTU-failure branch to implement.",
+        "closest_alternative": "Functionally a non-issue and arguably an improvement: iOS requests an ATT MTU of 185 automatically (matching REQUIRED_MTU exactly), and the driver chunks every write at 18 bytes regardless. Replace the fatal MTU gate with a readiness assertion on peripheral.maximumWriteValueLength(for: .withResponse) >= 20, logged for diagnostics, and delete the close-GATT-and-give-up path that MTU failure triggered on Android."
+      },
+      {
+        "capability": "A foreground service holding a permanent connection with a guaranteed 15 s poll cadence in the background",
+        "why": "iOS has no foreground services and no user-visible persistent-work affordance that grants unbounded runtime. With the bluetooth-central background mode the connection object survives, but a suspended app cannot initiate a write; runtime is granted only when the peripheral generates an event, and this pump generates none unsolicited. BGAppRefreshTask (~30 s, system-scheduled, typically minutes to hours apart) and BGProcessingTask (charging/idle) cannot deliver a 15 s cadence. Battery-optimization exemptions and Samsung 'Sleeping apps' have no iOS analogue because the restriction is not a setting.",
+        "closest_alternative": "Event-driven wakeups instead of timer-driven polling: disconnect after each read burst and leave an indefinite connect() outstanding so the next connection event wakes the app, plus BGProcessingTask for opportunistic history backfill. Accept and state plainly that background freshness is best-effort. The history log makes gaps recoverable, so the honest product promise is 'complete data with variable latency in the background, Android-equivalent cadence in the foreground', surfaced with an explicit data-age indicator rather than an implied-fresh number."
+      },
+      {
+        "capability": "Apple Watch connecting to the pump directly",
+        "why": "The pump accepts exactly one BLE connection at a time, so a watch-side connection necessarily steals it from the iPhone; there is no shared-connection mode. Independently, watchOS provides neither the bluetooth-central background mode nor CBCentralManager state restoration, so a watch-side driver could not sustain or recover a session even if it were the sole owner. This is a device constraint compounded by a platform one, not an engineering gap.",
+        "closest_alternative": "iPhone owns the pump connection exclusively; the Watch receives readings over WatchConnectivity (updateApplicationContext for latest state, transferCurrentComplicationUserInfo for complication updates) and renders complications and Smart Stack entries from the last transferred snapshot with a visible data age. watchOS also has no custom watch faces, so the Android watchface module's role is served by complications on Apple's own faces plus Smart Stack widgets \u2014 a narrower surface that should be scoped as such rather than promised as parity."
+      }
+    ],
+    "ios_requirements": [
+      "A user must be able to discover a Tandem t:slim X2 or Tandem Mobi from the iPhone app by scanning for the pump's fdfb service while the pump is in pairing mode, seeing each discovered pump's name and signal strength, and being told plainly when nothing appears because the pump is not advertising, Bluetooth is off, or Bluetooth permission was denied.",
+      "A user must be able to complete first-time pairing by entering the pump's pairing code (6-digit from the t:slim X2 screen, or the 16-character code printed on a Mobi), with the app selecting the JPAKE or V1 handshake automatically from the code length and never asking the user which protocol their pump speaks.",
+      "The app must accept and complete an iOS Bluetooth pairing prompt as part of first connection, and must tell the user in advance that the prompt will appear and must be accepted for the pump to work.",
+      "After a successful pairing the app must reconnect to the same pump automatically, without the pump being put back into pairing mode and without the user re-entering the code, for as long as the pairing is intact.",
+      "The app must keep attempting to reconnect indefinitely while a pairing exists, only stopping when the user unpairs or when the app has positively determined the pairing is no longer valid \u2014 a medical monitoring app must never quietly give up on the pump.",
+      "When the app determines the pairing is genuinely broken, it must say so distinctly (not as an ordinary disconnect) and give the user the exact recovery steps, including forgetting the pump in iOS Settings, since the app cannot remove an iOS Bluetooth pairing itself.",
+      "The app must tolerate transient encryption and connection failures after at least one successful session without invalidating the pairing, so that sleep/wake and out-of-range events never strand a user without pump data.",
+      "The app must surface pump connection status to the user as distinct, actionable states: connected, connecting, authenticating, reconnecting, disconnected, pairing invalid, Bluetooth off, and Bluetooth permission denied.",
+      "While the app is in the foreground the user must see pump data refresh at Android-equivalent cadence, with insulin-on-board, basal rate and glucose visible within seconds of opening the app.",
+      "While the app is backgrounded the system must continue collecting pump data opportunistically whenever iOS grants it Bluetooth runtime, and must back-fill any gap from the pump's history log once a session is re-established, so that no delivered bolus, basal change or glucose reading is permanently lost to a background gap.",
+      "Every pump-derived value shown anywhere in the app or on the Watch must carry a visible data age, and values older than a configured threshold must be visually distinguished, because iOS cannot guarantee background refresh timing.",
+      "The app must resume history collection from where it left off across app termination and system relaunch, so that a killed process does not cause repeated re-reads or skipped records.",
+      "The app must read from the pump only. It must never issue a bolus, change a basal rate, alter a pump setting, or write to any pump control characteristic, and this must be enforced by the driver interface rather than by convention.",
+      "The app must reject any glucose value outside 20\u2013500 mg/dL, any bolus above 25 U, and any basal rate above 15 U/hr from every parsing path, live and historical, before that value reaches storage, the dashboard, alerts, or any AI analysis.",
+      "The app must convert pump timestamps to the phone's current local time using the Tandem 2008 epoch and the pump's local-wall-clock semantics, producing timestamps identical to the Android app for the same pump bytes in any time zone.",
+      "The app must report only completed insulin deliveries as delivered insulin, never started, cancelled or errored ones.",
+      "The app must categorize each bolus (Control-IQ automatic, correction, food, food-and-correction, override, other) identically to the Android app for the same pump data.",
+      "The app must read pump battery level and reservoir volume on both t:slim X2 and Mobi, and must never issue the battery request variant that is known to terminate a t:slim X2 session.",
+      "The app must report the pump's model, serial number, firmware version and feature flags, and must continue to function with reduced detail when the pump does not return them.",
+      "An Apple Watch user must see current glucose with trend, insulin on board, basal rate and pump connection status, delivered from the iPhone, on a complication and in the Smart Stack, each with a visible data age and an explicit indication when the phone has not been reachable.",
+      "A maintainer must be able to run the complete pump protocol stack \u2014 framing, CRC, reassembly, both authentication handshakes, and every parser \u2014 as automated tests on a CI runner with no phone, no pump and no Bluetooth hardware.",
+      "A developer with a Mac and a pump but no iPhone must be able to exercise the real driver against the real pump from macOS, covering pairing, authentication, status reads and history paging.",
+      "A developer must be able to run the entire app in the iOS Simulator against a simulated pump that produces realistic protocol traffic, including pairing, reconnection, and failure cases such as bad pairing codes and dropped sessions.",
+      "The pump pairing code and derived pairing secret must be stored so they are readable when the device is locked but only after first unlock, must never leave the device, and must never sync to iCloud or appear in an encrypted backup restored to another device.",
+      "Diagnostic packet logs must be available to the user for troubleshooting, must never include glucose values, insulin doses, pump serial numbers or Bluetooth identifiers in system logs, and must not be persisted unencrypted.",
+      "The repository's CI must gate every change to the pump driver on: static security analysis of Swift source, secret scanning, known-vulnerability scanning of pinned Swift package dependencies, lint, and the full protocol test suite including the published safety-constant and pump-time vectors.",
+      "The project must document, and CI must verify, that the Swift EC-JPAKE implementation produces byte-identical handshake messages to the Android implementation for the same inputs.",
+      "The app must ship the required Bluetooth usage description and Bluetooth central background mode, and must degrade to a clear explanatory state rather than a crash or a blank screen if Bluetooth permission is denied or restricted."
+    ],
+    "risks": [
+      {
+        "risk": "iOS gives the central no control over connection interval. The Android driver explicitly requests a 7.5\u201315 ms interval because the pump drops connections at slower defaults; if the pump behaves the same way against iOS's ~30 ms default, sessions may drop before authentication completes and there is no API-level fix.",
+        "severity": "high",
+        "mitigation": "Test this first, before any other hardware work, on Daniel's iPhone against a real t:slim X2 \u2014 a bare connect + JPAKE + one status read is enough to answer it. The reassuring prior is that Tandem's own t:connect iOS app works, so the pump must request acceptable parameters itself. If sessions do drop, fall back to short connect \u2192 auth \u2192 burst-read \u2192 disconnect cycles so no session lives long enough to accumulate an interval-driven timeout."
+      },
+      {
+        "risk": "Background data collection cannot match Android's 15 s cadence, because a poll-only peripheral generates no CoreBluetooth events and a suspended iOS app cannot initiate reads. If the PRD promises Android-equivalent background freshness, the product will not deliver it.",
+        "severity": "high",
+        "mitigation": "Architect around connection-event-driven wakeups plus history backfill rather than a background poll loop, state the honest promise in the PRD (complete data, variable background latency), and make data age visible everywhere so a stale number is never mistaken for a fresh one."
+      },
+      {
+        "risk": "The EC-JPAKE core must be rewritten from BouncyCastle to Swift with no library that exposes the needed P-256 point arithmetic. A subtle error \u2014 a wrong encoding length, a mis-reduced ZKP hash, an unblinded scalar \u2014 produces a handshake that fails only against real pump firmware, which the lead developer cannot reach without hardware.",
+        "severity": "high",
+        "mitigation": "Build the Swift core against differential vectors generated from the Kotlin implementation with a seeded RNG, add a Kotlin-server-vs-Swift-client cross-handshake test in CI, and validate end-to-end on the macOS bench against a real pump before any iPhone work. Preserve the fixed 32-byte scalar encoding explicitly \u2014 variable-length encoding is a known source of a ~1.6% failure rate against the fixed 165/330-byte split offsets."
+      },
+      {
+        "risk": "Bond loss cannot be repaired automatically. Every Android path that calls removeBond becomes a manual user procedure requiring both iOS Settings and physical access to the pump's pairing menu. An over-eager iOS failure classifier will strand users repeatedly.",
+        "severity": "high",
+        "mitigation": "Port the counter-based restraint faithfully (never invalidate after a successful session; tolerate 20 consecutive encryption failures), classify primarily on behavioral signals rather than error codes since CBError is coarser than Android's GATT statuses, and require hardware validation of every path that can reach the pairing-invalid state before release."
+      },
+      {
+        "risk": "The pump accepts exactly one BLE connection at a time. On iOS this collides with t:connect, with the macOS bench, and with any watch-side experiment \u2014 and a user who has t:connect installed and connected will see this app simply never work, with no diagnostic distinguishing it from a broken pairing.",
+        "severity": "medium",
+        "mitigation": "Rule out watch-side connection ownership architecturally, document the macOS bench and the iPhone as mutually exclusive, and detect the symptom pattern (connectable peripheral that never completes or immediately disconnects) to surface a specific 'another app or device is connected to your pump' message."
+      },
+      {
+        "risk": "CBPeripheral.identifier replaces the MAC address as the pump's primary key. If it changes across a rebuild, reinstall, device restore or Bluetooth subsystem reset, the app loses its reconnect handle \u2014 and because the pump only advertises in pairing mode, recovery requires the user to physically re-enter pairing mode. This matters more here than in a normal app because fork-and-build users reinstall frequently and TestFlight builds expire every 90 days.",
+        "severity": "medium",
+        "mitigation": "Store the pump serial from opcode 84 as a secondary fingerprint so a new identifier can be re-bound to the existing pump record, keep credentials in the Keychain (which survives app deletion), also probe retrieveConnectedPeripherals(withServices:) at launch, and validate identifier stability across a reinstall and a device restore on Daniel's hardware."
+      },
+      {
+        "risk": "Keychain accessibility is a single decision that silently breaks background operation: with WhenUnlocked, the reconnect wake cannot read the pairing secret while the phone is locked and every background authentication fails, in a way that looks like a pump problem rather than a storage problem.",
+        "severity": "medium",
+        "mitigation": "Use kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly, and add an explicit automated test plus a manual hardware check that a background reconnect authenticates successfully while the device is locked."
+      },
+      {
+        "risk": "CoreBluetooth state restoration hands back peripherals with seconds of runtime and no application context. Attempting to resume a history pagination loop or a partial JPAKE handshake on restore will produce intermittent, hard-to-reproduce failures.",
+        "severity": "medium",
+        "mitigation": "Treat every restored connection as a fresh session: re-authenticate from scratch (which matches Android's existing every-reconnect behavior), reset all assemblers and pending requests, and persist only a minimal durable resume record including the history cursor, which today lives only in memory on Android."
+      },
+      {
+        "risk": "Swift traps on integer overflow where Kotlin wraps, and Data slices are not guaranteed aligned. The CRC loop, the 8-bit txId counter, the uint32 pump fields (the Mobi armSwVer 3628697757 exceeds Int32) and every little-endian load are all places where a literal translation crashes or silently misreads.",
+        "severity": "medium",
+        "mitigation": "Use explicit overflow operators and explicit unsigned types throughout, load multi-byte values byte-by-byte rather than via unsafe pointer loads, and port every existing test vector before porting the corresponding implementation."
+      },
+      {
+        "risk": "Semgrep's Kotlin and Java rulesets have no Swift equivalent, so the security posture of this module silently weakens if the CI workflow is copied by name rather than by intent.",
+        "severity": "medium",
+        "mitigation": "Replace with CodeQL (language: swift) on a macOS runner for SAST, keep Semgrep p/secrets and OSV-Scanner unchanged (both work on Swift and on Package.resolved respectively), add SwiftLint, and state in the PRD that the compensating control for narrower generic rule coverage is the ported vector suite plus the cross-implementation crypto differential test."
+      },
+      {
+        "risk": "Tandem Mobi is protocol-compatible but unverified on Android hardware, and no one on the iOS side has a Mobi at all. Shipping it as claimed parity means shipping an untested read path for a medical device, including the battery V2 path that only Mobi exercises.",
+        "severity": "medium",
+        "mitigation": "Carry the Android verification status forward verbatim into the iOS app and its documentation (t:slim X2 verified, Mobi protocol-compatible/unverified), gate Mobi behind the same honest labeling, and treat any Mobi bug report as hardware-blocked until a maintainer with a Mobi appears."
+      },
+      {
+        "risk": "Four readings \u2014 insulin on board, live basal, reservoir and battery \u2014 carry the read time rather than a pump timestamp, so a value cached by a failing poll is indistinguishable from a fresh one. On iOS, where poll gaps are routine and can be long, this is materially more dangerous than on Android.",
+        "severity": "medium",
+        "mitigation": "Attach the acquisition time and an explicit freshness state to every reading at the driver boundary, and require the UI and the Watch to render age for these four values; do not carry Android's implicit-freshness model forward unchanged."
+      },
+      {
+        "risk": "The live CGM read path validates against default 20\u2013500 bounds rather than the user's configured SafetyLimits, and the live basal read applies no rate ceiling at all \u2014 a misframed 9-byte cargo can display an arbitrary basal rate. A literal port carries both defects into a new codebase.",
+        "severity": "medium",
+        "mitigation": "Decide both deliberately and record the decision in the port; the low-risk resolution is to thread SafetyLimits through the live CGM path and apply the 15 000 mu/hr ceiling to the live basal parse, matching the history path, since both changes only tighten validation."
+      },
+      {
+        "risk": "Status responses are matched by 8-bit txId alone with no opcode check, and the counter wraps every 256 requests. A late response from a wrapped transaction could satisfy a different pending request \u2014 for example completing an IoB read with basal bytes.",
+        "severity": "low",
+        "mitigation": "Keep the existing eviction of colliding pending entries and add a cheap opcode check (response opcode must equal request opcode + 1) at completion time; this is a strictly additive guard with no wire impact."
+      },
+      {
+        "risk": "CoreBluetooth chooses notification versus indication from characteristic properties, whereas Android explicitly writes ENABLE_NOTIFICATION_VALUE. If any Tandem characteristic advertises both, iOS could subscribe differently than Android does.",
+        "severity": "low",
+        "mitigation": "Dump the properties of all six vendor characteristics during the first hardware session and confirm notify-only; if any advertises indicate as well, verify the pump's behavior under indications explicitly rather than assuming equivalence."
+      }
+    ],
+    "questions_for_pm": [
+      "The live CGM read path validates glucose against the built-in 20\u2013500 defaults instead of the user's configured SafetyLimits, while the history path uses the configured limits \u2014 the Android code notes this must be decided deliberately on any port. Should the iOS driver preserve the Android behavior exactly for bit-for-bit parity, or apply the user's configured limits on both paths (tightening validation, but making the two paths disagree with Android)?",
+      "Tandem Mobi is shipped on Android as 'protocol-compatible, unverified on hardware', and no one on the iOS side has a Mobi to test with \u2014 the maintainer with hardware has a t:slim X2. Should Mobi ship in the iOS app with the same unverified labeling, or be held out of the initial release until someone with the hardware can validate it?"
+    ]
+  }
+}

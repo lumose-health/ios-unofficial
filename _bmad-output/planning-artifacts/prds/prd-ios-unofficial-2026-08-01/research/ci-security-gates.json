@@ -1,0 +1,978 @@
+{
+  "key": "ci-security-gates",
+  "label": "CI security gates",
+  "map": {
+    "subsystem": "CI security gates (GitHub Actions security/lint/dependency gates, CodeRabbit pre-merge checks, external secret scanning, and the documented not-doing decisions) \u2014 repo android-unofficial",
+    "capabilities": [
+      {
+        "name": "Required status check roster",
+        "behavior": "Five gates are required on `develop` via the \"Protect develop\" ruleset (docs/dev/security-testing.md:31): exact check names `Security Scan Gate`, `Dependency Scan Gate`, `Workflow Lint`, `Workflow Security`, `Android Gate`. Check name = the job's `name:`, not the workflow's `name:`. Non-required additional jobs that report their own status: `Detect Dependency Changes`, `OSV-Scanner`, `Detect Android-Relevant Changes`, `Build & Test`, `Instrumented Tests (emulator)`, `App Token Auth + Runner Check`, `Attribution Check`. None of the five required gates uses `continue-on-error`. `Security Scan Gate`, `Workflow Lint`, `Workflow Security` run unconditionally on every PR; `Android Gate` and `Dependency Scan Gate` are always-running aggregation jobs (`if: always()`) that pass when no relevant paths changed and fail closed otherwise.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/docs/dev/security-testing.md",
+          "android-unofficial/CONTRIBUTING.md"
+        ],
+        "edge_cases": [
+          "A paths-filtered required job would never be created and would wedge the merge as \"pending\" \u2014 this is the stated reason workflow-security.yml has no PR paths filter (workflow-security.yml:29-33) and security-scan.yml has no detect-changes fan-out (security-scan.yml:14-16).",
+          "CONTRIBUTING.md:265-274 is stale: it lists only 5 checks, describes `Workflow Lint` as \"zizmor static analysis \u2026 (advisory while it beds in)\" (actually actionlint, and failing), and says Security Scan Gate runs \"against the diff\" (actually whole directories). docs/dev/security-testing.md is the accurate source."
+        ]
+      },
+      {
+        "name": "Security Scan Gate \u2014 Semgrep SAST job shape",
+        "behavior": "Workflow `Security Scan` (.github/workflows/security-scan.yml). Triggers: push to main/develop; pull_request to main/develop on opened|synchronize|reopened; workflow_dispatch. `permissions: contents: read`. Concurrency group `security-scan-${{ github.ref }}`, cancel-in-progress true. Single job `security-scan-gate` / name `Security Scan Gate`, runs-on ubuntu-latest, `timeout-minutes: 10`. Deliberately one job with no detect-changes fan-out so the required status always reports. Steps: checkout (persist-credentials false) \u2192 `pip install semgrep==1.169.0` \u2192 run scan capturing exit code into `SEMGREP_EXIT` via GITHUB_ENV \u2192 upload artifact (`if: always()`) \u2192 gate step. The CLI is pinned but the p/kotlin, p/java, p/secrets rule packs are fetched from the Semgrep registry at scan time, so rule content can move between runs.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.github/workflows/security-scan.yml"
+        ],
+        "edge_cases": [
+          "Rule-pack drift means a previously-green commit can turn red with no repo change."
+        ]
+      },
+      {
+        "name": "Semgrep scan invocation and scope",
+        "behavior": "`semgrep scan --config p/kotlin --config p/java --config p/secrets --exclude 'AesEcb.java' --exclude '.gradle' --json --output semgrep-kotlin.json app/ wear-device/ watchface/ plugins/ tools/`. Exit code is captured with `|| EXIT=$?` so the step itself never fails. Scanned roots: app/, wear-device/, watchface/, plugins/, tools/. `tools/` (the medtronic-ble-spike Sake crypto reverse-engineering) is deliberately IN scope so SAST coverage matches the dependency scan, which already covers its lockfile. Non-shipped spikes under tools/ fall outside only the CodeRabbit `plugins/shipped/**/ble/**` path rules; CodeRabbit's semantic BLE Protocol Safety custom check still applies to them.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.github/workflows/security-scan.yml",
+          "android-unofficial/docs/dev/security-testing.md"
+        ],
+        "edge_cases": [
+          "docs/dev/security-testing.md:222-228 local-repro snippet omits `tools/` from the target list \u2014 the local command scans less than CI."
+        ]
+      },
+      {
+        "name": "Semgrep exclusions and their rationale",
+        "behavior": "Two excludes. (1) `AesEcb.java` \u2014 vendored from OpenMinimed JavaSake, re-vendored rather than patched on upstream bumps (issues #695/#696), so its intentional legacy AES/ECB usage must never fail the gate. JavaSake is currently consumed as the Maven artifact `org.openminimed:javasake` with no vendored source in-tree, so the exclusion is INERT TODAY and retained only for the re-vendor case. (2) `.gradle` \u2014 Gradle build cache, never source. The exclude is a bare basename pattern, so any file named AesEcb.java anywhere in the tree is skipped.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.github/workflows/security-scan.yml",
+          "android-unofficial/docs/dev/security-testing.md"
+        ],
+        "edge_cases": [
+          "Basename-scoped exclusion: an unrelated future AesEcb.java would also be silently unscanned."
+        ]
+      },
+      {
+        "name": "Semgrep pass/fail threshold and fail-closed",
+        "behavior": "Two-part gate on semgrep-kotlin.json. (a) Scanner-error fail-closed: `if [ \"${SEMGREP_EXIT:-2}\" -ge 2 ]` \u2192 `::error::` + exit 1. Semgrep exit 1 means \"findings produced\" (normal); \u22652 means the scanner itself errored. The `:-2` default means a missing/unset SEMGREP_EXIT also fails. (b) Severity threshold: `HIGH = jq '[.results[] | select(.extra.severity == \"ERROR\" or == \"HIGH\" or == \"CRITICAL\")] | length'`. If HIGH > 0, it prints each as `[HIGH] <last dotted segment of check_id> <path>:<start.line> -- <first 160 chars of extra.message>` and exits 1. WARNING findings are counted into `WARN` and printed as non-blocking; INFO is neither counted nor blocking. Mirrors the monorepo's evaluate-sast.py policy.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.github/workflows/security-scan.yml"
+        ],
+        "edge_cases": [
+          "`jq` on a missing/empty semgrep-kotlin.json would make the gate step error out \u2014 also a fail-closed outcome.",
+          "No suppression/baseline file exists for Semgrep; the only escape hatch is a `nosemgrep` comment or an added --exclude."
+        ]
+      },
+      {
+        "name": "Semgrep unparseable-file surfacing (non-blocking)",
+        "behavior": "Semgrep records unparseable files in `.errors[]` WITHOUT bumping its exit code, so silently dropped findings would leave no signal. The gate step computes `PARSE = jq '[.errors[]? | select((.type == \"Syntax error\") or (.type[0]? == \"PartialParsing\"))] | length'` \u2014 matching BOTH schema forms: the string type `\"Syntax error\"` and the array form `[\"PartialParsing\", ...]` that this Semgrep version emits. If PARSE > 0 it emits `::warning::Semgrep could not parse N file(s)` and lists `.path // .location.path // \"?\"` sorted-unique. This is visibility only; PASS/FAIL policy is unchanged (block only on ERROR-severity results plus scanner exit \u2265 2).",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.github/workflows/security-scan.yml"
+        ],
+        "edge_cases": [
+          "A Kotlin file that fails to parse is scanned as zero findings and still passes the gate."
+        ]
+      },
+      {
+        "name": "Semgrep result artifact",
+        "behavior": "`actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a` (v7.0.1), `if: always()`, artifact name `semgrep-kotlin`, path `semgrep-kotlin.json`, `if-no-files-found: warn`, `retention-days: 30`. This artifact plus the run log plus CodeRabbit is the entire finding-surfacing mechanism \u2014 there is no issue-filing pipeline.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.github/workflows/security-scan.yml"
+        ],
+        "edge_cases": [
+          "`if-no-files-found: warn` means a crashed scanner that wrote no JSON still uploads nothing without failing the upload step; the gate step catches it."
+        ]
+      },
+      {
+        "name": "Dependency Scan Gate \u2014 three-job structure",
+        "behavior": "Workflow `Dependency Vulnerability Scan` (dependency-scan.yml). Triggers: push main/develop; pull_request main/develop; `schedule: cron '0 6 * * 1'` (weekly Monday 06:00 UTC, to catch newly disclosed CVEs); workflow_dispatch. Permissions `contents: read` + `pull-requests: read` (for dorny/paths-filter on PR runs). Concurrency `dep-scan-${{ github.ref }}`, cancel-in-progress true. Jobs: `detect-changes` (name \"Detect Dependency Changes\") \u2192 `scan` (name \"OSV-Scanner\") \u2192 `dep-scan-gate` (name \"Dependency Scan Gate\", `needs: [detect-changes, scan]`, `if: always()`). `scan` runs only if `should_scan == 'true'` OR event is schedule OR workflow_dispatch.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.github/workflows/dependency-scan.yml"
+        ],
+        "edge_cases": [
+          "No `timeout-minutes` on any job in this workflow."
+        ]
+      },
+      {
+        "name": "Dependency scan path filter",
+        "behavior": "`dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706` (v4.0.2), filter id `deps`, output wired to `should_scan`. Matched globs: `**/build.gradle.kts`, `gradle/libs.versions.toml`, `**/gradle.lockfile`, `settings-gradle.lockfile`, `osv-scanner.toml`, `.github/workflows/dependency-scan.yml`. Intent: any file that can change the resolved dependency graph \u2014 build scripts, version catalog, a lockfile, the suppression config \u2014 or the workflow itself, re-runs the scan.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.github/workflows/dependency-scan.yml"
+        ],
+        "edge_cases": [
+          "`gradle/**` is NOT in this filter (only `gradle/libs.versions.toml`), unlike android.yml which uses `gradle/**`.",
+          "A newly disclosed CVE against unchanged deps is caught only by the weekly cron or a manual dispatch, not by an unrelated PR."
+        ]
+      },
+      {
+        "name": "OSV-Scanner install and invocation",
+        "behavior": "Installed from source on the runner's preinstalled Go toolchain \u2014 no third-party action to pin: `go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.3.3`, then `$HOME/go/bin` appended to GITHUB_PATH. Run: `osv-scanner scan --lockfile=gradle.lockfile:settings-gradle.lockfile --recursive --no-ignore --config=osv-scanner.toml .`. `--recursive` auto-discovers every gradle.lockfile in the tree. The root `settings-gradle.lockfile` has a non-standard basename so it needs the explicit `gradle.lockfile:` parse-as hint. `--no-ignore` stops --recursive from honoring .gitignore, so a future lockfile-matching ignore rule or a moved module cannot silently drop a lockfile while the gate stays green; the CI checkout contains only committed files (no build/ dirs), so there is no over-scan risk. Threshold: any known vulnerability \u2192 non-zero exit \u2192 gate fails. No severity floor.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.github/workflows/dependency-scan.yml",
+          "android-unofficial/docs/dev/security-testing.md"
+        ],
+        "edge_cases": [
+          "docs/dev/security-testing.md:236-241 local-repro command omits `--no-ignore` \u2014 local reproduction can scan fewer lockfiles than CI."
+        ]
+      },
+      {
+        "name": "Dependency Scan Gate aggregation logic",
+        "behavior": "`dep-scan-gate` reads DETECT_RESULT, SHOULD_SCAN, SCAN_RESULT, EVENT_NAME from `needs.*` into env and decides: (1) `DETECT_RESULT != success` \u2192 exit 1. (2) event is `schedule` or `workflow_dispatch` \u2192 require `SCAN_RESULT == success`, else exit 1 (never skips). (3) push/PR with `SHOULD_SCAN != 'true'` \u2192 print \"No dependency changes -- skipped\", exit 0. (4) `SCAN_RESULT == success` \u2192 exit 0. (5) otherwise (failure OR cancelled) \u2192 exit 1. Values are passed through `env:` rather than interpolated into the shell, which is the template-injection-safe pattern zizmor enforces.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.github/workflows/dependency-scan.yml"
+        ],
+        "edge_cases": [
+          "A skipped `scan` job yields SCAN_RESULT == 'skipped', which branch (3) turns into a pass \u2014 intended.",
+          "On a PR that changes only app code, the dependency gate passes without scanning anything."
+        ]
+      },
+      {
+        "name": "osv-scanner.toml suppression policy",
+        "behavior": "Ships with NO active `[[IgnoredVulns]]` entries. Documented first-scan triage: osv-scanner v2.3.3 across every committed Gradle lockfile (app/, wear-device/, watchface/, plugins/**, tools/medtronic-ble-spike/, settings-gradle.lockfile) reported zero known vulnerabilities across ~1,175 resolved packages. Policy: prefer bumping the dependency or its version-catalog pin; suppress only when there is no upstream fix and the code path is genuinely unreachable. Every entry requires a written `reason`. Documented escape hatch for a CVE fixable only by an AGP bump: `[[IgnoredVulns]] id = \"GHSA-...\"; ignoreUntil = 2026-12-31T00:00:00Z; reason = \"\u2026; tracked in #NNN.\"` \u2014 the `ignoreUntil` forces re-evaluation. Suppressions are reviewed quarterly.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/osv-scanner.toml",
+          "android-unofficial/docs/dev/security-testing.md"
+        ],
+        "edge_cases": [
+          "Because androidx/AGP-managed artifacts are scanned, a CVE fixable only by an AGP bump can turn the gate red before the bump lands."
+        ]
+      },
+      {
+        "name": "Gradle dependency locking (what the dep gate actually reads)",
+        "behavior": "OSV-Scanner does not parse build.gradle.kts or libs.versions.toml; coverage exists only because `allprojects { dependencyLocking { lockAllConfigurations() } }` in build.gradle.kts commits a gradle.lockfile per module. Two configuration families are excluded from locking via `excludedFromLocking(name)` = `name.startsWith(\"_internal-unified-test-platform\") || name.endsWith(\"DependenciesMetadata\")`, applied by `resolutionStrategy.deactivateDependencyLocking()`. Reasons: AGP's bundled instrumented-test host tooling (netty, protobuf) is version-pinned by AGP, never ships in an APK, and can only move via an AGP bump \u2014 locking it would put AGP's internal supply chain on the CVE gate with unfixable findings; `*DependenciesMetadata` are Kotlin compile-metadata views, not real classpaths. Everything else, including other `_agp_internal_*` configurations, stays locked and scanned.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/build.gradle.kts",
+          "android-unofficial/docs/dev/security-testing.md"
+        ],
+        "edge_cases": [
+          "The `:watchface` lockfile is legitimately empty \u2014 resource-only Watch Face Format module with no dependencies.",
+          "Renovate runs in a container without the Android SDK and cannot regenerate Android lockfiles; regen-gradle-lockfiles.yml refreshes them on Renovate Gradle PRs and pushes back. That path is UNPROVEN \u2014 Renovate is not yet configured on this repository."
+        ]
+      },
+      {
+        "name": "resolveAndLockAll task (lockfile completeness check)",
+        "behavior": "Registered per-project in build.gradle.kts. `notCompatibleWithConfigurationCache`. `doFirst` requires `gradle.startParameter.isWriteDependencyLocks` (i.e. must be run with `--write-locks`) or fails with \"<path> must be run with the --write-locks flag\". `doLast` iterates `configurations.filter { it.isCanBeResolved }` and resolves the GRAPH ONLY via `it.incoming.resolutionResult.root` (not artifacts \u2014 artifact-variant selection fails for some AGP configurations outside their task context, e.g. app androidTest compile classpath). On exception: if the configuration is in the excludedFromLocking set, log a warning and skip; otherwise rethrow, because any other resolution failure means an incomplete lockfile. Verification contract: `./gradlew resolveAndLockAll --write-locks` must produce no lockfile diff on an unchanged tree. `./gradlew help` does NOT validate lockfile completeness (it resolves nothing).",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/build.gradle.kts",
+          "android-unofficial/docs/dev/security-testing.md"
+        ],
+        "edge_cases": []
+      },
+      {
+        "name": "Workflow Lint gate \u2014 job shape and pinned-binary installs",
+        "behavior": "Workflow `Workflow Lint` (workflow-lint.yml). Triggers: push main/develop; PR main/develop opened|synchronize|reopened; workflow_dispatch. `contents: read`. Concurrency `workflow-lint-${{ github.ref }}`, cancel-in-progress. Job `workflow-lint` / name `Workflow Lint`, ubuntu-latest, `timeout-minutes: 5`. Both tools are installed as version-pinned release tarballs with SHA-256 verification (`sha256sum -c -`) rather than third-party actions, so the gate has no unpinned dependency of its own. shellcheck v0.10.0, sha256 `6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87`, extracted with `--strip-components=1` into `$RUNNER_TEMP/tools`. actionlint v1.7.7, sha256 `023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757`, same dir. `$RUNNER_TEMP/tools` appended to GITHUB_PATH.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.github/workflows/workflow-lint.yml"
+        ],
+        "edge_cases": [
+          "A tampered or re-cut upstream release tarball fails the sha256sum check and hard-fails the gate."
+        ]
+      },
+      {
+        "name": "actionlint run (guard 1 of 3)",
+        "behavior": "`actionlint -oneline -shellcheck=\"$RUNNER_TEMP/tools/shellcheck\"` with no file args \u2014 actionlint auto-discovers `.github/workflows/`. Catches unknown/undefined contexts and named-values (the \"Unrecognized named-value\" class that broke op-load-signing-secrets), malformed expressions, invalid `needs`/`if`, and \u2014 via the shellcheck integration \u2014 shell bugs inside `run:` blocks. It validates the local composite action's input contract indirectly, through the workflows that call it; it does NOT lint composite action definitions (it parses action.yml as a malformed workflow), which is why guard 3 exists.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.github/workflows/workflow-lint.yml"
+        ],
+        "edge_cases": []
+      },
+      {
+        "name": "SHA-pin guard (guard 2 of 3)",
+        "behavior": "Enforces that every third-party `uses:` pins a full 40-hex commit SHA \u2014 actionlint does not check this, and Renovate/CodeRabbit only advise it. Extraction: `grep -rhE '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]' .github/workflows .github/actions | awk '{for(i=1;i<=NF;i++) if($i==\"uses:\"){print $(i+1); break}}'` \u2014 awk isolates the whitespace-delimited token after `uses:`, robust to a leading `- `, extra spacing, a trailing `# vX` comment, and trailing whitespace. Per ref: strip surrounding single/double quotes; skip empty, `./*` (local actions) and `docker://*`; if there is no `@` \u2192 error \"not pinned (no @<sha>)\"; else `sha=${ref##*@}` must be length 40 and contain only `0-9a-f` (checked via `tr -d '0-9a-f'` yielding empty). Any failure sets failed=1 and the step exits 1 after listing all offenders. Covers `.github/workflows/**` AND `.github/actions/**`.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.github/workflows/workflow-lint.yml"
+        ],
+        "edge_cases": [
+          "A `uses:` written inside a YAML comment would still be extracted (the regex allows leading whitespace and `- ` only, but does not exclude `#`-prefixed lines)."
+        ]
+      },
+      {
+        "name": "Composite-action secrets-context guard (guard 3 of 3)",
+        "behavior": "Composite actions cannot read the `secrets` context; a `${{ secrets.* }}` reference inside one resolves to EMPTY at runtime \u2014 the exact failure that broke op-load-signing-secrets. Implementation: `grep -rnE '\\$\\{\\{[[:space:]]*secrets\\.' .github/actions | grep -vE ':[0-9]+:[[:space:]]*#'` \u2014 the second grep excludes comment lines (which legitimately document what the calling job must set). Any surviving hit emits `::error::Composite action uses the secrets context (inherit via env from the calling job instead): <hit>` and the step exits 1. The prescribed alternative is inheriting the value through the calling job's `env:`.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.github/workflows/workflow-lint.yml",
+          "android-unofficial/.github/actions/op-load-signing-secrets/action.yml"
+        ],
+        "edge_cases": [
+          "Only excludes comments where `#` is the first non-space char after the line number; a trailing inline comment containing secrets.* would still fail."
+        ]
+      },
+      {
+        "name": "Workflow Security gate \u2014 zizmor Medium+ threshold",
+        "behavior": "Workflow `Workflow Security` (workflow-security.yml). Push triggers are paths-filtered to `.github/workflows/**`, `.github/actions/**`, `zizmor.yml`; PR trigger has NO paths filter deliberately, so the required check is always created (a paths-filtered required job stays pending forever and wedges the merge). Concurrency `workflow-security-${{ github.ref }}`. Job name `Workflow Security`, ubuntu-latest, `timeout-minutes: 5`. Setup: checkout persist-credentials false, `actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065` (v5) python 3.12, `pip install zizmor==1.5.2 pyyaml==6.0.2`. Gate: `zizmor --config zizmor.yml --min-severity=medium .github/workflows/ .github/actions/` with `GH_TOKEN: ${{ github.token }}` (read-only, enables online audits such as known-vulnerable-actions against the advisory DB). Any non-allowlisted Medium+ finding \u2192 non-zero exit \u2192 check fails. Informational findings are logged only.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.github/workflows/workflow-security.yml"
+        ],
+        "edge_cases": [
+          "Stated policy: known-safe findings are allowlisted one at a time with a rationale in zizmor.yml \u2014 NEVER by lowering the --min-severity threshold."
+        ]
+      },
+      {
+        "name": "pull_request_target PR-head-checkout guard (zizmor backstop)",
+        "behavior": "Inline python3 heredoc using PyYAML, run before zizmor. Rationale: zizmor attributes `dangerous-triggers` to the trigger itself and emits no distinct finding for a PR-head checkout, so allowlisting the trigger (whole-file OR line-scoped) would also mask the one real regression \u2014 checking out PR-supplied code. Algorithm: glob `.github/workflows/*.yml` + `*.yaml`; `yaml.safe_load`; `trigger_names(doc)` reads `doc.get(\"on\", doc.get(True))` because YAML 1.1 parses a bare `on:` key as boolean True, and normalizes str/list/dict to a set; skip files without `pull_request_target`; for each job's steps where `uses` startswith `actions/checkout`, fail if `with.ref` or `with.repository` is a string containing `github.event.pull_request.head`. Emits `::error file=<path>::` per hit and exits 1. Explicitly NOT airtight \u2014 laundering the head ref through a prior step's output evades it; it is a backstop layered with zizmor and CODEOWNERS review.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.github/workflows/workflow-security.yml"
+        ],
+        "edge_cases": [
+          "Only actions/checkout is inspected; a manual `git fetch` of the PR head in a run: block is not detected.",
+          "Non-dict YAML documents are skipped silently."
+        ]
+      },
+      {
+        "name": "zizmor.yml allowlist contents",
+        "behavior": "Two rules. `dangerous-triggers` \u2014 whole-file ignores for the four pull_request_target workflows: auto-merge-renovate.yml (reads PR file list + labels via API only), renovate-file-scope.yml (PR file list via API only), auto-label.yml (reads PR metadata via API; checks out the BASE ref with persist-credentials false), attribution-check.yml (checks out base ref only; fetches PR commits into a remote-only ref for grep/sed text inspection). Whole-file is intentional because zizmor attributes the finding to the trigger, so line-scoping suppresses identically; the masked regression is covered by the python guard. `artipacked` \u2014 LINE-scoped ignores at `changelog-pr.yml:49`, `sync-main-to-develop.yml:43`, `release.yml:154`: these three checkouts persist a scoped App token because they push (changelog branch / sync branch / fallback version bump) and none uploads the checkout or .git as an artifact. Each entry ignores ONE audit id, so a different unsafe construct in the same file still fails, and a NEW file with these patterns is not covered.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/zizmor.yml"
+        ],
+        "edge_cases": [
+          "The `github-env` finding on op-load-signing-secrets is suppressed INLINE (`run: |  # zizmor: ignore[github-env]`) rather than in zizmor.yml \u2014 documented as the mechanism for composite-action findings, robust across zizmor versions and line shifts.",
+          "zizmor.yml is CODEOWNERS-gated to @jlengelbrecht precisely because an edit can silently widen what the gate ignores."
+        ]
+      },
+      {
+        "name": "Android Gate \u2014 aggregation logic",
+        "behavior": "Workflow `Android` (android.yml). Permissions `contents: read`, `pull-requests: read`. Concurrency `android-${{ github.ref }}`. `detect-changes` (dorny/paths-filter v4.0.2, filter id `android`) \u2192 output `should_build`. `build` (name \"Build & Test\") runs if `should_build == 'true'` or workflow_dispatch: JDK 17 temurin via `actions/setup-java@0f481fcb\u2026` (v5.5.0), `gradle/actions/setup-gradle@3f131e86\u2026` (v6.2.0), then `./gradlew testDebugUnitTest`, `./gradlew lintDebug`, `./gradlew assembleDebug`; uploads `debug-apks` (app + wear-device debug APKs, retention 14 days). `android-gate` (name \"Android Gate\", `if: always()`, `needs: [detect-changes, build]`) mirrors the dep-gate decision tree: detect-changes non-success \u2192 fail; workflow_dispatch \u2192 require build success; `should_build != 'true'` \u2192 pass as skipped; build success \u2192 pass; else fail.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.github/workflows/android.yml"
+        ],
+        "edge_cases": [
+          "`instrumented-tests` is deliberately NOT in `needs` of android-gate.",
+          "No timeout-minutes on the build job."
+        ]
+      },
+      {
+        "name": "Android path filter (includes license documents)",
+        "behavior": "Filter `android` matches: `app/**`, `wear-device/**`, `watchface/**`, `plugins/**`, `gradle/**`, `gradlew`, `gradlew.bat`, `settings.gradle.kts`, `settings-gradle.lockfile`, `build.gradle.kts`, `gradle.properties`, `.github/workflows/android.yml`, plus `README.md`, `LICENSE`, `docs/THIRD_PARTY_LICENSES.md` and `docs/licenses/**`. The document entries are included because they are compiled into the APK as assets and gated by `LicenseAssetsTest` \u2014 editing, emptying, or deleting one must re-run the attribution drift gate. Docs/governance-only PRs (CLAUDE.md, other docs/**) skip the build.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.github/workflows/android.yml"
+        ],
+        "edge_cases": []
+      },
+      {
+        "name": "Instrumented Tests (emulator) job \u2014 non-required by design",
+        "behavior": "Job `instrumented-tests`, name `Instrumented Tests (emulator)`, gated by the same `should_build` filter, `timeout-minutes: 45`, `permissions: contents: read`, `env.API_LEVEL: 35` (matches the app's targetSdk). Steps: Enable KVM (writes `KERNEL==\"kvm\", GROUP=\"kvm\", MODE=\"0666\", OPTIONS+=\"static_node=kvm\"` to /etc/udev/rules.d/99-kvm4all.rules, then `udevadm control --reload-rules` and `udevadm trigger --name-match=kvm`) \u2192 checkout \u2192 JDK 17 \u2192 setup-gradle \u2192 AVD cache restore/create/save \u2192 run tests. Test run uses `reactivecircus/android-emulator-runner@a421e438\u2026` (v2.38.0) with api-level 35, target google_apis, arch x86_64, force-avd-creation false, emulator-options `-no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none`, disable-animations true, script `./gradlew :app:connectedDebugAndroidTest`.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.github/workflows/android.yml",
+          "android-unofficial/docs/dev/instrumented-tests-ci.md"
+        ],
+        "edge_cases": [
+          "Explicitly NOT required and NOT folded into Android Gate while it beds in, so a flaky emulator cannot wedge unrelated PRs. Promotion to required is a branch-protection change once it proves stable.",
+          "No auto-retry: a red result reflects a real test failure or genuine infra problem; the documented response is to re-run the single job, never to disable the test.",
+          "Report uploaded as `instrumented-test-report` (`if: ${{ !cancelled() }}`, retention 14 days, if-no-files-found ignore) from app/build/reports/androidTests/connected/** and app/build/outputs/androidTest-results/connected/**."
+        ]
+      },
+      {
+        "name": "AVD cache state machine",
+        "behavior": "Three states keyed on `avd-v1-${API_LEVEL}-google_apis-x86_64` (paths `~/.android/avd/*`, `~/.android/adb*`). (1) Restore \u2014 `actions/cache/restore@55cc8345\u2026` (v6.1.0), id `avd-cache`. (2) On miss (`cache-hit != 'true'`) \u2014 Create AVD and generate snapshot via android-emulator-runner with force-avd-creation false, emulator-options `-no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none`, disable-animations false, script echoes a message. (3) Save \u2014 `actions/cache/save@55cc8345\u2026` guarded by `cache-hit != 'true' && success()`, so a cancelled or failed generation skips the save and a partial/corrupt snapshot never poisons the cache. Restore+explicit-save (not the combined cache action) exists specifically for that guard. The `-v1` key prefix is the documented one-line manual eviction path if a bad snapshot lands.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.github/workflows/android.yml",
+          "android-unofficial/docs/dev/instrumented-tests-ci.md"
+        ],
+        "edge_cases": []
+      },
+      {
+        "name": "Bootstrap Check (ci.yml) \u2014 App-token plumbing smoke",
+        "behavior": "Workflow `Bootstrap Check`, job `bootstrap-check` / name `App Token Auth + Runner Check`. Triggers push main/develop, PR main/develop (opened|synchronize|reopened), workflow_dispatch. `contents: read`. Mints a short-lived installation token from the org's `glycemicgpt-ci` GitHub App via `actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1` (v3.2.0) using org-level secrets `CI_APP_ID` / `CI_APP_PRIVATE_KEY` (visibility: all, auto-inherited). Both the mint step and the verify step are guarded by `if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true` \u2014 GitHub does not pass org/repo secrets to fork-originated pull_request runs, so the steps would receive empty inputs and crash on the first external contributor's PR. Verify step runs `gh api repos/${{ github.repository }} --jq .name`. A final step just echoes the KVM-runner reminder.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.github/workflows/ci.yml"
+        ],
+        "edge_cases": [
+          "The file's header comment is stale \u2014 it claims to be \"currently the only workflow in the repository\" while 17 others exist."
+        ]
+      },
+      {
+        "name": "Secrets Plumbing Check (1Password canary)",
+        "behavior": "Workflow `Secrets Plumbing Check`, job `canary` / name `Resolve 1Password canary`. `workflow_dispatch` ONLY \u2014 never runs on push/PR and never reads a keystore or password. `contents: read`. Concurrency `secrets-plumbing-${{ github.ref }}`. Job env maps `OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.ANDROID_ACTIONS_SERVICE_ACCOUNT }}` (a read-only 1Password service-account token \u2014 the only signing-related secret stored in GitHub). Installs `1password/install-cli-action@a5215d3a7f75c1629216c465ea9ab3ab399c4b71` (v4.0.0). Under `set -euo pipefail`: empty token \u2192 `::error::` + exit 1; else `op read op://github/android-signing/canary` must succeed and be non-empty \u2192 prints \"1Password plumbing OK\"; failure \u2192 `::error::` + exit 1. The resolved value (\"ok\") is asserted on, never echoed. Dispatchable only once the file reaches the default branch.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.github/workflows/secrets-plumbing-check.yml"
+        ],
+        "edge_cases": []
+      },
+      {
+        "name": "Signing Action Smoke (end-to-end keystore materialization)",
+        "behavior": "Workflow `Signing Action Smoke`, job `smoke` / name `Materialize debug keystore via composite action`. `workflow_dispatch` only; `contents: read`; concurrency `signing-action-smoke-${{ github.ref }}`. Maps `OP_SERVICE_ACCOUNT_TOKEN` at JOB level (the `secrets` context is valid in a workflow file but not inside a composite action) and invokes `./.github/actions/op-load-signing-secrets` with `keystore: debug`. Assertions under `set -euo pipefail`: `DEBUG_KEYSTORE_FILE` must be exported; the action's `keystore-path` output must equal it; the file must exist and be non-empty (`-s`). Only paths are printed \u2014 never a keystore byte, password, or the token. Final step `if: always()` runs `rm -f \"${{ steps.signing.outputs.keystore-path }}\"`. Complements secrets-plumbing-check: that one never touches signing material; this one proves the action both LOADS (passes template validation) and works.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.github/workflows/signing-action-smoke.yml"
+        ],
+        "edge_cases": []
+      },
+      {
+        "name": "op-load-signing-secrets composite action (target of both smoke gates)",
+        "behavior": "Input `keystore` (required, must be \"release\" or \"debug\"; anything else \u2192 `::error::` + exit 1). Preflight also fails if OP_SERVICE_ACCOUNT_TOKEN is unset. Installs 1Password CLI v4.0.0 (SHA a5215d3a\u2026), then `1password/load-secrets-action@3a12b0ab99d9cd590a3e9b5a90ea017210ed9556` (v4.0.1) with export-env true resolving text fields RELEASE_/DEBUG_ KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD from `op://github/android-signing/<NAME>` \u2014 names match app/build.gradle.kts 1:1, no renaming. Materialize step: chooses op ref `release.jks`\u2192`$RUNNER_TEMP/release.jks` (env RELEASE_KEYSTORE_FILE) or `debug.keystore`\u2192`$RUNNER_TEMP/debug.keystore` (DEBUG_KEYSTORE_FILE); `umask 077`, `trap 'rm -f \"$dest\"' ERR`, `rm -f \"$dest\"`, `op read --out-file \"$dest\" --force`, `chmod 600`, writes keystore-path to GITHUB_OUTPUT and the *_KEYSTORE_FILE name to GITHUB_ENV.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.github/actions/op-load-signing-secrets/action.yml"
+        ],
+        "edge_cases": [
+          "`--force` prevents hanging on the overwrite-confirmation prompt on re-runs/self-hosted runners.",
+          "umask+delete-before-create ensures the keystore is never briefly group/world-readable; the ERR trap removes a partially written keystore.",
+          "Composite actions cannot register a post-job step \u2014 on a self-hosted/persistent runner the caller must `rm -f` the keystore itself.",
+          "`run: |  # zizmor: ignore[github-env]` is the inline zizmor suppression, justified because the GITHUB_ENV value is a hardcoded $RUNNER_TEMP path selected by the literal input."
+        ]
+      },
+      {
+        "name": "CodeRabbit review posture and gating strength",
+        "behavior": ".coderabbit.yaml (schema v2). `profile: chill`, `request_changes_workflow: true`, `review_status: true`, `commit_status: true`, **`fail_commit_status: false`** \u2014 CodeRabbit's commit status does NOT block merge. `abort_on_close: true`. auto_review: enabled, auto_incremental_review true, `auto_pause_after_reviewed_commits: 3`, `drafts: false`, base_branches `[develop]`, title keywords that skip review: WIP, DO NOT MERGE, DRAFT, [skip review]; ignored bot authors: glycemicgpt-renovate[bot], glycemicgpt-release[bot], renovate[bot], dependabot[bot], github-actions[bot]. pre_merge_checks: title/description/issue_assessment in `warning` mode; the three custom checks in `error` mode. finishing_touches docstrings and unit_tests disabled. knowledge_base learnings/issues/pull_requests scope `local`; code_guidelines filePatterns CLAUDE.md and docs/dev/plugin-architecture.md.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.coderabbit.yaml"
+        ],
+        "edge_cases": [
+          "Renovate/dependabot/release-bot PRs are NOT reviewed by CodeRabbit \u2014 dependency bumps get no medical-safety or secret review from this layer.",
+          "`fail_commit_status: false` means even `mode: error` custom checks are advisory with respect to GitHub merge blocking; enforcement relies on human review."
+        ]
+      },
+      {
+        "name": "CodeRabbit custom check: \"No Hardcoded Secrets\" (mode error)",
+        "behavior": "Verifies no hardcoded secrets, API keys, tokens, HMAC keys, passwords, keystore material, or credentials appear in the code changes. Explicitly checks for: strings that look like API keys or tokens, base64-encoded secrets, .env values committed directly, and private URLs or internal hostnames. Framed as critical severity because this is a medical/health-tech application.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.coderabbit.yaml"
+        ],
+        "edge_cases": []
+      },
+      {
+        "name": "CodeRabbit custom check: \"Medical Safety Review\" (mode error) \u2014 SAFETY",
+        "behavior": "Applies when a PR touches glucose values, insulin/pump telemetry, or unit conversions. Rules: glucose is STORED and COMPARED in canonical mg/dL; every persisted field, bound, threshold/alert comparison, dedup key, and safety check must stay in mg/dL and be bounds-checked to 20\u2013500 mg/dL. mmol/L is DISPLAY and INPUT only; the single allowed conversion factor is 18.0156 (mg/dL per mmol/L). Hard-FAIL if code (a) stores or compares an mmol/L value as if it were mg/dL (e.g. persisting 3.9 instead of ~70 \u2014 explicitly called out as silently suppressing low alerts), (b) converts the wrong direction, (c) permits a stored mg/dL value outside 20\u2013500 after conversion, or (d) uses any factor other than 18.0156. Also: no auto-bolus or therapeutic device-command code may exist; AI-generated suggestions must carry safety disclaimers. Passes if the PR does not touch medical data handling.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.coderabbit.yaml"
+        ],
+        "edge_cases": [
+          "Explicit non-violations: a user-facing mmol/L display literal (3.9, 10.0, 22.2) and an mmol/L input converted to mg/dL before storage. Only the stored/compared mg/dL value must be in 20\u2013500.",
+          "Test-path instructions name the mmol/L equivalents of the bounds as ~1.1 and ~27.8 mmol/L, again as display literals not bounds violations."
+        ]
+      },
+      {
+        "name": "CodeRabbit custom check: \"BLE Protocol Safety\" (mode error) \u2014 SAFETY",
+        "behavior": "Applies when a PR modifies BLE communication code. Verifies: GATT operations have timeouts and are serialized (one at a time); connection state transitions are handled; byte parsing uses correct endianness (Little Endian for the Tandem protocol); no raw pump data, pump serials, or auth material is logged at INFO level. Passes if the PR does not touch BLE code. The richer `plugins/shipped/**/ble/**` path_instructions add: the connection state machine must handle unexpected disconnect, bond loss, and GATT 133 errors; event type IDs must match the protocol spec; multi-packet characteristic streaming must handle reassembly with the documented idle timeout; DEBUG-level logging only.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.coderabbit.yaml"
+        ],
+        "edge_cases": [
+          "The `plugins/shipped/**/ble/**` path rules do NOT cover BLE spikes under tools/ (e.g. tools/medtronic-ble-spike); docs state the semantic BLE Protocol Safety custom check is nonetheless expected to apply there."
+        ]
+      },
+      {
+        "name": "CodeRabbit path_instructions and scope filters",
+        "behavior": "path_instructions cover: `{app,wear-device,watchface}/**/*.kt` (Compose state hoisting/remember/derivedStateOf/testTag, Hilt annotations, Room DAO/migration/type-converters, EncryptedSharedPreferences for tokens, SQLCipher for the DB, no sensitive data in logs, plus the mg/dL 20\u2013500 + 18.0156 medical rules); `plugins/pump-driver-api/**/*.kt` (interface stability, no :app or plugin imports \u2014 stdlib/AndroidX/kotlinx only, `PLUGIN_API_VERSION` must be incremented in PluginMetadata.kt on interface change, SafetyLimits KDoc, PluginCapabilityInterface marker, read-only posture: no therapeutic write primitive); `plugins/shipped/{tandem,medtronic}/**/*.kt` (thin delegating capability wrappers, no :app imports, always forward SafetyLimits \u2014 never `SafetyLimits()` default, lifecycle onActivated\u2192auto-reconnect / onDeactivated\u2192disconnect / shutdown\u2192full release, apiVersion must match PLUGIN_API_VERSION, monitoring-only); test paths; and `.github/workflows/**` (no hardcoded secrets, SHA-pinned actions, least privilege, no command injection \u2014 route untrusted values through env:).",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.coderabbit.yaml"
+        ],
+        "edge_cases": [
+          "path_filters exclude images (png/jpg/jpeg/gif/svg/ico/webp), `**/build/**`, `**/.gradle/**`, `**/.android/**`, `**/gradle.lockfile`, `settings-gradle.lockfile`, `**/_bmad-output/**` \u2014 lockfile changes are NOT reviewed by CodeRabbit (OSV-Scanner covers them)."
+        ]
+      },
+      {
+        "name": "CodeRabbit tool matrix",
+        "behavior": "Enabled: detekt, actionlint, shellcheck, yamllint, markdownlint, gitleaks, semgrep, osvScanner, checkov. Explicitly disabled: ruff, eslint, pylint, hadolint (no Python/JS/Docker in this repo). `gitleaks` here is one of the three secret-scanning layers and the stated reason a dedicated in-repo secret-scanning gate was not added. chat: art false, auto_reply true. knowledge_base.web_search enabled, opt_out false. code_generation: KDoc with @param/@return/@throws; generated tests use JUnit 4 + MockK with coroutine test dispatchers.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.coderabbit.yaml"
+        ],
+        "edge_cases": []
+      },
+      {
+        "name": "GitGuardian / external secret scanning",
+        "behavior": "GitGuardian is described in docs/dev/security-testing.md as running ORG-WIDE at push time as a separate secret scanner \u2014 there is no GitGuardian workflow, action, or config in this repository. It appears in-repo only as an allowed bot in attribution-check.yml's `ALLOWED_BOTS` regex (`gitguardian[bot]`). CONTRIBUTING.md:274 states there is no DAST or GitGuardian secret-scanning check defined in this repo's own CI, and that GitGuardian-equivalent coverage is EXPECTED to come from GitHub platform-level Secret Scanning + Push Protection once the repository exists under the GlycemicGPT organization \u2014 i.e. it is an assumed-but-unverified external control today.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/docs/dev/security-testing.md",
+          "android-unofficial/CONTRIBUTING.md",
+          "android-unofficial/.github/workflows/attribution-check.yml"
+        ],
+        "edge_cases": [
+          "Three-layer secret coverage on paper (Semgrep p/secrets in-repo, CodeRabbit gitleaks, org-wide GitGuardian) but only the first is enforced by this repo's own CI, and CodeRabbit's commit status is non-failing."
+        ]
+      },
+      {
+        "name": "DECISION: no dedicated secret-scanning gate",
+        "behavior": "Deliberately NOT added. Stated reason: the Security Scan Gate already runs Semgrep's `p/secrets` ruleset over app/, wear-device/, watchface/, plugins/; `gitleaks` runs on every PR through CodeRabbit; and GitGuardian runs org-wide at push time. A third pass over the same tree would add maintenance and noise without new coverage. The `p/secrets` lane is kept because it is free within the existing SAST run and gives an in-repo, PR-blocking signal independent of the external services. No revisit trigger is documented for this decision.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/docs/dev/security-testing.md"
+        ],
+        "edge_cases": []
+      },
+      {
+        "name": "DECISION: MobSF / APK-artifact SAST declined \u2014 with revisit trigger",
+        "behavior": "Evaluated and deliberately declined. Acknowledged as NOT redundant with Semgrep: MobSF operates on the built artifact and covers AndroidManifest.xml posture (exported components, over-broad permissions, debuggable, allowBackup, usesCleartextTraffic, weak network_security_config), packaging/build config (signing scheme, minSdk exposure, insecure library bundling), and secrets embedded in the PACKAGED APK (resources, strings.xml, assets, native libs) that never appear in the source tree. Declined because: monitoring-only read-only app distributed by GitHub side-load rather than Play Store (no pre-launch security report, no store-review threat model); MobSF manifest/permission heuristics are high-false-positive on an app that legitimately needs BLE, location for BLE scanning, and foreground-service permissions; running it means building and scanning an APK on every PR plus maintaining a suppression baseline.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/docs/dev/security-testing.md"
+        ],
+        "edge_cases": [
+          "REVISIT TRIGGER (verbatim intent): add an APK/manifest SAST gate if the app is ever distributed via the Play Store, OR if ANY write/therapeutic surface (bolus, basal, pump-setting, or other device-command capability) is introduced.",
+          "Accepted residual gap, stated explicitly: secrets embedded only in the built artifact (not in source) are NOT scanned today.",
+          "Compensating controls named: Android Lint in the Android Gate covers manifest/network-security posture defensively, plus CodeRabbit review; source-level secrets covered by Semgrep p/secrets + gitleaks + GitGuardian; no signing material is committed."
+        ]
+      },
+      {
+        "name": "DECISION: monorepo security lanes not ported",
+        "behavior": "Of the platform monorepo's multi-language security CI, only Android SAST (Semgrep), dependency CVE scanning (OSV over Gradle lockfiles), and secret scanning apply here; workflow hardening (Workflow Lint / Workflow Security) is treated as a separate concern. Not ported because they target a running server/API/web app that does not exist and would be perpetually red: Semgrep Python/TypeScript (no backend/web code); DAST / ZAP / nuclei / the Docker test stack from security-full-suite.yml (no HTTP service; BLE protocol fuzzing needs pump hardware and is out of CI scope); auth pentests (test-auth-flows.py) and API fuzzing (fuzz-api.py, self-adapting via /openapi.json) \u2014 marked N/A, no authenticated server or HTTP API surface; evaluate-sast.py + create-finding-issues.py \u2014 the issue-filing pipeline depends on the org SECURITY GitHub App and a scripts/security/ Python toolchain this mobile-only repo does not carry, replaced by the plain exit-non-zero-on-HIGH check.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/docs/dev/security-testing.md",
+          "android-unofficial/.github/workflows/security-scan.yml"
+        ],
+        "edge_cases": [
+          "Findings surface only via the run log, the semgrep-kotlin artifact, and CodeRabbit \u2014 no auto-filed issues, no tracking, no SLA."
+        ]
+      },
+      {
+        "name": "Local reproduction of each gate",
+        "behavior": "SAST: `pip install semgrep==1.169.0` then `semgrep scan --config p/kotlin --config p/java --config p/secrets --exclude 'AesEcb.java' --exclude '.gradle' app/ wear-device/ watchface/ plugins/`. Documented caveat: this reproduces the scan only \u2014 CI additionally captures JSON, fails on ERROR/HIGH via jq, and fails closed on Semgrep exit \u2265 2. Dependency: `go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.3.3` then `osv-scanner scan --lockfile=gradle.lockfile:settings-gradle.lockfile --recursive --config=osv-scanner.toml .`. Workflow Lint: `actionlint -shellcheck=shellcheck`; documented caveat that the local command does NOT check the SHA-pin guard or the composite-action secrets guard. Lockfile completeness: `./gradlew resolveAndLockAll --write-locks` (must yield no diff). CodeRabbit pre-review: `curl -fsSL https://cli.coderabbit.ai/install.sh | sh`, `coderabbit auth login`, `coderabbit review --plain --type uncommitted`.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/docs/dev/security-testing.md",
+          "android-unofficial/CONTRIBUTING.md"
+        ],
+        "edge_cases": [
+          "No documented local reproduction for the Workflow Security (zizmor) gate; the equivalent is `pip install zizmor==1.5.2 pyyaml==6.0.2` + the same CLI invocation.",
+          "Local SAST repro omits `tools/`; local dep-scan repro omits `--no-ignore`."
+        ]
+      },
+      {
+        "name": "Local instrumented-test reproduction",
+        "behavior": "`connectedDebugAndroidTest` attaches to an already-running device \u2014 it does not boot one. Sequence: `./scripts/mobile-dev.sh emulator start`; recommended animation disable via `adb shell settings put global window_animation_scale 0`, `transition_animation_scale 0`, `animator_duration_scale 0`; then `./gradlew :app:connectedDebugAndroidTest`. Single class: `./gradlew :app:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.glycemicgpt.mobile.presentation.meal.MealFullFlowE2ETest`. Local Android SDK/emulator/system images are provisioned by shell.nix. HTML report at `app/build/reports/androidTests/connected/debug/index.html`.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/docs/dev/instrumented-tests-ci.md",
+          "android-unofficial/scripts/mobile-dev.sh"
+        ],
+        "edge_cases": []
+      },
+      {
+        "name": "Fork-PR behavior of the security gates",
+        "behavior": "security-scan.yml, workflow-lint.yml, workflow-security.yml, android.yml and dependency-scan.yml all use plain `pull_request`, so they run on fork PRs with a read-only token and no secrets \u2014 none of them needs a secret. ci.yml's App-token steps are explicitly skipped for fork PRs (`github.event.pull_request.head.repo.fork != true`) because GitHub withholds org/repo secrets from fork pull_request runs. Workflows that need write access (attribution-check, auto-label, renovate-file-scope, auto-merge-renovate) use `pull_request_target` in base-repo context and are individually allowlisted in zizmor.yml; none checks out PR head code. CONTRIBUTING.md states every required check runs automatically for fork PRs with no maintainer action needed. The two 1Password workflows are workflow_dispatch-only and therefore never fork-reachable.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/CONTRIBUTING.md",
+          "android-unofficial/.github/workflows/ci.yml",
+          "android-unofficial/zizmor.yml"
+        ],
+        "edge_cases": [
+          "CodeRabbit has its own review queue; stale state on a fast-pushing PR is not a CI failure. `@coderabbitai review` re-triggers."
+        ]
+      },
+      {
+        "name": "CODEOWNERS as a security control",
+        "behavior": "`/.github/workflows/` \u2192 @jlengelbrecht (project-lead review required on every workflow change, because workflow files run with secret access and, for bypass-actor bots, write access to protected branches). `/zizmor.yml` \u2192 @jlengelbrecht, explicitly because a careless edit can \"silently widen what the Workflow Security gate ignores\". Also lead-owned: SECURITY.md, .github/dco.yml, CODEOWNERS, GOVERNANCE.md, CONTRIBUTING.md, release.yml, renovate.json5, release-please config/manifest, changelog-pr-config.json, autolabeler-config.json, gradle/libs.versions.toml, and the safety-critical driver paths /plugins/pump-driver-api/, /plugins/shipped/tandem/, /plugins/shipped/medtronic/. Default owner `*` is also @jlengelbrecht. Bypass actors (glycemicgpt-merge, release-please, sync) skip the approval requirement but required status checks still gate the merge.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.github/CODEOWNERS"
+        ],
+        "edge_cases": [
+          "CODEOWNERS review is the third layer the pull_request_target guard explicitly relies on (\"layered with zizmor and the CODEOWNERS review required on every workflow change, not the sole control\")."
+        ]
+      },
+      {
+        "name": "Pinned-version inventory (whole subsystem)",
+        "behavior": "Tools: semgrep 1.169.0 (pip); osv-scanner v2.3.3 (go install); zizmor 1.5.2 + pyyaml 6.0.2 (pip); actionlint 1.7.7 (tarball, sha256 023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757); shellcheck 0.10.0 (tarball, sha256 6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87); Python 3.12; JDK 17 temurin; emulator API level 35 / google_apis / x86_64. Action SHAs: actions/checkout 9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 (v7.0.0); actions/upload-artifact 043fb46d1a93c77aae656e7c1c64a875d1fc6a0a (v7.0.1); actions/cache/restore+save 55cc8345863c7cc4c66a329aec7e433d2d1c52a9 (v6.1.0); actions/setup-python a26af69be951a213d495a4c3e4e4022e16d87065 (v5); actions/setup-java 0f481fcb613427c0f801b606911222b5b6f3083a (v5.5.0); actions/create-github-app-token bcd2ba49218906704ab6c1aa796996da409d3eb1 (v3.2.0); dorny/paths-filter 7b450fff21473bca461d4b92ce414b9d0420d706 (v4.0.2); gradle/actions/setup-gradle 3f131e8634966bd73d06cc69884922b02e6faf92 (v6.2.0); reactivecircus/android-emulator-runner a421e43855164a8197daf9d8d40fe71c6996bb0d (v2.38.0); 1password/install-cli-action a5215d3a7f75c1629216c465ea9ab3ab399c4b71 (v4.0.0); 1password/load-secrets-action 3a12b0ab99d9cd590a3e9b5a90ea017210ed9556 (v4.0.1).",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.github/workflows/security-scan.yml",
+          "android-unofficial/.github/workflows/dependency-scan.yml",
+          "android-unofficial/.github/workflows/workflow-lint.yml",
+          "android-unofficial/.github/workflows/workflow-security.yml",
+          "android-unofficial/.github/workflows/android.yml",
+          "android-unofficial/renovate.json5"
+        ],
+        "edge_cases": [
+          "Renovate manages only `github-actions` manager pins (all update types incl. digest/pinDigest are MANUAL, labels dependencies/needs-review/ci-actions; actions/* grouped \"GitHub Actions\", gradle|dorny|reactivecircus|googleapis|renovatebot grouped \"Third-party CI actions\").",
+          "The pip/go/tarball tool pins (semgrep, zizmor, osv-scanner, actionlint, shellcheck) are NOT under any Renovate manager \u2014 they are hand-maintained and will silently rot."
+        ]
+      },
+      {
+        "name": "Mobile security measures verification matrix",
+        "behavior": "docs/dev/security-testing.md maps each control to its verifier: SQLCipher database encryption \u2192 unit tests + CodeRabbit review; EncryptedSharedPreferences for tokens \u2192 unit tests + CodeRabbit review; HTTPS enforcement (network_security_config) \u2192 Android Lint + CodeRabbit review; no sensitive data in logs \u2192 CodeRabbit BLE Protocol Safety check; dependency vulnerabilities \u2192 OSV-Scanner recursive Gradle scan; hardcoded secrets \u2192 Semgrep p/secrets + CodeRabbit gitleaks + org-wide GitGuardian; insecure code patterns \u2192 Semgrep SAST (p/kotlin, p/java, p/secrets); medical safety / conversion correctness \u2192 CodeRabbit Medical Safety Review check. Explicit statement: no DAST scanning for mobile \u2014 BLE protocol fuzzing would require hardware and is out of CI scope.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/docs/dev/security-testing.md"
+        ],
+        "edge_cases": [
+          "Two of the eight rows (\"no sensitive data in logs\", \"medical safety / conversion correctness\") have CodeRabbit as their ONLY verifier \u2014 and CodeRabbit's commit status is configured non-failing."
+        ]
+      },
+      {
+        "name": "Adding security coverage for a new plugin",
+        "behavior": "Auto-covered: Android Gate (plugins/** is in the detect-changes filter, so build/test/lint runs); SAST (Kotlin/Java plugin code is inside the Semgrep scan roots); dependency scan (a new module's gradle.lockfile is picked up by the recursive sweep once the module joins the build \u2014 lockfiles must be regenerated after adding dependencies). Only manual action required: if a plugin introduces a new auth or pairing flow, add coverage in that plugin's own test suite \u2014 there is no shared auth-flow test harness in this repo (unlike the backend API).",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/docs/dev/security-testing.md"
+        ],
+        "edge_cases": []
+      }
+    ],
+    "safety_critical": [
+      "Glucose bounds are encoded ONLY as CI review policy, not as executable CI checks: canonical storage/comparison unit mg/dL, valid range 20\u2013500 mg/dL, single allowed conversion factor 18.0156 mg/dL per mmol/L. Enforced by the CodeRabbit \"Medical Safety Review\" custom check (.coderabbit.yaml:210-234) and the {app,wear-device,watchface}/**/*.kt path_instructions. No Semgrep rule, unit test, or gradle check in this subsystem enforces them.",
+      "Named failure mode with patient impact, verbatim from .coderabbit.yaml: persisting an mmol/L value as if it were mg/dL (e.g. storing 3.9 instead of ~70) SILENTLY SUPPRESSES LOW ALERTS. Also hard-fail: converting the wrong direction, permitting a stored mg/dL value outside 20\u2013500 after conversion, or using any factor other than 18.0156.",
+      "Explicit non-violations that must not be 'fixed': user-facing mmol/L display literals (3.9, 10.0, 22.2; test-path doc names ~1.1 and ~27.8 mmol/L as the display equivalents of the 20/500 bounds), and mmol/L input converted to mg/dL before storage.",
+      "Monitoring-only, read-only posture is a safety and legal boundary enforced by review only: no auto-bolus, no bolus/basal/pump-setting write, no therapeutic device command may exist on any capability interface (SECURITY.md, .coderabbit.yaml pump-driver-api and shipped-driver path_instructions). SECURITY.md states a report proposing to add write capability will be declined.",
+      "Introducing ANY write/therapeutic surface is a documented revisit trigger for adding APK/manifest SAST (docs/dev/security-testing.md:107-110) \u2014 i.e. the current security-gate design is calibrated to the read-only threat model and must be re-derived if that changes.",
+      "BLE protocol correctness is gated only by the CodeRabbit \"BLE Protocol Safety\" check: GATT ops serialized and timed out; connection state machine handles unexpected disconnect, bond loss, GATT 133; Little Endian for the Tandem protocol; event type IDs match the protocol spec; multi-packet reassembly honors the documented idle timeout. No CI tool verifies any of this.",
+      "Never log raw pump data, pump serials, or auth material at INFO level (DEBUG only). Verified solely by CodeRabbit review per the security-testing.md matrix.",
+      "SafetyLimits must always be forwarded to the underlying BLE driver/parser; `SafetyLimits()` defaults are forbidden in shipped drivers. Review-only enforcement.",
+      "CodeRabbit `fail_commit_status: false` means the three `mode: error` custom checks \u2014 including Medical Safety Review and BLE Protocol Safety \u2014 do NOT block a merge via GitHub status. The only hard-blocking safety control is human CODEOWNERS review on /plugins/pump-driver-api/, /plugins/shipped/tandem/, /plugins/shipped/medtronic/.",
+      "CodeRabbit skips PRs authored by renovate/dependabot/release/github-actions bots, so dependency-bump PRs receive no medical-safety or BLE review from that layer.",
+      "Dependency Scan Gate PASSES without scanning on any PR that does not touch a dependency-relevant path; a newly disclosed CVE in an unchanged dependency is caught only by the Monday 06:00 UTC cron or a manual dispatch.",
+      "Instrumented Tests (emulator) \u2014 which executes the Room migration test and Compose/espresso UI tests \u2014 is deliberately NOT a required check, so a PR can merge with those tests red.",
+      "Semgrep p/kotlin/p/java/p/secrets rule packs are fetched from the registry at scan time even though the CLI is pinned to 1.169.0: the effective SAST policy is not reproducible from the repo alone.",
+      "Semgrep records unparseable files in .errors[] without changing its exit code; a Kotlin file that fails to parse yields zero findings and still passes the gate (surfaced as a ::warning:: only).",
+      "Accepted residual gap, stated in docs: secrets embedded only in the BUILT ARTIFACT (APK resources, strings.xml, assets, native libs) are not scanned today by anything."
+    ],
+    "external_dependencies": [
+      "Semgrep CLI 1.169.0 (pip) + registry-hosted rule packs p/kotlin, p/java, p/secrets (fetched at scan time, NOT pinned)",
+      "Google OSV-Scanner v2.3.3 (go install github.com/google/osv-scanner/v2/cmd/osv-scanner) + the OSV advisory database",
+      "zizmor 1.5.2 (pip) + PyYAML 6.0.2; zizmor online audits query the GitHub advisory DB using github.token",
+      "actionlint 1.7.7 (GitHub release tarball, sha256-verified)",
+      "shellcheck 0.10.0 (GitHub release tarball, sha256-verified)",
+      "Python 3.12 via actions/setup-python; runner-preinstalled Go toolchain; JDK 17 temurin via actions/setup-java; Gradle via gradle/actions/setup-gradle",
+      "CodeRabbit SaaS (.coderabbit.yaml, schema v2) running detekt, actionlint, shellcheck, yamllint, markdownlint, gitleaks, semgrep, osvScanner, checkov; optional local CLI from cli.coderabbit.ai",
+      "GitGuardian \u2014 org-wide push-time secret scanner, no in-repo config; expected to be replaced/backed by GitHub platform Secret Scanning + Push Protection",
+      "1Password: CLI (1password/install-cli-action v4.0.0), load-secrets-action v4.0.1, vault `github`, item `android-signing`",
+      "GitHub App `glycemicgpt-ci` (org secrets CI_APP_ID / CI_APP_PRIVATE_KEY) via actions/create-github-app-token v3.2.0",
+      "reactivecircus/android-emulator-runner v2.38.0 + Android SDK google_apis x86_64 system image, API 35",
+      "dorny/paths-filter v4.0.2; actions/checkout v7.0.0; actions/upload-artifact v7.0.1; actions/cache restore+save v6.1.0",
+      "Renovate (github-actions manager only; not yet configured on this repository) and regen-gradle-lockfiles.yml for Gradle lockfile regeneration (path UNPROVEN)",
+      "jq and curl on the ubuntu-latest runner image; /dev/kvm on the runner for the emulator lane"
+    ],
+    "permissions_and_platform_apis": [
+      "Workflow-level `permissions: contents: read` on security-scan.yml, workflow-lint.yml, workflow-security.yml, ci.yml, secrets-plumbing-check.yml, signing-action-smoke.yml",
+      "dependency-scan.yml and android.yml add `pull-requests: read` for dorny/paths-filter on pull_request runs",
+      "workflow-security.yml passes `GH_TOKEN: ${{ github.token }}` (contents: read scope only) to zizmor for its online audits",
+      "attribution-check.yml (pull_request_target) escalates to `pull-requests: write` at the job level to post the sticky comment and auto-close on CRITICAL; workflow-level default is contents: read",
+      "`persist-credentials: false` on every checkout in the security/lint gates; the three token-persisting checkouts that push (changelog-pr.yml:49, sync-main-to-develop.yml:43, release.yml:154) are line-scoped allowlisted for zizmor's `artipacked` audit",
+      "Secrets consumed: `ANDROID_ACTIONS_SERVICE_ACCOUNT` (read-only 1Password service-account token \u2014 the only signing-related secret stored in GitHub, mapped to OP_SERVICE_ACCOUNT_TOKEN at JOB level, never inside the composite action); org-level `CI_APP_ID` / `CI_APP_PRIVATE_KEY` (visibility: all, auto-inherited)",
+      "Fork-PR secret withholding is handled explicitly in ci.yml via `if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true`",
+      "Runner privilege: the instrumented-test lane uses `sudo tee /etc/udev/rules.d/99-kvm4all.rules` + udevadm to expose /dev/kvm (MODE 0666) to the runner user",
+      "Filesystem: materialized keystores live at $RUNNER_TEMP/{release.jks,debug.keystore} created under umask 077 and chmod 600, removed by the caller with `if: always()`",
+      "Branch protection: \"Protect develop\" ruleset requires the five named checks; bypass actors (glycemicgpt-merge, glycemicgpt-release, sync workflow) skip CODEOWNERS approval but not required status checks"
+    ],
+    "notes": "SCOPE/BUDGET: all files in scope were read in full (security-scan.yml, dependency-scan.yml, workflow-lint.yml, workflow-security.yml, android.yml, ci.yml, secrets-plumbing-check.yml, signing-action-smoke.yml, .coderabbit.yaml, osv-scanner.toml, zizmor.yml, docs/dev/security-testing.md, docs/dev/instrumented-tests-ci.md), plus the supporting files their behavior depends on (.github/actions/op-load-signing-secrets/action.yml, .github/CODEOWNERS, build.gradle.kts dependency-locking block, CONTRIBUTING.md required-checks + fork-PR sections, SECURITY.md, renovate.json5 action-pin rules, attribution-check.yml header). Coverage is uniform; nothing was truncated for budget.\n\nDOC DRIFT found (report as-is, do not \"fix\" during a port):\n1. CONTRIBUTING.md:265-274 lists only 5 required checks, describes \"Workflow Lint\" as \"zizmor static analysis of changed GitHub Actions workflows (advisory while it beds in)\" \u2014 wrong tool (actionlint), wrong posture (it is a hard-failing required check), and conflates it with the separate \"Workflow Security\" gate which is where zizmor actually runs. docs/dev/security-testing.md:22-34 is the accurate table.\n2. CONTRIBUTING.md says the Security Scan Gate runs \"Semgrep SAST on changed Kotlin code\" / \"directly against the diff\". It does not \u2014 it scans whole directory roots on every PR with no diff awareness and no detect-changes fan-out.\n3. docs/dev/security-testing.md:222-228 local SAST repro omits `tools/` from the scan targets, which CI includes.\n4. docs/dev/security-testing.md:236-241 local dep-scan repro omits `--no-ignore`, which CI uses.\n5. ci.yml's header comment claims it is \"currently the only workflow in the repository\"; 17 others exist.\n6. No documented local reproduction exists for the Workflow Security (zizmor) gate.\n\nSTRUCTURAL OBSERVATIONS a rebuild must preserve:\n- The \"always report\" pattern is load-bearing: a required check that is paths-filtered at the workflow level never gets created and leaves the PR pending forever. Two workflows solve this differently \u2014 security-scan/workflow-security run unconditionally on every PR; android/dependency-scan use an `if: always()` aggregation job that reads `needs.*.result` through `env:` and treats \"skipped because nothing relevant changed\" as a pass.\n- Fail-closed is implemented in exactly two places: the Semgrep `SEMGREP_EXIT >= 2` check (with `:-2` default so an unset value also fails) and the aggregation jobs' non-success branches.\n- The Workflow Lint / Workflow Security split is deliberate: syntax+shell vs security posture. Three guards exist because actionlint cannot lint composite-action definitions and does not check SHA pinning, and zizmor cannot distinguish a safe pull_request_target from a PR-head checkout.\n- Suppression discipline is a stated invariant across all three config files: never lower a threshold, always allowlist one finding at a time with a written reason (zizmor.yml whole-file vs line-scoped choice is itself justified per entry; osv-scanner.toml requires a `reason` and prefers an `ignoreUntil`; Semgrep has no baseline mechanism at all).\n- osv-scanner.toml currently has ZERO active suppressions and zizmor.yml has 7 (4 dangerous-triggers whole-file, 3 artipacked line-scoped) plus 1 inline `# zizmor: ignore[github-env]` in the composite action."
+  },
+  "port": {
+    "subsystem": "CI security gates \u2014 GitHub Actions security/lint/dependency gates, CodeRabbit pre-merge checks, external secret scanning, signing-secret smoke gates, and the documented not-doing decisions \u2014 ported to a Swift/iOS + watchOS repo distributed as source under the Loop/xDrip4iOS fork-and-build model.",
+    "ports_cleanly": [
+      {
+        "capability": "Required status check roster + \"Protect develop\" ruleset",
+        "ios_approach": "Identical GitHub mechanism. Five required checks on `develop`, matched by job `name:` not workflow `name:`: `Static Analysis Gate`, `Dependency Scan Gate`, `Workflow Lint`, `Workflow Security`, `iOS Gate`. Non-required self-reporting jobs: `Detect Dependency Changes`, `OSV-Scanner`, `Detect iOS-Relevant Changes`, `Build & Test`, `UI Tests (Simulator)`, `App Token Auth Check`, `Attribution Check`. No `continue-on-error` on any required gate. Nothing platform-specific \u2014 this is branch-protection configuration."
+      },
+      {
+        "capability": "The \"always report\" pattern (paths-filtered required jobs wedge merges)",
+        "ios_approach": "Preserve verbatim, both variants. `Static Analysis Gate`, `Workflow Lint`, `Workflow Security` run unconditionally on every PR with no paths filter. `iOS Gate` and `Dependency Scan Gate` are `if: always()` aggregation jobs over `needs.*`. This is a GitHub Checks-API behavior, not an Android behavior; it is the single most load-bearing structural rule to carry over and the reason workflow-security.yml deliberately has no PR paths filter."
+      },
+      {
+        "capability": "Aggregation-gate decision tree and fail-closed semantics",
+        "ios_approach": "Copy the five-branch tree unchanged: detect-changes non-success \u2192 fail; `schedule`/`workflow_dispatch` \u2192 require scan success; push/PR with `should_scan != 'true'` \u2192 pass as skipped; scan success \u2192 pass; failure or cancelled \u2192 fail. Keep passing `needs.*.result` through `env:` rather than shell interpolation (the template-injection-safe pattern zizmor enforces). `skipped` continues to mean pass."
+      },
+      {
+        "capability": "Workflow Lint gate \u2014 actionlint + shellcheck via SHA-256-verified pinned tarballs",
+        "ios_approach": "Ports 1:1; it operates on `.github/**`, not on app source. Keep actionlint 1.7.7 / shellcheck 0.10.0 installed as release tarballs with `sha256sum -c -` into `$RUNNER_TEMP/tools`, `actionlint -oneline -shellcheck=...`, `timeout-minutes: 5`, ubuntu-latest (do not move this gate to a macOS runner). The gate keeps having no unpinned dependency of its own."
+      },
+      {
+        "capability": "SHA-pin guard (guard 2 of 3)",
+        "ios_approach": "Ports verbatim over `.github/workflows/**` and `.github/actions/**`: grep+awk extraction of the token after `uses:`, quote-stripping, skip `./*` and `docker://*`, require a 40-hex SHA. Materially MORE important on iOS: the fork-and-build model means every user runs these workflows under their own Apple signing credentials, so an unpinned action is a compromise of N users' signing identities rather than one project keystore. Extend coverage to any reusable workflow files shipped for forks."
+      },
+      {
+        "capability": "Composite-action secrets-context guard (guard 3 of 3)",
+        "ios_approach": "Ports verbatim. `${{ secrets.* }}` inside a composite action still resolves to empty \u2014 a GitHub Actions rule, unchanged by platform. Keep the `grep -rnE` over `.github/actions` with the comment-line exclusion. Still needed because actionlint still cannot lint composite action definitions. The iOS signing composite action (keychain import) has exactly the same constraint the Android 1Password one had."
+      },
+      {
+        "capability": "Workflow Security gate \u2014 zizmor Medium+ with GH_TOKEN online audits",
+        "ios_approach": "Ports 1:1, ubuntu-latest, `timeout-minutes: 5`, zizmor 1.5.2 + pyyaml 6.0.2 pinned, `--min-severity=medium` over `.github/workflows/ .github/actions/`, `GH_TOKEN: ${{ github.token }}` at contents:read for known-vulnerable-actions. Keep the stated invariant: allowlist one finding at a time in zizmor.yml with a rationale, never lower the threshold."
+      },
+      {
+        "capability": "pull_request_target PR-head-checkout guard (PyYAML backstop)",
+        "ios_approach": "Ports verbatim, including the `doc.get(\"on\", doc.get(True))` YAML-1.1 boolean-key handling and the `github.event.pull_request.head` substring test on `with.ref`/`with.repository`. Still a backstop, still not airtight (laundering the head ref through a step output evades it), still layered with zizmor + CODEOWNERS. Same known blind spot: a manual `git fetch` of PR head in a `run:` block is not detected."
+      },
+      {
+        "capability": "zizmor.yml allowlist structure and suppression discipline",
+        "ios_approach": "Same file, same rules. Whole-file ignores for `dangerous-triggers` on the pull_request_target workflows that read PR metadata via API only; line-scoped `artipacked` ignores for the three checkouts that persist a token because they push. One audit id per entry so a different unsafe construct in the same file still fails. Inline `# zizmor: ignore[<audit>]` remains the mechanism for composite-action findings. Keep zizmor.yml CODEOWNERS-gated."
+      },
+      {
+        "capability": "CODEOWNERS as a security control",
+        "ios_approach": "Ports directly with iOS paths. Lead-owned: `/.github/workflows/`, `/zizmor.yml`, SECURITY.md, CONTRIBUTING.md, GOVERNANCE.md, CODEOWNERS, release config, `.github/dco.yml`. Safety-critical driver paths remap to `/Sources/PumpDriverAPI/`, `/Sources/Drivers/Tandem/`, `/Sources/Drivers/Medtronic/`. ADD to the lead-owned set (no Android analogue): `Package.swift`, `Package.resolved`, `*.xcodeproj/project.pbxproj`, `*.xcconfig`, `*.entitlements`, `Info.plist`, `ci_scripts/`, and the fork-build workflow \u2014 each is arbitrary-code or trust-boundary configuration."
+      },
+      {
+        "capability": "Fork-PR behavior of the gates (no secrets required)",
+        "ios_approach": "Preserve the invariant: every required gate uses plain `pull_request`, runs with a read-only token, and needs no secret. On iOS this means PR builds must be unsigned Simulator builds (`-sdk iphonesimulator`, `CODE_SIGNING_ALLOWED=NO`), and the SAST gate must evaluate its SARIF locally with jq rather than uploading to code scanning \u2014 `security-events: write` is not granted to fork PRs, so an upload-based gate would fail for external contributors. Workflows needing write stay on `pull_request_target` in base-repo context with no PR-head checkout."
+      },
+      {
+        "capability": "Bootstrap Check \u2014 GitHub App token plumbing smoke (ci.yml)",
+        "ios_approach": "Ports unchanged: `actions/create-github-app-token` v3.2.0 minting a short-lived installation token from org secrets, verify with `gh api repos/${{ github.repository }} --jq .name`, both steps guarded by `github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork != true` because GitHub withholds org/repo secrets from fork `pull_request` runs. Drop the KVM-runner reminder step (no emulator lane). Fix the stale header comment rather than copying it."
+      },
+      {
+        "capability": "CodeRabbit review posture, gating strength, and scope filters",
+        "ios_approach": "SaaS, language-agnostic mechanism. Keep schema v2, `profile: chill`, `request_changes_workflow: true`, `abort_on_close: true`, `auto_incremental_review`, `auto_pause_after_reviewed_commits: 3`, `drafts: false`, `base_branches: [develop]`, the WIP/DO NOT MERGE/DRAFT/[skip review] title skips, and the bot-author ignore list. path_filters remap: exclude images, `**/.build/**`, `**/DerivedData/**`, `**/Pods/**`, `Package.resolved`, `**/_bmad-output/**`. Same caveat carries: bot-authored dependency PRs get no CodeRabbit safety review."
+      },
+      {
+        "capability": "CodeRabbit \"No Hardcoded Secrets\" custom check (mode: error)",
+        "ios_approach": "Ports verbatim in substance. Extend the enumerated patterns with the iOS-specific credential classes the Android list has no reason to name: App Store Connect API keys (`AuthKey_*.p8`, key ID, issuer ID), `.p12`/`.cer` signing certificates, `.mobileprovision` profiles, `DEVELOPMENT_TEAM` IDs in `.xcconfig`/`ExportOptions.plist`, and fastlane `MATCH_PASSWORD`. Still critical severity, still non-blocking via `fail_commit_status: false`."
+      },
+      {
+        "capability": "Attribution Check (AI-attribution scan) and its fork-safe shape",
+        "ios_approach": "Ports unchanged \u2014 `pull_request_target`, base-ref checkout only, PR commits fetched into a remote-only ref for grep/sed text inspection, job-level `pull-requests: write` for the sticky comment, `gitguardian[bot]` and friends in `ALLOWED_BOTS`. Text-only, language-agnostic. Keep the local commit-msg hook as the first line and CI as the backstop."
+      },
+      {
+        "capability": "Weekly CVE cron, concurrency groups, timeouts, artifact retention",
+        "ios_approach": "Ports unchanged: `schedule: cron '0 6 * * 1'` on the dependency scan so newly disclosed CVEs against unchanged dependencies are caught; per-workflow `concurrency: <name>-${{ github.ref }}` with `cancel-in-progress: true`; scan-result artifacts uploaded `if: always()` with `if-no-files-found: warn`, 30-day retention. FIX the Android gap while porting: add `timeout-minutes` to every job (dependency-scan.yml and the android.yml build job have none)."
+      },
+      {
+        "capability": "DECISION: monorepo backend security lanes not ported",
+        "ios_approach": "Holds identically and for the same reason. No Python/TypeScript SAST, no DAST/ZAP/nuclei/Docker test stack, no auth pentests, no API fuzzing \u2014 there is still no HTTP service in this repo (the backend is a separate self-hosted service). No `evaluate-sast.py`/`create-finding-issues.py` issue-filing pipeline; a plain exit-non-zero-on-HIGH gate remains sufficient. Findings surface via the run log, the uploaded SARIF artifact, and CodeRabbit only \u2014 no auto-filed issues, no SLA."
+      },
+      {
+        "capability": "DECISION: no dedicated third secret-scanning pass \u2014 and the external layer",
+        "ios_approach": "Same posture, with one substitution. Semgrep `p/secrets` is language-agnostic regex/entropy matching and ports unchanged to a Swift tree, so the in-repo PR-blocking secret lane survives even though the Kotlin/Java packs do not. CodeRabbit `gitleaks` stays. GitGuardian remains org-wide and out-of-repo; GitHub platform Secret Scanning + Push Protection remains the expected-but-unverified backstop. Same honest caveat: only the in-repo lane actually blocks a merge."
+      }
+    ],
+    "needs_redesign": [
+      {
+        "capability": "Security Scan Gate \u2014 the SAST job itself (Semgrep over Kotlin/Java)",
+        "why": "The gate shape (single unconditional job, capture exit code, upload artifact, jq-gate on severity, fail closed) is sound and platform-neutral, but the analyzer must change: Semgrep's `p/kotlin` and `p/java` packs produce zero coverage on Swift. The requirement is \"same security testing in substance,\" so the gate survives and the tool is replaced.",
+        "options": [
+          "CodeQL (`github/codeql-action`, language `swift`) with `security-extended` query packs, run on a macOS runner, plus Semgrep `p/secrets` retained for the secret lane.",
+          "Semgrep only, using the registry `p/swift` rules plus `p/secrets` \u2014 cheapest and closest to the existing job shape, but the Swift rule corpus is a small fraction of `p/kotlin`+`p/java` and would materially weaken coverage.",
+          "MobSF source-mode scan of the Swift tree \u2014 heavy, high-false-positive, and rejected on the same grounds the Android repo rejected MobSF."
+        ],
+        "recommendation": "Rename the required check to `Static Analysis Gate` and run CodeQL Swift + Semgrep `p/secrets` in one job on `macos-latest`, keeping the exact existing control flow. Pin the CodeQL query pack by version (`packs: codeql/swift-queries@x.y.z`) \u2014 this closes the Android gate's known reproducibility hole where pinning the Semgrep CLI still left registry rule content free to drift. Gate on the local SARIF with jq (`security-severity >= 7.0` or `level == \"error\"`), and upload to code scanning only on push to `develop`/`main`, because fork PRs have no `security-events: write`. Add `-warnings-as-errors` and Swift 6 strict-concurrency checking to the build gate \u2014 a compile-time data-race check with no Android equivalent, directly relevant to CoreBluetooth delegate-queue code."
+      },
+      {
+        "capability": "SAST scan scope, exclusions, and their rationale",
+        "why": "The Android roots (`app/ wear-device/ watchface/ plugins/ tools/`) and excludes (`AesEcb.java`, `.gradle`) have no Swift counterparts. The `watchface` root disappears entirely \u2014 watchOS has no custom watch faces, so there is no module to scan. The `AesEcb.java` exclusion is already inert on Android and has no successor unless Medtronic Sake crypto is re-vendored as Swift/C.",
+        "options": [
+          "Scope by SPM target directory (`Sources/`, `Tests/`, `Apps/`) with excludes for `.build/`, `DerivedData/`, `Pods/`, `*.generated.swift`.",
+          "Scope by Xcode scheme via CodeQL autobuild, which follows whatever the scheme compiles and cannot silently miss a target."
+        ],
+        "recommendation": "Use CodeQL autobuild over a scheme that compiles every shipping target (phone app, watch app, watch widget extension, all driver modules, and any research spikes) so scope is derived from the build graph rather than a hand-maintained directory list \u2014 this structurally eliminates the class of bug where a new module is added and nobody updates the scan roots. Keep the Android intent that non-shipped spikes stay IN scope. Do not carry the basename-scoped exclusion pattern forward; if vendored crypto lands, suppress by full path with a written reason."
+      },
+      {
+        "capability": "SAST pass/fail threshold, fail-closed, and unparseable-file surfacing",
+        "why": "The two-part policy is correct and must be preserved, but its inputs change format. Semgrep's `SEMGREP_EXIT >= 2` scanner-error check and `.errors[]` PartialParsing surfacing map onto CodeQL's exit codes and its extraction-diagnostics (files the Swift extractor failed to compile are reported in the database diagnostics, not as analysis failures \u2014 the same silent-zero-findings hazard).",
+        "options": [
+          "jq over the SARIF `runs[].results[]` for `properties.security-severity >= 7.0`, plus a separate jq pass over `runs[].invocations[].toolExecutionNotifications` for extraction errors.",
+          "`codeql database analyze --sarif-fail-on=error`, simpler but gives no non-blocking WARNING tier and no extraction-error visibility."
+        ],
+        "recommendation": "Keep the hand-rolled two-part gate. Block on HIGH/ERROR-equivalent only; print WARNING as non-blocking; ignore INFO. Preserve fail-closed with a defaulted-to-fail unset variable (`${EXIT:-2}`) and preserve the behavior that a missing or empty SARIF file makes jq error the step out. Preserve the non-blocking `::warning::` for files the extractor could not process, including the file list \u2014 on Swift this is a real recurring case (macro expansion, mixed ObjC bridging headers) and losing that signal means a whole target can silently contribute zero findings while the gate stays green."
+      },
+      {
+        "capability": "Dependency Scan Gate \u2014 OSV-Scanner over the resolved dependency graph",
+        "why": "OSV-Scanner itself ports: v2 parses SwiftPM `Package.resolved` and CocoaPods `Podfile.lock`, so the three-job structure, the weekly cron, the paths filter, and the aggregation gate all survive. What changes is the shape of what it reads and, honestly, the depth of the advisory data: the OSV/GitHub Advisory coverage for the SwiftPM ecosystem is far thinner than for Maven, so a green gate carries less assurance than it did on Android.",
+        "options": [
+          "OSV-Scanner over `Package.resolved` (+ `Podfile.lock` if CocoaPods is used at all).",
+          "OSV-Scanner plus GitHub Dependabot alerts on the SwiftPM manifest as a second, differently-sourced feed.",
+          "Add a manual dependency-review step for any new SPM dependency, compensating for the sparse advisory DB."
+        ],
+        "recommendation": "Keep OSV-Scanner v2 pinned, `--recursive --no-ignore --config=osv-scanner.toml .`, and update the `deps` paths filter to `Package.swift`, `Package.resolved`, `**/Podfile.lock`, `*.xcodeproj/project.pbxproj` (which encodes SPM package references), `osv-scanner.toml`, and the workflow file itself. State plainly in the docs that SwiftPM advisory coverage is immature and that dependency count discipline \u2014 preferring the Swift standard library, Apple frameworks, and a small audited dependency set \u2014 is the primary control, with OSV as the secondary."
+      },
+      {
+        "capability": "Gradle dependency locking and the `resolveAndLockAll` completeness task",
+        "why": "This entire mechanism exists because OSV cannot read `build.gradle.kts`. SPM has native, always-on resolution pinning: `Package.resolved` records exact versions and revisions and is committed by default. There is no `lockAllConfigurations()`, no per-configuration exclusion set, no `resolveAndLockAll` task, and no AGP-internal-classpath problem to work around.",
+        "options": [
+          "Commit `Package.resolved` and add a CI step asserting `xcodebuild -resolvePackageDependencies` (or `swift package resolve`) produces no diff \u2014 the direct analogue of the no-lockfile-diff contract.",
+          "Additionally run resolution with `-disableAutomaticPackageResolution` in the build gate so an out-of-date `Package.resolved` fails rather than being silently regenerated."
+        ],
+        "recommendation": "Do both. Commit `Package.resolved`, add a `Resolution Drift` step to the iOS Gate that fails on any diff after resolve, and build with automatic package resolution disabled so CI can never quietly float a dependency past the pinned graph. Also require that every SPM dependency is declared with `.upToNextMinor` or `.exact` (not `branch:` or unbounded `.upToNextMajor`) for crypto and BLE-adjacent packages, mirroring the Android crypto/cipher manual-review tier. This is strictly simpler than the Gradle machinery \u2014 do not port the complexity."
+      },
+      {
+        "capability": "osv-scanner.toml suppression policy",
+        "why": "The file, the syntax, and the policy port unchanged; only the triage baseline is different (an empty Swift graph, not ~1,175 Maven packages). The Android-specific escape-hatch example \u2014 a CVE fixable only by an AGP bump \u2014 has no Swift analogue; the equivalent pressure is a CVE in a transitive dependency of a pinned Apple or vendor package that can only move with an Xcode/toolchain bump.",
+        "options": [
+          "Keep the file with zero active entries and the same documented policy.",
+          "Drop the file until the first real advisory lands."
+        ],
+        "recommendation": "Keep it, with zero `[[IgnoredVulns]]` entries and the same invariants: prefer bumping over suppressing, every entry carries a written `reason`, prefer an `ignoreUntil` that forces re-evaluation, review quarterly. Re-run the first-scan triage on the initial Swift graph and record the package count and result in the file header exactly as Android did, so the baseline is auditable."
+      },
+      {
+        "capability": "Android Gate \u2192 iOS Gate (build, unit test, lint)",
+        "why": "Same aggregation shape, entirely different toolchain, and it must move to a macOS runner. The Android matrix (`:app`, `:wear-device`, `:watchface`, three plugin modules) becomes phone app + watch app + watch widget extension + driver modules; the `watchface` module has no successor because watchOS forbids third-party watch faces.",
+        "options": [
+          "`xcodebuild test -scheme <App> -destination 'platform=iOS Simulator,OS=latest,name=iPhone 17'` plus a second destination for `platform=watchOS Simulator`, then `xcodebuild build -sdk iphonesimulator CODE_SIGNING_ALLOWED=NO`.",
+          "`swift test` for the pure-Swift driver/domain modules (fast, Linux-capable, no simulator) plus `xcodebuild` only for the app targets.",
+          "Fastlane `scan`/`gym` wrapping the same commands."
+        ],
+        "recommendation": "Split it: run `swift test` on the platform-independent driver, domain, and unit-conversion modules (fast, cheap, and it forces those modules to stay free of UIKit/app imports \u2014 the executable version of the Android `no :app imports` review rule), then `xcodebuild` for the app and watch targets. Lint with SwiftLint (`--strict`) plus `swift-format lint`. Keep the exact `if: always()` `iOS Gate` aggregation job. Do NOT sign in this gate; unsigned Simulator builds keep the gate secret-free and fork-PR-safe. Pin the Xcode version explicitly (`sudo xcode-select -s`) \u2014 an unpinned runner image is an unreviewed toolchain bump."
+      },
+      {
+        "capability": "Android path filter (including license documents compiled into the APK)",
+        "why": "Straight remap, but the license-document subtlety must survive: `README.md`, `LICENSE`, `docs/THIRD_PARTY_LICENSES.md`, and `docs/licenses/**` are in the Android filter because they are bundled as APK assets and gated by `LicenseAssetsTest`. The iOS app bundles the same attribution texts as resources and needs the same drift gate.",
+        "options": [
+          "Filter on `Sources/**`, `Apps/**`, `Tests/**`, `Package.swift`, `Package.resolved`, `*.xcodeproj/**`, `*.xcconfig`, `*.entitlements`, `Info.plist`, `Resources/**`, plus the four license paths and the workflow file itself."
+        ],
+        "recommendation": "Use that filter and keep an explicit `LicenseResourcesTest` equivalent so editing, emptying, or deleting a bundled licence text re-runs the attribution drift gate. GPL-3.0-only source distribution makes the attribution bundle a licence-compliance artifact, not a nicety. Docs/governance-only PRs should still skip the build."
+      },
+      {
+        "capability": "Instrumented Tests (emulator) + KVM setup + AVD cache state machine",
+        "why": "The entire Android emulator apparatus \u2014 the udev rule exposing /dev/kvm at mode 0666, `reactivecircus/android-emulator-runner`, the three-state AVD cache with the never-save-on-failure guard, the `-v1` eviction prefix \u2014 exists to make an emulator bootable on a Linux runner. macOS runners ship iOS and watchOS simulators preinstalled; `xcodebuild test` boots them. None of that machinery has, or needs, a successor.",
+        "options": [
+          "Delete the whole apparatus and run `xcodebuild test` with XCUITest against a Simulator destination.",
+          "Keep a cache, but of `DerivedData` and the SPM checkout/artifact cache rather than a device image."
+        ],
+        "recommendation": "Delete the AVD machinery. Add a `UI Tests (Simulator)` job that runs XCUITest on both iOS and watchOS Simulator destinations, with `-resultBundlePath` uploaded as an artifact (`if: ${{ !cancelled() }}`, 14-day retention) \u2014 the direct analogue of `instrumented-test-report`. Carry over three Android decisions verbatim: keep it NOT required so a flaky simulator cannot wedge unrelated PRs; keep no auto-retry (re-run the job, never disable the test); and if you cache DerivedData or SPM artifacts, keep the restore+explicit-save split with a `success()` guard so a failed run never poisons the cache. Note the coverage delta honestly: the database-migration and UI tests port, but nothing BLE runs here."
+      },
+      {
+        "capability": "Secrets Plumbing Check (1Password canary, workflow_dispatch-only)",
+        "why": "Purpose ports exactly \u2014 a dispatch-only, never-on-PR gate that proves credential plumbing resolves without touching signing material. The credential store changes: fork users will not have a 1Password service account, so the fork-facing path must use plain GitHub encrypted secrets in the user's own fork.",
+        "options": [
+          "Two variants: a project-internal 1Password canary for maintainers, and a fork-facing preflight reading only the fork's own repository secrets.",
+          "Fork-facing only, since there is no project-published binary and therefore no project-held signing identity.",
+          "fastlane `match` with a user-owned private certificates repo, following the Loop precedent."
+        ],
+        "recommendation": "Ship a single fork-facing `Build Secrets Preflight` (workflow_dispatch only, `contents: read`). It must assert that each required secret is non-empty and that the App Store Connect API key authenticates \u2014 e.g. resolve the team and app record \u2014 then print only `OK` and never the key, issuer ID, or team ID. Follow the Loop/xDrip4iOS precedent for the secret set (ASC key ID / issuer ID / `.p8` contents, plus `match` password and a PAT if using a certificates repo). Retire the project-internal 1Password lane unless a maintainer-owned validation build is actually wanted; with no project-published binary there is nothing for it to sign."
+      },
+      {
+        "capability": "Signing Action Smoke (end-to-end keystore materialization) + op-load-signing-secrets composite action",
+        "why": "The Android design \u2014 a dispatch-only smoke that proves the composite action both loads and works, with umask 077, delete-before-create, an ERR trap, chmod 600, path-only logging, and caller-side `rm -f` under `if: always()` \u2014 is exactly the right shape and every one of those properties has an iOS counterpart. The mechanism changes from materializing a `.jks` to importing a certificate and provisioning profile into an ephemeral macOS keychain.",
+        "options": [
+          "Composite action that runs `security create-keychain` on a random-password temporary keychain, `security import` of the `.p12`, `security set-key-partition-list`, installs the `.mobileprovision`, and outputs the keychain path.",
+          "`xcodebuild -allowProvisioningUpdates` with an ASC API key, letting Xcode fetch/create the profile \u2014 fewer stored secrets, but it mutates the user's developer account.",
+          "fastlane `match` / `sync_code_signing`."
+        ],
+        "recommendation": "Composite action creating an ephemeral keychain, invoked by a `workflow_dispatch`-only `Signing Smoke` job whose only assertion is that `xcodebuild -showBuildSettings` resolves a signing identity and a matching profile for the bundle ID \u2014 asserted, never printed. Carry over every hygiene property: umask before write, delete-before-create, trap-on-error cleanup, 0600 modes, and a caller-side `if: always()` teardown (`security delete-keychain`), because composite actions still cannot register a post-job step. Add one iOS-only assertion the Android smoke had no reason to make: fail if the resolved entitlements request any capability not enabled on the signing team, so a fork user gets a clear preflight error instead of an opaque late signing failure."
+      },
+      {
+        "capability": "CodeRabbit \"BLE Protocol Safety\" custom check (mode: error) \u2014 SAFETY",
+        "why": "The intent transfers wholesale but roughly half the concrete rules are Android-GATT-specific and would be unreviewable or wrong on iOS. `GATT 133` does not exist. Bond loss surfaces differently. CoreBluetooth serializes nothing for you but the failure mode and the delegate contract differ, and iOS adds an entire failure class Android does not have: `CBCentralManager` state preservation and restoration, where the app is relaunched into the background with a restore identifier and must rebuild state without resuming arbitrary work.",
+        "options": [
+          "Rewrite the check instructions against CoreBluetooth semantics, keeping the Little-Endian Tandem parsing rule, the event-type-ID rule, the multi-packet reassembly idle-timeout rule, and the never-log-raw-pump-data-or-serials-at-info rule unchanged.",
+          "Additionally convert the mechanical parts into executable tests over recorded protocol traces."
+        ],
+        "recommendation": "Rewrite against CoreBluetooth and add the restoration rules explicitly: one outstanding peripheral operation at a time with an explicit timeout; every `CBPeripheral` delegate path handles `didDisconnectPeripheral`, `CBError.peerRemovedPairingInformation`, `CBError.connectionTimeout`, and `CBATTError.insufficientAuthentication`; `centralManager(_:willRestoreState:)` rebuilds from the restored peripherals dictionary and never assumes in-memory state survived; the manager is constructed with a stable `CBCentralManagerOptionRestoreIdentifierKey`. Then move what can be tested out of review entirely: byte-order, event-ID, and reassembly rules belong in replay tests over recorded frames, which run in the Simulator and CI where the radio does not."
+      },
+      {
+        "capability": "CodeRabbit \"Medical Safety Review\" custom check (mode: error) \u2014 SAFETY",
+        "why": "The rules are platform-independent and must survive verbatim: glucose stored and compared in canonical mg/dL, bounds 20\u2013500, mmol/L display and input only, single conversion factor 18.0156, hard-fail on storing an mmol/L value as mg/dL (persisting 3.9 instead of ~70 silently suppresses low alerts), on inverted conversion, on out-of-range persisted values, and on any other factor. What must change is that on Android these invariants are enforced ONLY by an advisory reviewer \u2014 `fail_commit_status: false` means even a `mode: error` check does not block a merge.",
+        "options": [
+          "Port the check text unchanged and accept review-only enforcement.",
+          "Port the check AND encode the invariants in the type system: a `BloodGlucose` value type whose only storage is mg/dL, a failable initializer enforcing 20...500, one conversion API carrying the 18.0156 constant, no public raw-Double initializer.",
+          "Additionally add a custom Semgrep/CodeQL rule failing any comparison of a glucose-typed value against a literal outside 20...500."
+        ],
+        "recommendation": "All three, and treat the type-system version as the primary control. This is the single highest-value change the port can make: Swift's value types and access control let the mg/dL-canonical, bounds-checked invariant be a compile error rather than a reviewer's judgment. Keep the CodeRabbit check as defence in depth and keep its explicit non-violations so reviewers do not \"fix\" correct code \u2014 user-facing mmol/L display literals (3.9, 10.0, 22.2; ~1.1 and ~27.8 as the display equivalents of the bounds) and mmol/L input converted before storage are not bounds violations."
+      },
+      {
+        "capability": "CodeRabbit tool matrix and path_instructions",
+        "why": "Mechanism ports; contents do not. `detekt` is Kotlin-only. The path_instructions are written against Compose, Hilt, Room, EncryptedSharedPreferences, SQLCipher, and the runtime-plugin contract \u2014 and that last one is now wrong by decision: iOS drivers are compile-time-linked Swift modules, so `PLUGIN_API_VERSION` runtime-compatibility review is replaced by ordinary source/ABI compatibility.",
+        "options": [
+          "Swap detekt for SwiftLint; keep actionlint, shellcheck, yamllint, markdownlint, gitleaks, semgrep, osvScanner, checkov; keep ruff/eslint/pylint/hadolint disabled.",
+          "Rewrite path_instructions per iOS layer."
+        ],
+        "recommendation": "Enable SwiftLint in place of detekt and rewrite path_instructions for: app/watch Swift (SwiftUI state ownership \u2014 `@State`/`@Observable`/`@Binding` correctness, `accessibilityIdentifier` for UI tests, structured concurrency and actor isolation, Keychain accessibility class, Data Protection class, no sensitive data in logs, plus the mg/dL rules verbatim); the driver API module (protocol stability, no app-layer imports, safety-limits documentation, and the read-only posture rule \u2014 no bolus, basal, pump-setting, or any therapeutic write primitive on any protocol); shipped driver modules (thin delegation, always forward safety limits, never a defaulted `SafetyLimits()`, lifecycle activate/deactivate/shutdown, monitoring-only); tests; and `.github/workflows/**` unchanged. Replace the `PLUGIN_API_VERSION` rule with an API-surface snapshot gate (below)."
+      },
+      {
+        "capability": "Mobile security measures verification matrix",
+        "why": "Every row maps to a different iOS control, and two Android rows (SQLCipher, EncryptedSharedPreferences) were verified by \"unit tests + CodeRabbit review\" while two more (no sensitive data in logs, medical safety) had CodeRabbit as their ONLY verifier \u2014 against a non-blocking commit status. The port is the moment to make those executable.",
+        "options": [
+          "Database at rest: SQLCipher via SPM, or GRDB+SQLCipher, or SQLite/Core Data with `NSFileProtectionCompleteUntilFirstUserAuthentication`.",
+          "Token storage: Keychain with an explicit accessibility class, replacing EncryptedSharedPreferences.",
+          "Transport: App Transport Security defaults, replacing `network_security_config`."
+        ],
+        "recommendation": "Rebuild the matrix with checkable verifiers. Database encryption \u2192 SQLCipher (or Data Protection) plus a unit test asserting the file protection attribute; critically, the protection class must be `CompleteUntilFirstUserAuthentication` or `CompleteUnlessOpen`, never `NSFileProtectionComplete`, or background BLE writes fail while the device is locked \u2014 a real, testable invariant with no Android analogue. Token storage \u2192 Keychain with `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`, enforced by a CodeQL/Semgrep rule that fails on `kSecAttrAccessibleWhenUnlocked` or any non-`ThisDeviceOnly` class for pump/auth items, so pump credentials never sync to iCloud Keychain. Transport \u2192 a gate failing on `NSAllowsArbitraryLoads` or any ATS exception. Logging \u2192 a lint rule banning interpolation of pump serials/raw frames outside `#if DEBUG`, replacing pure review."
+      },
+      {
+        "capability": "DECISION: MobSF / artifact-level SAST declined, with its revisit trigger",
+        "why": "The Android rationale transfers almost intact \u2014 monitoring-only, read-only, not store-distributed, high false-positive tax, per-PR artifact build cost. But the iOS threat model shifts the calculus in one direction and the compensating control disappears in another: Android Lint covered manifest and network-security posture defensively, and iOS ships nothing equivalent, so declining artifact SAST on iOS leaves a wider gap than declining it on Android did.",
+        "options": [
+          "Decline artifact SAST entirely, as Android did.",
+          "Decline MobSF but add a cheap, deterministic entitlements/Info.plist lint gate covering the posture class Android Lint used to cover."
+        ],
+        "recommendation": "Decline MobSF for the same stated reasons, and add an `Entitlements & Plist Guard` step inside the Static Analysis Gate. Deterministic, no baseline to maintain, no false positives: fail on `NSAllowsArbitraryLoads` or any ATS exception; fail if `get-task-allow` is true in a release configuration; assert the declared `UIBackgroundModes` are exactly the set the app actually needs; assert every required usage description string is present and non-placeholder (`NSBluetoothAlwaysUsageDescription`, `NSHealthShareUsageDescription`/`NSHealthUpdateUsageDescription` if HealthKit is used, and any location string if BLE scanning needs it); and fail if an entitlement is added that Apple grants only by out-of-band request \u2014 Critical Alerts being the specific case, since a fork-and-build model cannot obtain a per-user grant and the build would simply fail to sign for every user. Carry the revisit trigger verbatim: add artifact SAST if distribution ever changes or if any write/therapeutic surface is introduced."
+      },
+      {
+        "capability": "Adding security coverage for a new pump driver",
+        "why": "On Android a new driver is a runtime plugin whose Kotlin lands under `plugins/**` and is auto-covered by three filters. On iOS drivers are compile-time-linked modules, which removes the runtime API-version compatibility problem and replaces it with a static one \u2014 and simultaneously creates an enforcement opportunity Android does not have.",
+        "options": [
+          "Auto-cover by build-graph scoping (CodeQL autobuild, SPM resolution, path filter on `Sources/**`).",
+          "Add an API-surface snapshot gate over the driver protocol module."
+        ],
+        "recommendation": "Auto-cover as before, and add a `Driver API Surface` check: snapshot the public API of the driver-protocol module (via `swift-api-digester` or a committed interface snapshot) and fail on any diff not accompanied by a lead-reviewed update. This makes the read-only posture \u2014 no bolus, no basal, no pump-setting write, no device command on any protocol \u2014 a mechanically enforced property rather than a review rule, which is the single strongest safety improvement available in this subsystem. Keep the one manual Android requirement: a driver introducing a new pairing or auth flow must add coverage in its own test suite; there is still no shared auth-flow harness."
+      },
+      {
+        "capability": "Local reproduction of each gate",
+        "why": "Every command changes, and three Android reproduction snippets are already documented incorrectly (SAST repro omits `tools/`, dep-scan repro omits `--no-ignore`, and there is no documented zizmor repro at all). Porting the docs verbatim would import those defects.",
+        "options": [
+          "Hand-written doc commands, as today.",
+          "A `scripts/ci-local.sh` that runs the same commands CI runs, with CI invoking the script so the two cannot drift."
+        ],
+        "recommendation": "Use the script, and have CI call it. Cover: static analysis (CodeQL CLI with the pinned pack, or Semgrep `p/secrets`), dependency scan (pinned OSV-Scanner with the exact CI flags including `--no-ignore`), workflow lint (`actionlint -shellcheck=shellcheck`, with the documented caveat that it does NOT check the SHA-pin or composite-secrets guards), workflow security (`zizmor --config zizmor.yml --min-severity=medium .github/workflows/ .github/actions/` \u2014 the repro Android never documented), resolution drift, and CodeRabbit CLI pre-review. Note explicitly which gates cannot be reproduced on a machine without Xcode."
+      },
+      {
+        "capability": "Renovate coverage and lockfile regeneration",
+        "why": "Renovate's `github-actions` manager ports unchanged. The `gradle` manager is replaced by the `swift` manager over `Package.swift`. The Android `regen-gradle-lockfiles.yml` workaround exists because Renovate's container lacks the Android SDK; the identical problem exists on iOS because Renovate's container lacks a Swift toolchain and cannot regenerate `Package.resolved`. Separately, the Android repo's pip/go/tarball tool pins sit under no manager at all and are documented as silently rotting.",
+        "options": [
+          "Port `regen-gradle-lockfiles.yml` as `regen-package-resolved.yml` on a macOS runner.",
+          "Add Renovate custom (regex) managers for the pinned CLI tools and the Xcode version.",
+          "Leave the tool pins hand-maintained, as Android does."
+        ],
+        "recommendation": "Do the first two. Keep the same tiering discipline: all `github-actions` updates including digest re-pins stay manual with `needs-review`; security-sensitive packages (crypto, cipher, keychain wrappers) stay manual; majors stay manual. Then close the Android gap by adding regex managers for the pinned actionlint, shellcheck, zizmor, OSV-Scanner, CodeQL pack, and \u2014 importantly \u2014 the pinned Xcode version, so the toolchain cannot drift or silently vanish from the runner image without a reviewed PR."
+      },
+      {
+        "capability": "Supply-chain surface of build-time code execution (new, no direct Android analogue)",
+        "why": "Gradle build scripts are arbitrary code too, but on iOS three distinct vectors execute arbitrary code inside a build that, under fork-and-build, has the user's signing credentials in its environment: `Package.swift` is executable Swift evaluated at resolve time, SPM build-tool and prebuild plugins run during build, and Xcode Run Script build phases execute during every build. On Android there was one project-held keystore; here there are N user-held signing identities, one per fork.",
+        "options": [
+          "CODEOWNERS-gate the files and rely on review.",
+          "Add a mechanical guard that fails on introduction of a Run Script phase, an SPM plugin, or a remote `binaryTarget` without an accompanying lead-reviewed justification.",
+          "Scope signing secrets to a single job that runs no repo-authored scripts."
+        ],
+        "recommendation": "All three. Add a `Build Script & Plugin Guard` to the Workflow Lint job that greps `project.pbxproj` for `PBXShellScriptBuildPhase`, `Package.swift` for `.plugin(` and `binaryTarget(`, and fails on any hit not present in a committed, CODEOWNERS-owned allowlist. Require every `binaryTarget` to be checksum-pinned. In the fork-build workflow, keep signing secrets out of the environment of any job that compiles repo code where practical, and never grant them to a `pull_request`-triggered job. This is the gate that protects users' Apple Developer accounts, and it is the security control the Android CI never needed."
+      }
+    ],
+    "impossible": [
+      {
+        "capability": "Semgrep `p/kotlin` and `p/java` rule packs as the SAST policy",
+        "why": "These packs match Kotlin and Java syntax and produce exactly zero findings on Swift. There is no Swift-equivalent registry pack of comparable depth; Semgrep's Swift rule corpus is a small fraction of the Kotlin+Java corpus. This is a genuine loss of the specific analysis policy, not a tool rename.",
+        "closest_alternative": "CodeQL with the `swift` language and the `security-extended` query suite is the honest replacement \u2014 first-class Swift support, versioned and pinnable query packs (which actually improves on Android's unpinned registry rule drift), and SARIF output that the existing jq severity gate consumes. Retain Semgrep `p/secrets` unchanged: it is regex/entropy-based and language-agnostic, so the in-repo PR-blocking secret lane survives intact. Add `gitleaks` as a first-class failing step to compensate for CodeRabbit's non-blocking commit status."
+      },
+      {
+        "capability": "Android Lint's manifest and network-security posture coverage",
+        "why": "Android Lint runs in the Android Gate and is explicitly named in the security-testing matrix as the verifier for HTTPS enforcement, and in the MobSF decision as the compensating control for manifest posture (exported components, `debuggable`, `allowBackup`, `usesCleartextTraffic`, weak `network_security_config`). Apple ships nothing comparable: `xcodebuild analyze` runs the Clang static analyzer, which covers C and Objective-C, not Swift, and does not inspect `Info.plist` or entitlements at all. SwiftLint is a style and idiom linter with no security or manifest awareness.",
+        "closest_alternative": "A purpose-built `Entitlements & Plist Guard` step, as described in needs_redesign \u2014 a small deterministic checker over `Info.plist`, `*.entitlements`, and build settings covering ATS exceptions, `get-task-allow` in release, background-mode set, required usage-description strings, and non-grantable entitlements. It is narrower than Android Lint but covers the specific posture class the Android decision relied on Lint for, with no false-positive tax."
+      },
+      {
+        "capability": "A project-published, project-signed application binary and its central signing-secret lane",
+        "why": "Two independent hard constraints. Apple offers no distribution channel that would let this project ship a signed binary to arbitrary users: the App Store is out by decision and by review posture for an unofficial pump-reading app; ad-hoc distribution is capped at 100 registered devices per device class per team per year and requires per-device UDID registration; and the Developer Enterprise Program is contractually limited to distribution within the member organization, so using it here would breach the agreement. The stated distribution model \u2014 source shipped, each user builds and signs with their own account \u2014 is the consequence, and it is also what keeps GPL-3.0-only workable.",
+        "closest_alternative": "There is nothing to replace it with, and nothing should be. The 1Password `android-signing` item, the `ANDROID_ACTIONS_SERVICE_ACCOUNT` secret, `Secrets Plumbing Check`, and `Signing Action Smoke` all lose their project-internal purpose and should be retired rather than ported. Their descendants live in the fork: a `Build Secrets Preflight` and a `Signing Smoke` that validate the FORK OWNER's own App Store Connect credentials in the fork's own Actions environment."
+      },
+      {
+        "capability": "Xcode Cloud as a repo-defined, fork-inheritable build/sign pipeline",
+        "why": "Xcode Cloud workflows are defined and stored in App Store Connect against a specific app record and team, not in the repository. Only `ci_scripts/` hooks live in the source tree. A fork therefore inherits the scripts but not the pipeline, and cannot be handed a working Xcode Cloud configuration by cloning. Xcode Cloud also cannot sign with a third party's credentials, and its free compute allotment is per-account, so it cannot be a shared project resource.",
+        "closest_alternative": "GitHub Actions on macOS runners, which is what the fork-and-build model already requires and what the Loop/xDrip4iOS precedent uses. The full pipeline definition ships as a workflow file in the repo, the fork owner supplies their own secrets, and the build runs entirely under their account. `ci_scripts/` can still be committed for developers who choose to wire up their own Xcode Cloud, but it cannot be the supported path."
+      },
+      {
+        "capability": "Any CI verification of BLE behavior against a real device or a real Bluetooth stack",
+        "why": "Core Bluetooth does not exist in the iOS Simulator \u2014 `CBCentralManager` never reaches `poweredOn`, so no BLE code path executes. No GitHub-hosted macOS runner has a Bluetooth radio available to a test process, and none has a Tandem pump. This is strictly worse than Android, where the emulator at least presented a (non-functional) Bluetooth stack, and it compounds the fact that the lead developer has no iPhone and validates only in Simulator.",
+        "closest_alternative": "Three layers, none of which is hardware in CI. (1) A `PumpTransport` protocol seam so every driver's framing, parsing, endianness, event-ID mapping, reassembly, and state machine is exercised against recorded byte traces in plain `swift test` \u2014 deterministic, fast, and it moves the majority of the CodeRabbit BLE review rules into executable checks. (2) A simulated in-app driver so the full app, watch app, and alerting path can be driven end-to-end in the Simulator with no radio. (3) A written hardware-validation checklist executed by the maintainer with the physical iPhone, Apple Watch, and t:slim X2, whose completion is a documented release gate rather than a CI status. Note that the Android CI never tested BLE against hardware either, so release-gate parity is preserved; what is lost is Simulator-level smoke coverage."
+      },
+      {
+        "capability": "A CI gate that proves a given fork's build will actually sign, install, and run",
+        "why": "The determining facts live outside the repository and outside any CI system: whether the fork owner holds a paid Apple Developer Program membership (a free account cannot use TestFlight at all and gets 7-day sideload profiles instead), whether their team has each required capability enabled, and whether Apple has granted any by-request entitlement. Critical Alerts is the sharp case \u2014 `com.apple.developer.usernotifications.critical-alerts` is granted per app, per team, by Apple on request, and cannot be obtained by every fork owner. CI can never assert these on the project's behalf.",
+        "closest_alternative": "A fail-fast preflight in the fork's own pipeline that checks what is checkable and produces an actionable message: authenticate the ASC API key, resolve the team, confirm the bundle ID and required capabilities exist, and fail with named remediation otherwise. Upstream, the entitlements guard must keep non-grantable entitlements out of the committed entitlements file entirely, so no fork's build breaks on an entitlement its owner cannot obtain \u2014 which in practice means alerting is designed around Time Sensitive notifications rather than Critical Alerts."
+      },
+      {
+        "capability": "CVE scanning of binary XCFramework / SPM `binaryTarget` dependencies",
+        "why": "OSV and the GitHub Advisory Database index source packages by ecosystem coordinate. A remote `binaryTarget` is a checksummed zip of compiled code with no resolvable package identity, so it appears in `Package.resolved` in a form no scanner can match to an advisory. The Gradle lockfile equivalent did not have this hole \u2014 every locked Maven coordinate is scannable. Vendored C or Objective-C sources compiled into a target are likewise invisible to dependency scanning.",
+        "closest_alternative": "Policy rather than tooling: forbid remote `binaryTarget` dependencies outright via the Build Script & Plugin Guard, requiring lead review and a written justification for any exception, and require `checksum:` pinning on any that is accepted. For vendored C/ObjC crypto (the Medtronic Sake analogue), keep it in-tree as source so the static-analysis gate can at least read it, and record it in the third-party licence bundle. Accept and document the residual gap the same way the Android repo documented the built-artifact secret gap."
+      }
+    ],
+    "ios_requirements": [
+      "The repository must define exactly five required status checks on `develop` \u2014 `Static Analysis Gate`, `Dependency Scan Gate`, `Workflow Lint`, `Workflow Security`, `iOS Gate` \u2014 matched by job name, none using `continue-on-error`, and every one of them must be creatable on every pull request including pull requests opened from forks.",
+      "Every required check must either run unconditionally on every pull request or report through an always-running aggregation job that treats \"nothing relevant changed\" as a pass and any non-success upstream result as a failure. No required check may be paths-filtered at the workflow level.",
+      "Every required check must complete successfully on a pull request opened from a fork, using only a read-only token and no repository or organization secret. Pull-request builds must be unsigned Simulator builds, and static-analysis results must be evaluated from a local results file rather than uploaded to a service that fork pull requests cannot write to.",
+      "The system must run static security analysis over all shipping Swift source on every pull request, blocking the merge on any HIGH or ERROR severity finding, surfacing WARNING findings without blocking, and failing closed if the analyzer itself errors or produces no results file.",
+      "Static analysis must report, as a non-blocking warning listing the affected files, any source file the analyzer could not process, so that a target contributing zero findings because it failed to compile is never mistaken for a clean target.",
+      "The static-analysis rule or query set must be pinned to an exact version in the repository, so that the effective analysis policy is reproducible from the repository alone and a previously green commit cannot turn red without a reviewed change.",
+      "The system must scan every resolved third-party dependency for known vulnerabilities on any change to the dependency graph, on a weekly schedule, and on manual dispatch, failing the gate on any known vulnerability with no severity floor.",
+      "The repository must commit its resolved dependency graph, and CI must fail if resolving dependencies from the committed manifest produces any change to that resolved graph.",
+      "Dependency-vulnerability suppressions must live in a single reviewed configuration file, must each carry a written reason, must prefer an expiry that forces re-evaluation, and must be reviewed quarterly. No gate may be weakened by lowering a severity threshold.",
+      "The system must lint every GitHub Actions workflow and composite action for syntax, expression, context, and embedded-shell defects, using analysis tools installed as version-pinned, checksum-verified binaries rather than third-party actions.",
+      "The system must fail any pull request in which a third-party action reference is not pinned to a full 40-character commit SHA, across both workflow files and composite action definitions.",
+      "The system must fail any pull request in which a composite action references the secrets context, since such references resolve to empty at runtime.",
+      "The system must audit workflow security posture on every pull request and fail on any finding at medium severity or above that is not individually allowlisted with a written rationale, and must independently fail any workflow that combines a fork-reachable trigger with a checkout of pull-request-supplied code.",
+      "The system must fail any pull request that introduces an Xcode Run Script build phase, a Swift Package Manager plugin, or a remote binary dependency that is not on a reviewed, committed allowlist, because each executes arbitrary code inside a build that carries a user's Apple signing credentials.",
+      "The system must fail any pull request that commits signing material or team-identifying build configuration \u2014 certificates, private keys, provisioning profiles, App Store Connect keys, or a development team identifier in a build settings file.",
+      "The system must fail any pull request whose entitlements or Info.plist introduce an App Transport Security exception, leave debug entitlements enabled in a release configuration, declare a background mode the app does not require, omit or leave a placeholder in a required usage-description string, or request an entitlement that Apple grants only by individual request.",
+      "The system must fail any pull request that stores credentials or pump authentication material in the Keychain with an accessibility class that permits synchronization off-device or that is unavailable while the device is locked, and must fail any pull request that configures the local database with a data-protection class that would prevent writes while the device is locked.",
+      "Glucose must be representable only through a type whose stored value is canonical mg/dL, whose construction enforces the 20\u2013500 mg/dL range, and whose only unit conversion applies the single factor 18.0156. CI must fail if that type's invariants are bypassed. Automated review must additionally flag storing or comparing an mmol/L value as mg/dL, inverted conversion, out-of-range persisted values, or any other conversion factor, while explicitly not flagging user-facing mmol/L display literals or mmol/L input converted before storage.",
+      "The public interface of the pump driver protocol module must be snapshotted in the repository, and CI must fail on any change to it that is not accompanied by a reviewed update \u2014 mechanically enforcing that no bolus, basal, pump-setting, or other therapeutic write primitive can be added to any driver protocol.",
+      "Every pump driver's protocol framing, byte order, event-type mapping, multi-packet reassembly, and connection state machine must be exercised in CI against recorded byte traces, with no Bluetooth radio, so that protocol correctness is verified by tests rather than by review alone.",
+      "The app must be buildable and its full user-facing behavior exercisable end to end against a simulated pump driver, in the iOS and watchOS Simulators, with no physical pump and no Bluetooth radio.",
+      "CI must build and unit-test the phone app, the watch app, and the watch widget extension, and must lint all Swift source, treating compiler warnings and data-race-safety violations as errors.",
+      "CI must run UI tests on both iOS and watchOS Simulator destinations, publish the result bundle as an artifact, and must not be a required check while it is stabilizing; a failure must be re-run rather than disabled, and no automatic retry may be configured.",
+      "Platform-independent driver, domain, and unit-conversion code must be testable without Xcode or a simulator, so that those modules cannot acquire an app-layer dependency.",
+      "The repository must ship a build-and-sign pipeline that a user runs in their own fork, under their own Apple Developer account, producing a build in their own TestFlight, and must never require the project to hold any signing identity.",
+      "A maintainer must be able to verify, on demand and without exposing any credential value, that their fork's build secrets resolve and authenticate, and separately that a signing identity and matching provisioning profile can be materialized into an ephemeral keychain and then destroyed.",
+      "Any credential or signing material materialized during a build must be created with restrictive permissions, removed if the operation fails midway, never written to a log, and explicitly deleted by the calling job regardless of build outcome.",
+      "The bundled third-party attribution and licence texts must be treated as application resources: a change to any of them must re-run the build gate, and a test must fail if a bundled licence text is missing, empty, or drifted.",
+      "Project lead review must be required on every change to workflows, the workflow-security allowlist, the package manifest and resolved graph, the Xcode project file, build settings, entitlements, Info.plist, CI scripts, security policy, and every pump driver module.",
+      "Every developer must be able to reproduce each CI gate locally from a single committed script that CI itself invokes, so the local and CI invocations cannot diverge; gates that cannot be reproduced without Xcode must be documented as such.",
+      "Automated dependency updates must cover GitHub Actions pins, Swift package versions, the pinned analysis tool versions, and the pinned Xcode version, with security-sensitive and major updates routed to manual review, and the resolved dependency graph must be regenerated automatically on update pull requests by a job that has a Swift toolchain.",
+      "The documented list of required checks and the branch-protection configuration must be verified against each other in CI, so the contributor-facing documentation cannot drift from the enforced ruleset the way the Android repository's has."
+    ],
+    "risks": [
+      {
+        "risk": "Swift static-analysis depth is materially thinner than Kotlin/Java. CodeQL's Swift query suite plus a small Semgrep Swift corpus does not equal `p/kotlin` + `p/java`. A green Static Analysis Gate on iOS carries less assurance than the same-named gate did on Android, and the difference is easy to mistake for improvement.",
+        "severity": "high",
+        "mitigation": "State the coverage delta explicitly in the security-testing doc rather than implying parity. Compensate by moving specific invariants out of SAST and into the type system and tests \u2014 mg/dL bounds, Keychain accessibility, data-protection class, driver API surface, protocol framing. Track CodeQL Swift query-pack releases as a reviewed dependency and re-baseline when coverage expands."
+      },
+      {
+        "risk": "The fork-and-build model turns every merged upstream commit into code that will execute under N users' Apple Developer credentials on their next build. Android had one project-held keystore under one person's control; iOS distributes the blast radius across every user. `Package.swift`, SPM plugins, and Xcode Run Script phases are all arbitrary-code vectors inside that build.",
+        "severity": "high",
+        "mitigation": "Treat the fork-build workflow as the highest-trust file in the repository: CODEOWNERS-gated, SHA-pinned throughout, minimal, and audited. Enforce the Build Script & Plugin Guard mechanically rather than by review. Keep signing secrets scoped to the narrowest possible job. Document, in SECURITY.md, that building from a fork executes upstream code with the builder's signing credentials."
+      },
+      {
+        "risk": "Two safety-critical invariants \u2014 medical unit correctness and BLE protocol safety \u2014 are enforced on Android only by a CodeRabbit check whose commit status is configured non-failing, so nothing actually blocks a merge. Copying that configuration into a fresh iOS repo would import a known-weak control into a codebase where the safe design is still cheap to establish.",
+        "severity": "high",
+        "mitigation": "Do not rely on review for either. Make mg/dL canonicality and the 20\u2013500 bound a type invariant, make the read-only driver posture an API-surface gate, and make protocol framing a replay test. Keep CodeRabbit as defence in depth, and decide deliberately whether to flip its commit status to failing rather than inheriting the Android value by default."
+      },
+      {
+        "risk": "Core Bluetooth is absent from the Simulator and the lead developer has no iPhone or Apple Watch, so the entire BLE path \u2014 including CBCentralManager state preservation and restoration, which only manifests after an actual background relaunch \u2014 is validated by exactly one person on one set of hardware. A regression in restoration produces silent monitoring failure, which for a glucose monitor is a patient-visible harm.",
+        "severity": "high",
+        "mitigation": "Push maximum coverage into transport-seam replay tests and a simulated driver so CI catches everything that is not radio-dependent. Define a written hardware-validation checklist as an explicit release gate, executed by the maintainer with physical hardware, and record its completion per release. Consider making the restoration path itself testable by injecting a synthetic restore-state dictionary."
+      },
+      {
+        "risk": "SwiftPM advisory coverage in OSV and the GitHub Advisory Database is sparse compared with Maven. The Dependency Scan Gate will be green far more often than it is correct, and the Android repository's ~1,175-package clean baseline creates a false sense of what a clean Swift scan means.",
+        "severity": "medium",
+        "mitigation": "Treat dependency minimalism as the primary control \u2014 prefer Apple frameworks and the standard library, and require lead review for every new package. Layer Dependabot alerts as a second feed. Record the actual resolved package count in the scan config header so the thinness of the baseline is visible, and re-state the limitation in the security doc."
+      },
+      {
+        "risk": "Required gates move to macOS runners, which are slower to queue than Linux and cost roughly ten times as much per minute on private repositories. Forks made private, or any move to a private upstream, would make the required-check set expensive enough to pressure someone into weakening it.",
+        "severity": "medium",
+        "mitigation": "Keep the upstream repository public so standard runners remain free. Keep workflow-lint and workflow-security on ubuntu-latest \u2014 they need no Xcode. Split platform-independent modules onto `swift test` so most test feedback does not require macOS. Add explicit `timeout-minutes` to every job, closing the Android gap where the dependency-scan and build jobs have none."
+      },
+      {
+        "risk": "The pinned Xcode version is not managed by any dependency automation and can disappear from a runner image without warning, hard-failing every required build gate at once. This is the same class of silent rot the Android repository already documents for its hand-maintained pip/go/tarball tool pins.",
+        "severity": "medium",
+        "mitigation": "Add a Renovate custom manager for the Xcode selection and for every pinned analysis tool version. Pin explicitly with `xcode-select` rather than relying on the image default, and treat a runner-image deprecation notice as an actionable dependency update."
+      },
+      {
+        "risk": "A user with a free Apple account cannot use TestFlight and gets seven-day sideload profiles instead, requiring a rebuild every week. If the documentation does not make the paid membership a stated prerequisite, users will hit an opaque signing or upload failure and file it as a project bug.",
+        "severity": "medium",
+        "mitigation": "Make the paid Apple Developer Program membership an explicit, up-front prerequisite in the build documentation, and have the Build Secrets Preflight fail with that exact message when the account cannot use the TestFlight path."
+      },
+      {
+        "risk": "Contributor-facing documentation drifts from the enforced ruleset. The Android repository already carries at least six such defects \u2014 CONTRIBUTING lists five checks and describes Workflow Lint as advisory zizmor when it is a hard-failing actionlint gate, claims the SAST gate scans the diff when it scans whole directories, two local-reproduction snippets scan less than CI does, one gate has no documented reproduction, and a workflow header claims to be the only workflow among eighteen. Porting the prose would port the errors.",
+        "severity": "medium",
+        "mitigation": "Do not copy the prose. Generate the required-check table from the ruleset, or add a CI step that compares the documented list against the configured one. Drive local reproduction from the same committed script CI invokes so the two cannot diverge."
+      },
+      {
+        "risk": "CodeRabbit skips pull requests authored by dependency, release, and CI bots, so dependency-bump pull requests receive no medical-safety, BLE, or secret review from that layer. Under fork-and-build, a bot-authored bump that lands upstream propagates to every user's signing-credentialed build.",
+        "severity": "medium",
+        "mitigation": "Keep the Android tiering that routes crypto, cipher, and security-sensitive packages plus all majors to manual lead review with no auto-merge. Ensure required status checks still gate bypass-actor merges. Consider narrowing the auto-merge tier further given the wider blast radius."
+      },
+      {
+        "risk": "The accepted Android residual gap \u2014 secrets present only in the built artifact \u2014 persists on iOS and widens slightly, since the entitlements, embedded provisioning profile, and bundled resources of a signed IPA are never inspected by any gate once MobSF is declined again.",
+        "severity": "low",
+        "mitigation": "The Entitlements & Plist Guard covers the posture half of that gap deterministically. Keep the artifact-SAST revisit trigger verbatim from the Android decision \u2014 reinstate it if distribution changes or if any write or therapeutic surface is ever introduced \u2014 and state the residual gap plainly rather than leaving it implicit."
+      }
+    ],
+    "questions_for_pm": [
+      "Is the fork-and-build pipeline an upstream-maintained, supported product surface \u2014 held to the same required gates, CODEOWNERS review, and security response commitments as the app itself \u2014 or is it published as reference configuration that each user adopts at their own risk? The answer determines who owns the consequences when upstream code runs inside a user's build with that user's Apple Developer signing credentials, and it is a liability and support-scope judgment that cannot be read off the Android repository or Apple's rules."
+    ]
+  }
+}
