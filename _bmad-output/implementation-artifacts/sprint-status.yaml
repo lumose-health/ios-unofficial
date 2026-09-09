@@ -1,0 +1,171 @@
+# generated: 2026-08-10
+# last_updated: 2026-08-10
+# project: ios-unofficial
+# project_key: NOKEY
+# tracking_system: file-system
+# story_location: _bmad-output/implementation-artifacts
+
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+#
+# Epic Status Transitions:
+#   - backlog -> in-progress: Automatically when first story is created (via create-story)
+#   - in-progress -> done: Manually when all stories reach 'done' status
+#
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created in stories folder
+#   - in-progress: Developer actively working on implementation
+#   - review: Ready for code review (via Dev's code-review workflow)
+#   - done: Story completed
+#
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+#
+# Action Item Status:
+#   - open: Committed during a retrospective, not yet addressed
+#   - in-progress: Actively being worked on
+#   - done: Completed
+#
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when first story is created
+# - Stories can be worked in parallel if team capacity allows
+# - Developer typically creates next story after previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+# - Retrospective appends its action items to action_items; sprint-status surfaces open ones
+
+generated: 2026-08-10
+last_updated: 2026-08-17
+project: ios-unofficial
+project_key: NOKEY
+tracking_system: file-system
+story_location: _bmad-output/implementation-artifacts
+
+development_status:
+  epic-1: in-progress
+  # 1-1 MERGE LOG (PM autonomous merge, 2026-08-17): PR #3 squash-merged to develop,
+  # merge commit b16c26cf. Route claude/opus/high, 3 dev cycles (c1 impl, c2+c3 review
+  # fixes), gates green every cycle. Reviews: cross-provider adversarial (codex/
+  # gpt-5.6-sol, 3 rounds, 2 CRITICAL + 4 MAJOR + 1 residual all closed w/ negative-test
+  # evidence, final APPROVE; vectors independently rebuilt in Ruby/OpenSSL); CodeRabbit
+  # triggered review (5 findings fixed, all replied, threads resolved); GitGuardian
+  # clean; Sentry Seer clean at PR-open (does not re-run on push — recorded). No
+  # protected paths; diff inside declared surface; no bypass; no external engagement.
+  # NOTE: briefing said no PR apps — in fact CodeRabbit/Seer/GitGuardian run org-level;
+  # CodeRabbit auto-review is OFF for base=develop (needs @coderabbitai review trigger
+  # or a .coderabbit.yaml change — config follow-up for the maintainer, not done in-story).
+  1-1-generate-ec-jpake-known-answer-vectors-spk-2: done
+  # 1-2: PROTECTED PATH — PR #4 open to develop; the maintainer authorized doc-honesty cycle 4
+  # (interpolation-bypass class ACCEPTED as executable xfail, deferred to 8-6).
+  # 4 cycles claude/opus, gates green each; codex/sol review final APPROVE; production
+  # byte-frozen since cycle 1, constants verified vs Android. Triage wave running;
+  # merge decision reserved for the maintainer (protected path).
+  1-2-safetycore-canonical-glucose-safety-constants-and-one-clock: done
+  # 1-3: story drafted (sonnet/high route); DISPATCH BLOCKED until 1-2 (PR #4) merges.
+  1-3-freshness-tier-classification-and-independent-decay: done
+  # 1-4: done via PR #7 (9ef310c); 4 cycles incl. maintainer-authorized doc-honesty round
+  1-4-the-driver-catalog-and-the-closed-capability-set: done
+  1-5-the-simulated-driver-as-a-shipped-target: done
+  1-6-encrypted-local-store-with-write-time-invariants: in-progress
+  1-7-the-trace-replay-driver: backlog
+  1-8-discover-a-tandem-pump-by-scanning: backlog
+  1-9-complete-first-time-tandem-pairing: backlog
+  1-10-reconnect-indefinitely-and-survive-backgrounding: backlog
+  1-11-recover-from-a-broken-pairing: backlog
+  1-12-activate-deactivate-and-persist-driver-selection: backlog
+  1-13-home-dashboard-and-the-glucose-hero: backlog
+  1-14-the-status-row-pump-link-and-what-it-does-not-claim: backlog
+  1-15-refresh-without-losing-what-i-already-had: backlog
+  1-16-navigation-and-the-capability-driven-tab-bar: backlog
+  1-17-first-run-welcome-safety-and-getting-to-a-working-monitor: backlog
+  1-18-driver-contributed-cards-deterministically-ordered: backlog
+  1-19-reach-pairing-from-settings-with-driver-supplied-copy: backlog
+  1-20-see-connection-status-without-opening-the-app: backlog
+  epic-1-retrospective: optional
+  epic-2: backlog
+  2-1-accessorysetupkit-and-relaunch-rules-spike-spk-1: backlog
+  2-2-the-alert-floor-alarming-with-no-backend: backlog
+  2-3-never-alarm-from-stale-data-or-thresholds-nobody-set: backlog
+  2-4-deliver-the-alert-and-be-honest-about-what-can-silence-it: backlog
+  2-5-alert-sounds-slots-and-duplicate-suppression: backlog
+  2-6-re-alarm-cooldown-and-episode-semantics: backlog
+  2-7-acknowledge-offline-and-everywhere: backlog
+  2-8-alert-thresholds-editable-locally-read-only-with-a-backend: backlog
+  2-9-the-coverage-claim: backlog
+  2-10-coverage-expiry-decay-and-the-dead-mans-switch: backlog
+  2-11-alert-history-and-the-notification-status-card: backlog
+  2-12-developer-fault-injection-off-in-every-shipped-build: backlog
+  epic-2-retrospective: optional
+  epic-3: backlog
+  3-1-one-bundle-one-shared-safety-module-read-only-wrist: backlog
+  3-2-complications-widgets-and-the-absence-of-a-watch-face: backlog
+  3-3-glucose-and-iob-on-the-wrist-with-freshness: backlog
+  3-4-decay-on-the-watchs-own-clock: backlog
+  3-5-the-wrist-coverage-claim-rendered-never-derived: backlog
+  3-6-wrist-alerts-scheduled-on-the-watch: backlog
+  3-7-dismiss-from-the-wrist: backlog
+  3-8-history-and-the-full-screen-graph-on-the-wrist: backlog
+  3-9-iphone-settings-watch-and-the-true-wrist-link-state: backlog
+  3-10-live-activity-on-the-lock-screen-and-dynamic-island: backlog
+  epic-3-retrospective: optional
+  epic-4: backlog
+  4-1-the-trend-chart: backlog
+  4-2-chart-detail-zoom-landscape-and-shared-period-state: backlog
+  4-3-time-in-range-and-cgm-statistics: backlog
+  4-4-insulin-summary-and-delivered-insulin-honesty: backlog
+  4-5-recent-boluses-and-event-cross-referencing: backlog
+  epic-4-retrospective: optional
+  epic-5: backlog
+  5-1-configure-a-backend-safely: backlog
+  5-2-stay-signed-in-and-sign-out-cleanly: backlog
+  5-3-upload-durably-and-never-lose-an-event: backlog
+  5-4-backend-optional-transitions: backlog
+  5-5-tolerant-reading-and-the-contract-pin: backlog
+  5-6-opportunity-driven-background-work-and-the-initial-history-download: backlog
+  5-7-the-backend-mediated-nightscout-source: backlog
+  5-8-ai-chat: backlog
+  5-9-spoken-responses-and-ai-chat-on-the-wrist: backlog
+  5-10-log-a-meal-by-photo: backlog
+  5-11-carb-estimates-that-never-read-as-a-dose: backlog
+  5-12-correct-explain-and-reuse-a-meal: backlog
+  epic-5-retrospective: optional
+  epic-6: backlog
+  6-1-settings-composition-and-mode-dependent-visibility: backlog
+  6-2-appearance-units-retention-and-meal-intelligence: backlog
+  6-3-about-versions-and-the-offline-license-viewer: backlog
+  6-4-accessibility-identifier-parity: backlog
+  6-5-voiceover-non-colour-encoding-and-dynamic-type: backlog
+  epic-6-retrospective: optional
+  epic-7: in-progress
+  # 7-1: INTERACTIVE / HUMAN-RUN — requires physical BLE hardware (two iOS devices
+  # or a Mac central); story predates router wiring and has NO route: frontmatter.
+  # NOT a dispatch candidate for the automation flow. (Noted 2026-08-16.)
+  7-1-medtronic-transport-spike-part-a-no-pump-required-spk-3: ready-for-dev
+  7-2-advertise-and-wait-pairing: backlog
+  7-3-medtronic-decode-gates-and-history: backlog
+  7-4-ship-medtronic-gated-at-beta: backlog
+  epic-7-retrospective: optional
+  epic-8: backlog
+  8-1-fork-add-six-secrets-and-get-a-signed-build: backlog
+  8-2-register-identifiers-once-and-choose-a-channel: backlog
+  8-3-never-let-an-installed-build-lapse: backlog
+  8-4-promotion-versioning-and-pinned-inputs: backlog
+  8-5-the-five-required-checks: backlog
+  8-6-swift-static-analysis-that-actually-analyses-swift: backlog
+  8-7-guards-that-keep-the-invariants-true: backlog
+  8-8-build-test-and-ui-test-every-target: backlog
+  8-9-licensing-attribution-and-the-spdx-contract: backlog
+  8-10-the-install-runbook-and-the-published-docs-set: backlog
+  8-11-the-disclosure-surfaces-that-forced-losses-depend-on: backlog
+  8-12-policy-privacy-and-the-contributor-path: backlog
+  epic-8-retrospective: optional
+
+# DEFERRED (2026-08-19): WallClockSchedulerTests is timing-sensitive under load —
+# flaked once locally (1/259), passed on immediate re-run twice. Harden when a
+# test-infra story exists: widen tolerance or virtualize the clock boundary.

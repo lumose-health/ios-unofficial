@@ -1,0 +1,1018 @@
+{
+  "key": "contract-and-invariants",
+  "label": "API contract pin and safety invariants",
+  "map": {
+    "subsystem": "API contract pin and safety invariants (contract/ pin, ContractSmokeTest, SafetyConstantDriftGuardTest, ADRs 0001-0003, safety-constants SoT, SPDX header policy, AI-attribution enforcement)",
+    "capabilities": [
+      {
+        "name": "Vendored OpenAPI pin (contract/openapi.json)",
+        "behavior": "A byte-for-byte vendored copy of the backend monorepo's apps/api/contract/openapi.json. 748,299 bytes. `openapi: \"3.1.0\"`. Top-level keys are exactly `components`, `info`, `openapi`, `paths` \u2014 there is NO `servers` block and no top-level `security` block, so the pin carries no base URL and no auth scheme (base URL is user-set at runtime via BaseUrlInterceptor). `info` = {title: \"GlycemicGPT API\", version: \"0.1.0\", description: \"AI-powered diabetes management API\", x-contract-version: \"1\"} \u2014 note x-contract-version is a JSON *string*, read with getString. 164 paths, 274 component schemas. Never hand-edited: refresh means copying the whole file over. The pin is consumed only by tests; no runtime code reads it, and it is explicitly out of scope for SPDX stamping.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/contract/openapi.json",
+          "android-unofficial/contract/README.md"
+        ],
+        "edge_cases": [
+          "No `servers` key \u2014 the port cannot derive an endpoint host from the pin.",
+          "x-contract-version is a string, not an int, in the JSON.",
+          "Excluded from SPDX header stamping by policy."
+        ]
+      },
+      {
+        "name": "CONTRACT_VERSION file and version-agreement check",
+        "behavior": "contract/CONTRACT_VERSION is a 2-byte file containing `1` + newline. It must equal `info.x-contract-version` inside the pinned spec. Test `vendored CONTRACT_VERSION matches the pinned spec x-contract-version` reads the file via ContractFixtures.readRepoFile(\"contract/CONTRACT_VERSION\").trim(), reads the spec string, and assertEquals(specVersion, fileVersion) \u2014 a string comparison, not numeric. Failure message tells the developer to \"refresh the pin and its version together\". Per ADR 0001, the semantic type is a monotonically increasing integer starting at 1, compared numerically at runtime once the compat signal ships; an unparseable value must be treated as absent, never as compatible. Refresh procedure: copy openapi.json, set CONTRACT_VERSION from the new spec, run ./gradlew :app:testDebugUnitTest.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/contract/CONTRACT_VERSION",
+          "android-unofficial/app/src/test/java/com/glycemicgpt/mobile/data/remote/ContractSmokeTest.kt"
+        ],
+        "edge_cases": [
+          "Test compares as strings; ADR mandates numeric semantics at runtime.",
+          "Both files must be updated in the same PR."
+        ]
+      },
+      {
+        "name": "ContractFixtures repo-root resolution helper",
+        "behavior": "object com.glycemicgpt.mobile.contract.ContractFixtures. `PINNED_SPEC_PATH = \"contract/openapi.json\"`. `repoRoot()` starts at File(System.getProperty(\"user.dir\")).absoluteFile (the Gradle module project dir for unit tests) and walks up parentFile until it finds a directory containing a file named `settings.gradle.kts`; if it reaches null it calls error(...) with the starting dir. `readRepoFile(relativePath)` resolves against repoRoot(), `check(file.isFile)` with a message instructing the developer to update the guard and docs/contract/safety-constants.md if the file moved, then readText(). `pinnedSpec()` = JSONObject(readRepoFile(PINNED_SPEC_PATH)) \u2014 reparsed on every call, no caching. Both contract guards depend on this: they read repo files from disk, not from the test classpath.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/app/src/test/java/com/glycemicgpt/mobile/contract/ContractFixtures.kt"
+        ],
+        "edge_cases": [
+          "Repo-root marker is settings.gradle.kts \u2014 moving/renaming it breaks both guards.",
+          "pinnedSpec() re-parses 748 KB of JSON per call (called many times per test run)."
+        ]
+      },
+      {
+        "name": "ContractSmokeTest harness (real Retrofit + real Moshi)",
+        "behavior": "JUnit4 class in package com.glycemicgpt.mobile.data.remote. @Before: starts an okhttp3 MockWebServer, builds Retrofit with baseUrl = server.url(\"/\") and MoshiConverterFactory.create(moshi), creates the REAL GlycemicGptApi interface. `moshi = Moshi.Builder().add(InstantAdapter()).build()` \u2014 deliberately byte-identical to NetworkModule.provideMoshi() so the test exercises the app's actual deserialization config (no bespoke adapters, no KotlinJsonAdapterFactory; DTOs use codegen @JsonClass(generateAdapter=true)). @After: server.shutdown(). `enqueue(body)` queues MockResponse().setBody(body) (HTTP 200, no headers). InstantAdapter: @ToJson uses DateTimeFormatter.ISO_INSTANT, @FromJson uses Instant.parse(value) \u2014 a non-ISO string throws DateTimeParseException, not JsonDataException.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/app/src/test/java/com/glycemicgpt/mobile/data/remote/ContractSmokeTest.kt",
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/data/remote/InstantAdapter.kt",
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/di/NetworkModule.kt"
+        ],
+        "edge_cases": [
+          "Moshi config drift between NetworkModule and the test would silently weaken the guard; they must be kept identical by hand.",
+          "Instant parse failures surface as DateTimeParseException, which assertIncompatible would NOT accept (it requires a JsonDataException in the cause chain)."
+        ]
+      },
+      {
+        "name": "Golden round-trip assertions (4 payloads)",
+        "behavior": "Hand-authored payloads written to match the pinned spec (NOT generated from it), deserialized through the real DTOs. (1) health: `{\"status\":\"ok\"}` \u2192 HealthResponse.status == \"ok\". (2) login: access_token/refresh_token/token_type/expires_in=3600/user{id,email,role} \u2192 LoginResponse.accessToken==\"a\", refreshToken==\"r\", expiresIn==3600, user.id==\"u1\". (3) alert thresholds: urgent_low=55.0, low_warning=70.0, high_warning=180.0, urgent_high=250.0 \u2192 Float comparisons with delta 0.0f; iob_warning absent \u2192 assertNull(iobWarning). (4) safety limits: min_glucose_mgdl=20, max_glucose_mgdl=500, max_basal_rate_milliunits=3000, max_bolus_dose_milliunits=25000, updated_at=\"2026-01-01T00:00:00Z\" \u2192 minGlucoseMgDl==20, maxGlucoseMgDl==500. These gate client-side DTO regressions; they do NOT by themselves detect backend drift.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/app/src/test/java/com/glycemicgpt/mobile/data/remote/ContractSmokeTest.kt",
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/data/remote/dto/ApiModels.kt"
+        ],
+        "edge_cases": [
+          "Payloads are hand-written, so they can drift from the real spec without failing \u2014 only the endpoint-presence and field-presence tests couple to the pin.",
+          "The 55/70/180/250 threshold values are fixture values, not app defaults."
+        ]
+      },
+      {
+        "name": "Additive-drift tolerance assertions",
+        "behavior": "Two tests pin the client half of the tolerant-reader posture. (1) `unknown extra fields are ignored`: alert-thresholds payload plus `iob_warning:4.5`, `future_field:\"ignored\"`, `nested_future:{\"a\":1}` \u2014 parses fine; urgentLow==55.0f and iobWarning==4.5f. Moshi's generated adapters skip unknown keys by default, including unknown nested objects. (2) `optional field absent is tolerated (older backend)`: `{\"glucose_unit\":\"mmol\"}` \u2192 GlucoseUnitResponse.glucoseUnit==\"mmol\", glucoseUnitSource==null (the DTO declares `@Json(name=\"glucose_unit_source\") val glucoseUnitSource: String? = null`). Together these encode: a newer backend adding fields, and an older backend predating an optional field, both stay readable. Kotlin default values on DTO constructor params are what make absent-optional tolerated.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/app/src/test/java/com/glycemicgpt/mobile/data/remote/ContractSmokeTest.kt",
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/data/remote/dto/ApiModels.kt"
+        ],
+        "edge_cases": [
+          "A Swift Codable port defaults to throwing on missing keys \u2014 nullable-with-default semantics must be reproduced explicitly per field."
+        ]
+      },
+      {
+        "name": "Incompatible-drift assertions and assertIncompatible",
+        "behavior": "Three tests prove a consumed-field break fails loudly. (1) `access_token` renamed to `accessToken` in the login payload. (2) nested `user` object missing its required `id`. (3) `min_glucose_mgdl` sent as the string \"twenty\" instead of Int. Helper `assertIncompatible(block)` runs the suspend call under runBlocking, catches Throwable, asserts non-null (\"Expected incompatible payload to fail parsing, but it parsed\"), then walks the cause chain via generateSequence(thrown){it.cause} and asserts at least one link `is JsonDataException`. So the contract is specifically: Moshi must raise JsonDataException (missing required property / type mismatch) \u2014 any other failure type fails the test. Type coercion is NOT tolerated: a JSON string where an Int is declared is treated as incompatible.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/app/src/test/java/com/glycemicgpt/mobile/data/remote/ContractSmokeTest.kt"
+        ],
+        "edge_cases": [
+          "Only JsonDataException counts; JsonEncodingException or DateTimeParseException would fail the assertion.",
+          "Nullable/defaulted consumed fields do NOT fail here \u2014 that is the documented blind spot."
+        ]
+      },
+      {
+        "name": "Endpoint-presence coupling to the pinned spec",
+        "behavior": "Test `every endpoint the app calls exists in the pinned spec`. Builds `specOps: Map<normalizedPath, Set<lowercased HTTP methods>>` from spec.paths. Reflects over `GlycemicGptApi::class.java.declaredMethods`, maps each through `retrofitOp` which checks, in order, @GET, @POST, @PUT, @DELETE, @PATCH and returns (lowercased verb, annotation value) or null. Results are `.distinct()`, then filtered to those where the normalized path is absent from specOps or the verb is not in that path's method set. `normalizePath` = `path.replace(Regex(\"\\\\{[^}]+}\"), \"{}\")`, so Retrofit's `{deviceToken}` matches the spec's `{device_token}`. Asserts the missing list is empty with a message naming contract/openapi.json. Verified today: all 34 declared operations resolve; missing list is empty.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/app/src/test/java/com/glycemicgpt/mobile/data/remote/ContractSmokeTest.kt",
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/data/remote/GlycemicGptApi.kt"
+        ],
+        "edge_cases": [
+          "Path-parameter NAMES are erased by normalization \u2014 a backend renaming a path param is not caught.",
+          "Only checks presence of path+verb; request/response shapes for non-covered endpoints are unchecked.",
+          "Relies on Java reflection over a Kotlin interface; a Swift port needs an explicit endpoint table instead."
+        ]
+      },
+      {
+        "name": "The 34 endpoints the app calls (the covered surface)",
+        "behavior": "GET /health; POST /api/auth/mobile/login; POST /api/auth/mobile/refresh; POST /api/integrations/pump/push; POST /api/ai/chat; GET /api/ai/provider; POST /api/v1/devices/register; DELETE /api/v1/devices/{deviceToken}; GET /api/v1/alerts/pending; POST /api/v1/alerts/{alertId}/acknowledge; GET+PATCH /api/settings/glucose-unit; POST /api/settings/glucose-unit/acknowledge; GET+PATCH /api/settings/meal-intelligence; GET /api/settings/target-glucose-range; GET /api/settings/safety-limits; GET /api/settings/alert-thresholds; GET /api/settings/analytics-config; GET /api/settings/pump-profile; PUT+DELETE /api/settings/plugin-declarations; GET /api/integrations/nightscout; GET /api/integrations/nightscout/{connectionId}/data?since&limit; POST(multipart)+GET /api/food-records (limit=50, offset=0 defaults); DELETE /api/food-records/{recordId}; POST .../correct; POST .../confirm-identity; GET .../audit; POST .../save-as-common-food; GET /api/common-foods (limit=50, offset=0); PATCH+DELETE /api/common-foods/{commonFoodId}.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/data/remote/GlycemicGptApi.kt"
+        ],
+        "edge_cases": [
+          "Meal-intelligence endpoints return 404 when the feature flag is off; the photo upload returns 422 when the AI provider has no vision route.",
+          "/api/food-records/{id}/audit returns 404 until an audit exists.",
+          "Only /api/v1/devices and /api/v1/alerts are version-prefixed; everything else is unversioned."
+        ]
+      },
+      {
+        "name": "Field-presence coupling for safety-critical responses",
+        "behavior": "Test `pinned spec still declares the safety-critical fields the app reads` couples directly to the pin (unlike the hand-written round-trips). assertConsumedFieldsPresent(path, method, fields) resolves the 200 \u2192 content[\"application/json\"] \u2192 schema, follows a top-level `$ref` into components.schemas, and asserts every listed field is in `properties`. Covered: GET /api/settings/safety-limits \u2192 min_glucose_mgdl, max_glucose_mgdl; GET /api/settings/alert-thresholds \u2192 urgent_low, low_warning, high_warning, urgent_high; POST /api/auth/mobile/login \u2192 access_token, refresh_token, expires_in, user. assertArrayItemFieldsPresent additionally descends properties[arrayProperty].items for GET /api/integrations/nightscout/{connection_id}/data \u2192 pump_events[units, event_type] and glucose_readings[value]. Note the spec path is written with the SPEC's snake_case `{connection_id}`, not Retrofit's `{connectionId}` \u2014 this lookup is unnormalized.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/app/src/test/java/com/glycemicgpt/mobile/data/remote/ContractSmokeTest.kt"
+        ],
+        "edge_cases": [
+          "responseSchema()/resolveRef() only follow a TOP-LEVEL $ref; a $ref nested under allOf/oneOf/anyOf would throw JSONException rather than resolve.",
+          "Only field NAMES are checked \u2014 a type change on these fields is not caught by this test.",
+          "The path literal is hardcoded snake_case; a spec path-param rename breaks the test with a JSONException, not a clean assertion failure."
+        ]
+      },
+      {
+        "name": "Nightscout pump_events.units \u2014 the nullable-consumed exception",
+        "behavior": "NightscoutPumpEventDto declares `val units: Float? = null`. The Room mapper DROPS any pump event whose `units` is null, so a silent backend rename of `units` would delete all Nightscout bolus/basal rows and understate IOB \u2014 with no parse error. Because it is nullable, the round-trip tests cannot catch it; it is covered ONLY by assertArrayItemFieldsPresent on the pinned spec. ADR 0003 states the standing rule explicitly: when adding a nullable consumed field whose absence would silently degrade a safety surface, add it to the field-presence coupling rather than relying on the round-trip. The pinned spec today declares pump_events items {duration_minutes, event_timestamp, event_type, is_automated, meal_event_id, metadata_json, ns_id, source, units} and glucose_readings items {ns_id, reading_timestamp, source, trend, trend_rate, value}.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/data/remote/dto/NightscoutDtos.kt",
+          "android-unofficial/docs/adr/0003-contract-drift-strategy.md"
+        ],
+        "edge_cases": [
+          "Silent IOB understatement is the failure mode \u2014 no exception, no user-visible error.",
+          "NightscoutGlucoseReadingDto.value is a non-null Int, so its removal DOES throw."
+        ]
+      },
+      {
+        "name": "What the smoke test does NOT prove (documented blind spots)",
+        "behavior": "Stated in contract/README.md and ADR 0003. A pass proves only: the exercised responses round-trip, the enumerated safety-critical field names still exist, and endpoint/method presence. It does NOT prove every schema change is additive, and it is not a DTO\u2194spec structural diff. Blind spots: (a) removal of a nullable/defaulted consumed field deserializes to null silently \u2014 only non-null undefaulted fields (glucose bounds, auth tokens) fail loudly, and the README says keep it that way; (b) type changes on non-exercised surfaces; (c) path-parameter renames (normalized away); (d) request-body schema drift (only responses are checked); (e) enum-member and nullability changes; (f) anything about a runtime backend \u2014 the guard fires only when the pin is refreshed.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/contract/README.md",
+          "android-unofficial/docs/adr/0003-contract-drift-strategy.md"
+        ],
+        "edge_cases": [
+          "README instructs: \"Review schema changes to surfaces the smoke test does not exercise before relying on the pass.\""
+        ]
+      },
+      {
+        "name": "ADR 0001 Decision 1 \u2014 endpoint versioning left as-is",
+        "behavior": "Accepted. The backend's `/api/*` versioning will NOT be normalized. Only /api/v1/devices, /api/v1/alerts (incl. alert_stream), /api/v1/api-keys, /api/v1/glucose/stream are version-prefixed; the rest (/api/auth/\u2026, /api/settings/\u2026, /api/ai/\u2026, /api/food-records, most /api/integrations/\u2026) are unversioned. The split is historical, not designed. Stated reasons: normalization is a runtime backend change out of scope for guard-only work, and it would break every unversioned path the already-shipped app calls unless done with parallel routing (large, risky). The contract pin + drift gate already makes the whole surface explicit and CI-enforced, which was the property actually needed. Standing rule for the future: if a breaking change to an unversioned path is unavoidable, introduce a /v2 sibling and keep the old path until the shipped fleet ages out \u2014 never mutate an unversioned path in place.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/docs/adr/0001-api-versioning-and-compat-signal.md"
+        ],
+        "edge_cases": [
+          "Revisit trigger: an unavoidable breaking change to an unversioned path."
+        ]
+      },
+      {
+        "name": "ADR 0001 Decision 2 \u2014 app-compatibility signal (designed, NOT implemented)",
+        "behavior": "Deliberately deferred: \"design now, implement later\"; no runtime path ships. Design: backend exposes x-contract-version over a stable runtime channel \u2014 an `X-Contract-Version` response header on /health or a field in the /health body (neither exists today). The app pins the minimum contract version it requires (contract/CONTRACT_VERSION, the version it was built and tested against) and compares on first contact. Ordering: CONTRACT_VERSION is a monotonically increasing integer starting at 1, not semver and not opaque; comparison is numeric. A value that fails to parse as an integer, or a signal the app cannot read, is treated as ABSENT \u2014 the older/unknown-backend branch \u2014 never silently as compatible. Reason for deferral: this work is guard-only and adds no runtime path.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/docs/adr/0001-api-versioning-and-compat-signal.md"
+        ],
+        "edge_cases": [
+          "Unparseable version must NOT be treated as compatible \u2014 fail toward the warning branch.",
+          "No /health header or body field exists in the pinned spec today."
+        ]
+      },
+      {
+        "name": "Scoped fail-open-with-warning state machine (designed)",
+        "behavior": "Three states on first contact with a backend: (1) signal present AND app-required \u2264 backend version \u2192 proceed normally. (2) signal present AND backend older than the app requires, OR (3) signal absent/unparseable \u2192 proceed on READ/MONITORING paths with a one-time, dismissible warning that the backend is older/unknown and some features may not work; individual failing calls are handled per-call, not by blocking the app. The app MUST NOT hard-refuse for an unknown backend \u2014 that would brick a legitimate self-hoster on upgrade. Scope limit (load-bearing): fail-open applies to reading/displaying only because the app is monitoring-only and issues no therapeutic/device-control commands (no bolus, no pump writes; the AI never issues device commands \u2014 a project-wide invariant). Any future safety-critical WRITE surface must be REFUSED when backend compatibility is unknown, not inherit fail-open. Hard-refuse of the whole app is reserved for a future explicitly-declared hard-incompatibility epoch.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/docs/adr/0001-api-versioning-and-compat-signal.md"
+        ],
+        "edge_cases": [
+          "Revisit trigger: adding any therapeutic or safety-critical write surface.",
+          "Warning must be one-time and dismissible, not a recurring modal."
+        ]
+      },
+      {
+        "name": "ADR 0002 \u2014 backend tolerant reader (server half)",
+        "behavior": "Accepted; records existing backend behavior as THE cross-cadence compatibility mechanism, to be preserved deliberately. Two named mechanisms: (1) legacy-value migration BEFORE validation \u2014 apps/api/src/schemas/pump.py `migrate_control_iq_mode`; `control_iq_mode` is a loose `str | None` (not an enum) and the legacy value `standard` is rewritten to `none` pre-validation, so an older app still sending `standard` is accepted rather than 422'd. (2) loose-typed pass-through fields \u2014 `raw_events` and `pump_info` on the pump-push schema are intentionally typed `Any`, with an explicit \"shape has drifted slightly\" note; new optional fields the app doesn't know, or fields the app omits, do not break the exchange. Consequence clause: any future backend change removing tolerant-reader behavior (tightening raw_events/pump_info, dropping a legacy migration) is a cross-cadence BREAKING change \u2014 bump the contract version and coordinate with the shipped fleet.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/docs/adr/0002-backend-tolerant-reader-compat.md"
+        ],
+        "edge_cases": [
+          "The Android PumpEventDto still carries `control_iq_mode` as a nullable String \u2014 matching the loose backend type."
+        ]
+      },
+      {
+        "name": "ADR 0002 \u2014 supported compatibility directions (explicit)",
+        "behavior": "The mechanism is DIRECTIONAL and only two directions are established. (1) Older app \u2192 newer backend: covered by the backend legacy-value migration and loose-typed pass-through fields. (2) Newer backend \u2192 older app: covered by Moshi ignoring unknown fields on the client. NOT established: newer app \u2192 older backend \u2014 an app calling a backend that predates a field/endpoint it now expects. That third case is handled defensively, not proven-compatible, via the scoped fail-open-with-warning and per-call error handling of ADR 0001 plus the app's on-device defaults where a setting can't be fetched. Explicit instruction: do not treat the tolerant reader as a blanket cross-cadence guarantee; where a specific operation must be compatibility-gated, gate it per ADR 0001 rather than assuming tolerance.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/docs/adr/0002-backend-tolerant-reader-compat.md"
+        ],
+        "edge_cases": [
+          "A Swift port shipping ahead of the backend lands in the unproven third direction by default."
+        ]
+      },
+      {
+        "name": "ADR 0003 Decision 1 \u2014 smoke test over full DTO\u2194spec diff",
+        "behavior": "Accepted, with the rejected alternative recorded. A full automated DTO-to-OpenAPI structural diff (walk every DTO field, resolve its $ref, compare types/nullability/enum members) was deliberately NOT built. Stated reasons: it needs a Kotlin-reflection + JSON-Schema resolver modelling Moshi @Json(name=\u2026) renames, defaulted/nullable semantics, Instant adapters, and polymorphism \u2014 substantial test infrastructure to maintain; and the genuine risk is narrow (a field the app READS disappearing or changing type, or an endpoint the app CALLS being dropped). The smoke test delivers the needed compatibility signal at a fraction of the cost. Pin-update procedure recorded here too: refresh openapi.json byte-for-byte, update CONTRACT_VERSION to match, reconcile affected fixtures; if endpoint-presence or a golden round-trip then fails, the change is incompatible and needs a coordinated app change.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/docs/adr/0003-contract-drift-strategy.md"
+        ],
+        "edge_cases": [
+          "No revisit trigger is stated for Decision 1; the blind-spot rule (add nullable consumed fields to field-presence coupling) is the ongoing obligation."
+        ]
+      },
+      {
+        "name": "ADR 0003 Decision 2 \u2014 safety constants: guard now, consolidate later",
+        "behavior": "The three cross-repo safety constants are guarded by SafetyConstantDriftGuardTest via direct constant reads, behavioral boundary checks, and a comment-stripped source scan of every shipped duplication site. The 20..500 mg/dL bound is genuinely scattered with NO single owner (the ADR is explicit that 18.0156 is unrelated \u2014 it is only the mmol/L display-conversion factor, not a bound), so the guard asserts EVERY current duplication site rather than one constant. Consolidating the bound into a single shared object with all call sites referencing it is recorded as the right end state and an explicit FOLLOW-UP; it is deliberately not bundled because it edits safety validators (require/init blocks in BgmReading, PluginEvent, EnrichedBolusEvent, CgmReading, SafetyLimits) and would enlarge the blast radius of a guard-only change. Acknowledged cost: adding a duplication site requires updating the guard enumeration AND safety-constants.md in the same PR.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/docs/adr/0003-contract-drift-strategy.md",
+          "android-unofficial/docs/contract/safety-constants.md"
+        ],
+        "edge_cases": [
+          "A Swift port should consolidate up front rather than reproduce 19 scattered sites."
+        ]
+      },
+      {
+        "name": "Safety constant #1 \u2014 mmol\u2194mg/dL factor 18.0156",
+        "behavior": "Canonical value 18.0156 (Double). Backend owner: apps/api/src/core/units.py MGDL_PER_MMOL; web has a matching MGDL_PER_MMOL. Android sites: GlucoseFormat.MGDL_PER_MMOL (phone choke-point) and GlucoseDisplayUtils.MGDL_PER_MMOL (wear mirror; wear cannot depend on :app). Both KDocs forbid introducing a second value (explicitly naming 18.02 and 18.0182 as wrong). Canonical storage is mg/dL everywhere; mmol/L is display/input ONLY; alert and SSE numerics stay mg/dL. Conversion rule: divide ONCE from the most precise mg/dL source and round LAST to one decimal, so anchors land conventionally: 70\u21923.9, 180\u219210.0, 120\u21926.7, 100\u21925.6. All formatting uses Locale.US so the separator is always a dot (cross-surface consistency and release-log-scrubber matching).",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/domain/format/GlucoseFormat.kt",
+          "android-unofficial/wear-device/src/main/java/com/glycemicgpt/weardevice/util/GlucoseDisplayUtils.kt"
+        ],
+        "edge_cases": [
+          "Rounding early (e.g. converting an already-rounded value) breaks the 70\u21923.9 / 180\u219210.0 anchors.",
+          "Locale-sensitive formatting would emit a comma separator and break scrubbing."
+        ]
+      },
+      {
+        "name": "GlucoseFormat API surface (phone conversion choke-point)",
+        "behavior": "Pure-Kotlin object, no Android deps, so the watch can mirror it. label(): \"mg/dL\"/\"mmol/L\". spokenUnit(): \"milligrams per deciliter\"/\"millimoles per liter\". private mgdlToMmol(Double) = value / 18.0156 (mirrors backend mgdl_to_mmol). convertValue(mgDl: Int, unit): Double \u2014 verbatim for MGDL, unrounded divide for MMOL. convertSpread(mgDl: Double): Double \u2014 offset-free divide, deliberately DISTINCT from convertValue because a spread (std-dev or difference) has no zero anchor and keeps a decimal in mg/dL where a value shows as an integer; reusing convertValue for a spread is called out as a bug. format(): mg/dL integer via toString, mmol \"%.1f\". formatWithLabel() joins with a space. formatMean(Float): mg/dL \"%.0f\" (byte-identical to the legacy string), mmol \"%.1f\". formatSpread(Float): one decimal in BOTH units, mmol via convertSpread.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/domain/format/GlucoseFormat.kt"
+        ],
+        "edge_cases": [
+          "convertValue vs convertSpread confusion is an explicitly named bug class.",
+          "mg/dL mean uses %.0f (half-up-ish Java formatting), not truncation."
+        ]
+      },
+      {
+        "name": "Wear GlucoseDisplayUtils (mirror + on-watch clamps)",
+        "behavior": "object in :wear-device. MGDL_PER_MMOL = 18.0156. isValidGlucose(mgDl) = mgDl in 20..500. sanitizeThresholds(rawLow, rawHigh, rawUrgentLow, rawUrgentHigh): low = rawLow.coerceIn(40, 200); high = rawHigh.coerceIn(maxOf(low+1, 100), 400); urgentLow = rawUrgentLow.coerceIn(20, low); urgentHigh = rawUrgentHigh.coerceIn(high, 500). bgColor: red 0xFFEF4444 when mgDl \u2264 urgentLow or \u2265 urgentHigh; yellow 0xFFEAB308 when \u2264 low or \u2265 high; else green 0xFF22C55E. alertColor: \"urgent_low\"/\"urgent_high\" red, \"low\"/\"high\" yellow, else Color.WHITE. formatGlucose/formatWithLabel mirror the phone (Locale.US, %.1f mmol). trendSymbol maps DOUBLE_UP \u21c8 / SINGLE_UP \u2191 / FORTY_FIVE_UP \u2197 / FLAT \u2192 / FORTY_FIVE_DOWN \u2198 / SINGLE_DOWN \u2193 / DOUBLE_DOWN \u21ca / else \"?\". formatAge: < \u2212STATUS_MAX_FUTURE_SKEW_MS \u2192 \"unknown time\"; <0 \u2192 \"just now\"; <1 min \u2192 \"just now\"; <60 min \u2192 \"Nm ago\"; else \"Xh Ym ago\".",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/wear-device/src/main/java/com/glycemicgpt/weardevice/util/GlucoseDisplayUtils.kt"
+        ],
+        "edge_cases": [
+          "KDoc warns: never feed formatGlucose output back into isValidGlucose, bgColor, sanitizeThresholds, or plotting geometry \u2014 those stay mg/dL.",
+          "The two coerceIn clamps (20, low) and (high, 500) are individually enumerated scan sites."
+        ]
+      },
+      {
+        "name": "Safety constant #2 \u2014 the 20..500 mg/dL glucose-validity bound",
+        "behavior": "Canonical: 20..500 mg/dL inclusive. Backend owner is not a single symbol but the platform invariant from PR #729, enforced by the CodeRabbit Medical-Safety gate in .coderabbit.yaml; the backend rejects outside this range at every ingestion mapper and on GlucoseReading (ge=20). Android has NO single owner today \u2014 the closest is SafetyLimits (DEFAULT_MIN_GLUCOSE / DEFAULT_MAX_GLUCOSE and the ABSOLUTE_* aliases), from which SafetyLimitsStore defaults derive. The bound appears as: importable public consts (SafetyLimits, CgmReading), private consts (DashboardComputations, HomeViewModel), inline `20..500` range literals in require/validation blocks, a SQL `BETWEEN 20 AND 500`, off-by-one forms `20..499`/`21..500`, and two wear coerceIn clamps. Any legitimate change must land in BOTH repos in the same coordinated release, with safety-constants.md and the guard enumeration updated in the same PR.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/docs/contract/safety-constants.md",
+          "android-unofficial/plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/pump/SafetyLimits.kt"
+        ],
+        "edge_cases": [
+          "Desync here means glucose is mis-validated \u2014 readings silently accepted or dropped.",
+          "Bound is inclusive on both ends; 20 and 500 are valid."
+        ]
+      },
+      {
+        "name": "SafetyLimits value object (bounds, defaults, safeOf clamping)",
+        "behavior": "data class SafetyLimits(minGlucoseMgDl=DEFAULT_MIN_GLUCOSE, maxGlucoseMgDl=DEFAULT_MAX_GLUCOSE, maxBasalRateMilliunits=DEFAULT_MAX_BASAL_MILLIUNITS, maxBolusDoseMilliunits=DEFAULT_MAX_BOLUS_MILLIUNITS). Constants: DEFAULT_MIN_GLUCOSE=20, DEFAULT_MAX_GLUCOSE=500, DEFAULT_MAX_BASAL_MILLIUNITS=15_000 (15 U/hr, Tandem hardware max), DEFAULT_MAX_BOLUS_MILLIUNITS=25_000 (25 U single dose); ABSOLUTE_MIN_GLUCOSE/ABSOLUTE_MAX_GLUCOSE/ABSOLUTE_MAX_BASAL_MILLIUNITS/ABSOLUTE_MAX_BOLUS_MILLIUNITS alias the DEFAULT_* values \u2014 no backend configuration may widen them. init requires: min \u2265 20; max \u2264 500; min < max; basal in 1..15000; bolus in 1..25000 \u2014 each with a specific message. safeOf(...) is the lenient factory for untrusted/backend input: clampedMin = min.coerceIn(20, 499); clampedMax = max.coerceIn(clampedMin+1, 500); basal.coerceIn(1, 15000); bolus.coerceIn(1, 25000) \u2014 clamps instead of throwing.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/pump/SafetyLimits.kt"
+        ],
+        "edge_cases": [
+          "Constructor is strict (throws) for programmatic callers; safeOf is lenient for external data \u2014 a crash was judged worse than clamped values there.",
+          "ABSOLUTE_* are aliases, so widening a DEFAULT silently widens the absolute ceiling too."
+        ]
+      },
+      {
+        "name": "Domain validators enforcing 20..500 (behavioral boundary)",
+        "behavior": "Four constructors throw IllegalArgumentException outside the bound; the guard exercises each at min, max, min\u22121, max+1. BgmReading(glucoseMgDl, timestamp, meterName?) \u2014 `require(glucoseMgDl in 20..500) { \"glucoseMgDl must be in 20..500, was $glucoseMgDl\" }`. CgmReading(glucoseMgDl, trendArrow: CgmTrend, timestamp) \u2014 `require(glucoseMgDl in MIN_MG_DL..MAX_MG_DL)` with MIN_MG_DL=20, MAX_MG_DL=500. PluginEvent.CalibrationRequested(pluginId, bgValueMgDl, timestamp) \u2014 `require(bgValueMgDl in 20..500)`. EnrichedBolusEvent \u2014 `bgAtEvent?.let { require(it in 20..500) { \"bgAtEvent must be 20-500 mg/dL\" } }`, so null bgAtEvent is allowed; it additionally requires units, correctionUnits, and mealUnits each in 0f..BolusEvent.MAX_BOLUS_UNITS. CgmTrend enum: DOUBLE_UP, SINGLE_UP, FORTY_FIVE_UP, FLAT, FORTY_FIVE_DOWN, SINGLE_DOWN, DOUBLE_DOWN, UNKNOWN.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/model/BgmReading.kt",
+          "android-unofficial/plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/model/PumpModels.kt",
+          "android-unofficial/plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/plugin/events/PluginEvent.kt",
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/domain/model/EnrichedBolusEvent.kt"
+        ],
+        "edge_cases": [
+          "Construction-time throwing means an out-of-range reading crashes the caller unless caught \u2014 parsers are expected to filter first.",
+          "EnrichedBolusEvent's message uses a hyphen (\"20-500\"), so it contributes only ONE `20..500` token to the scan."
+        ]
+      },
+      {
+        "name": "Safety constant #3 \u2014 Tandem epoch offset 1199145600",
+        "behavior": "Canonical 1_199_145_600 seconds = Unix time of 2008-01-01T00:00:00Z. Backend owner: apps/api/src/core/tandem_regions.py TANDEM_EPOCH_OFFSET_SECONDS. Android site: `private const val TANDEM_EPOCH_OFFSET = 1199145600L` in StatusResponseParser (internal object; no importable accessor, hence the source scan). pumpTimeToInstant(pumpTimeSec): rawEpochSec = pumpTimeSec + 1199145600; localDateTime = LocalDateTime.ofEpochSecond(rawEpochSec, 0, ZoneOffset.UTC); return localDateTime.atZone(ZoneId.systemDefault()).toInstant(). The UTC offset is intentional: the pump counts seconds since LOCAL midnight 2008-01-01 and the constant is UTC-based, so interpreting at UTC extracts the correct wall-clock LocalDateTime fields, which are then re-anchored to the device zone. All parsers in this object return null on malformed cargo rather than throwing.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/messages/StatusResponseParser.kt",
+          "android-unofficial/docs/contract/safety-constants.md"
+        ],
+        "edge_cases": [
+          "Drift here shifts every Tandem event timestamp \u2014 mis-ordering insulin history and IOB.",
+          "The double-conversion (UTC decode then systemDefault re-anchor) is load-bearing; a naive Instant.ofEpochSecond would be wrong by the device's UTC offset."
+        ]
+      },
+      {
+        "name": "Drift guard \u2014 structure and three-layer mechanism",
+        "behavior": "SafetyConstantDriftGuardTest (package com.glycemicgpt.mobile.contract) declares locals mgdlPerMmol=18.0156, glucoseMin=20, glucoseMax=500, now=Instant.EPOCH, and works three ways, strongest first. Layer 1, direct constant reads of importable public consts: GlucoseFormat.MGDL_PER_MMOL == 18.0156 (delta 0.0); SafetyLimits.DEFAULT_MIN_GLUCOSE/DEFAULT_MAX_GLUCOSE/ABSOLUTE_MIN_GLUCOSE/ABSOLUTE_MAX_GLUCOSE == 20/500/20/500; CgmReading.MIN_MG_DL/MAX_MG_DL == 20/500. Layer 2, behavioral boundary checks at the real require/init validators (four types, each at min/max/min\u22121/max+1). Layer 3, a comment-stripped source scan of every REMAINING shipped duplication site \u2014 private consts, inline literals, and the wear/tandem copies another module's test cannot import. Sites already covered by Layer 1 are deliberately NOT re-scanned: the direct read is strictly stronger and refactor-tolerant, so scanning them would only add brittleness.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/app/src/test/java/com/glycemicgpt/mobile/contract/SafetyConstantDriftGuardTest.kt"
+        ],
+        "edge_cases": [
+          "Layer 3 is a count-equality check, so ADDING a legitimate occurrence also fails \u2014 by design, forcing a doc+guard update."
+        ]
+      },
+      {
+        "name": "Drift guard SCAN_SITES \u2014 the full enumeration (19 entries)",
+        "behavior": "Path prefixes: APP=app/src/main/java/com/glycemicgpt/mobile, API=plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile, WEAR=wear-device/src/main/java/com/glycemicgpt/weardevice, TANDEM=plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile. Each entry is (path, token, expectedCount, description) and the test asserts expected == actual comment-stripped occurrences, with a failure message instructing: verify the value, then update SCAN_SITES and docs/contract/safety-constants.md in the same PR. I re-ran the exact matching algorithm against the tree today: all 19 counts hold (guard is green). Full list in edge_cases.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/app/src/test/java/com/glycemicgpt/mobile/contract/SafetyConstantDriftGuardTest.kt"
+        ],
+        "edge_cases": [
+          "WEAR/util/GlucoseDisplayUtils.kt \u2014 \"18.0156\" \u00d71 (wear MGDL_PER_MMOL const)",
+          "TANDEM/ble/messages/StatusResponseParser.kt \u2014 \"1199145600\" \u00d71 (TANDEM_EPOCH_OFFSET)",
+          "APP/data/local/AlertThresholdStore.kt \u2014 \"20..500\" \u00d71 (threshold validation)",
+          "APP/data/repository/AuthRepository.kt \u2014 \"20..500\" \u00d72 (threshold validation x2)",
+          "APP/domain/model/EnrichedBolusEvent.kt \u2014 \"20..500\" \u00d71 (bgAtEvent require)",
+          "APP/presentation/settings/SettingsViewModel.kt \u2014 \"20..500\" \u00d72 (threshold validation x2)",
+          "API/domain/model/BgmReading.kt \u2014 \"20..500\" \u00d72 (require + message)",
+          "API/domain/plugin/events/PluginEvent.kt \u2014 \"20..500\" \u00d72 (require + message)",
+          "WEAR/presentation/AlertsActivity.kt \u2014 \"20..500\" \u00d71 (alert bg guard)",
+          "WEAR/util/GlucoseDisplayUtils.kt \u2014 \"20..500\" \u00d71 (isValidGlucose)",
+          "APP/domain/compute/DashboardComputations.kt \u2014 \"VALID_GLUCOSE_MIN = 20\" \u00d71 (private min const)",
+          "APP/domain/compute/DashboardComputations.kt \u2014 \"VALID_GLUCOSE_MAX = 500\" \u00d71 (private max const)",
+          "APP/presentation/home/HomeViewModel.kt \u2014 \"MIN_THRESHOLD = 20\" \u00d71 (private min const)",
+          "APP/presentation/home/HomeViewModel.kt \u2014 \"MAX_THRESHOLD = 500\" \u00d71 (private max const)",
+          "APP/data/local/dao/PumpDao.kt \u2014 \"BETWEEN 20 AND 500\" \u00d71 (SQL range filter)",
+          "APP/data/repository/AuthRepository.kt \u2014 \"20..499\" \u00d71 (off-by-one min bound)",
+          "APP/data/repository/AuthRepository.kt \u2014 \"21..500\" \u00d71 (off-by-one max bound)",
+          "WEAR/util/GlucoseDisplayUtils.kt \u2014 \"coerceIn(20, low)\" \u00d71 (urgent-low clamp floor)",
+          "WEAR/util/GlucoseDisplayUtils.kt \u2014 \"coerceIn(high, 500)\" \u00d71 (urgent-high clamp ceiling)"
+        ]
+      },
+      {
+        "name": "Drift guard scan matching algorithm (countOccurrences + stripComments)",
+        "behavior": "countOccurrences(text, token) = Regex(\"(?<![0-9])\" + Regex.escape(token) + \"(?![0-9eE._])\").findAll(text).count(). The trailing lookahead rejects a following digit, `.`, `_`, `e`, or `E`, so widening/precision drift cannot slip through as a prefix match: 20..500\u219220..5000, 18.0156\u219218.01565, 18.0156\u219218.0156e1 all stop matching. The leading lookbehind rejects only a preceding digit (so 120..500 doesn't match) and deliberately NOT `.` or `_`, so a method-call token like `.coerceIn(20, low)` still matches. A trailing `L` is not excluded, so `1199145600L` still matches its token. stripComments removes /* \u2026 */ (DOT_MATCHES_ALL, so KDoc too) then truncates each line at the first `//`. Rationale: comment edits must not trip the guard, and a comment mention must not mask a code-level change.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/app/src/test/java/com/glycemicgpt/mobile/contract/SafetyConstantDriftGuardTest.kt"
+        ],
+        "edge_cases": [
+          "stripComments is naive: a `//` inside a string literal or a URL would truncate that line, and a `/*` inside a string would eat code.",
+          "Because widening is caught only by the token boundary, replacing 500 with 600 changes the count to 0 and fails \u2014 the intended behavior."
+        ]
+      },
+      {
+        "name": "Documented exclusions from the drift scan",
+        "behavior": "Three categories are deliberately outside SCAN_SITES, each with a stated reason. (1) Example plugins \u2014 plugins/example/** (DemoGlucometerPlugin.kt, ReadingSimulator.kt) encode 20..500 but are sample code, not shipped. (2) Comment-only mentions \u2014 e.g. plugins/shipped/medtronic/.../CgmReader.kt and NightscoutDataMapper.kt; the guard strips comments before counting, so these are not code sites. (3) Display-only re-expressions that never validate or gate data: WatchGraphRenderer.kt lines 76\u201377 Y-axis clamps `minOf(values.min(), low - 10).coerceAtLeast(20)` / `maxOf(values.max(), high + 10).coerceAtMost(500)` for the on-watch glucose graph; and SettingsViewModel's mmol/L display-range math near the MGDL_PER_MMOL rounding block. Reason: these affect only what a chart/label shows, not whether a reading is accepted, so drift there is a display bug, not a safety desync. Explicit revisit trigger: if any ever feeds a validation path.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/docs/contract/safety-constants.md",
+          "android-unofficial/wear-device/src/main/java/com/glycemicgpt/weardevice/complications/WatchGraphRenderer.kt"
+        ],
+        "edge_cases": [
+          "safety-constants.md cites WatchGraphRenderer under presentation/, but the file actually lives under complications/ \u2014 a stale path in the SoT doc."
+        ]
+      },
+      {
+        "name": "Backend-response validation sites (reject-and-ignore rules)",
+        "behavior": "AuthRepository applies the bound to three fetched settings and IGNORES the whole response on violation (logs Timber.w, returns; does not throw, does not partially apply). Target glucose range: ul/lo/hi/uh = roundToInt of urgentLow/lowTarget/highTarget/urgentHigh; reject unless all in 20..500 AND ul<lo<hi<uh. Alert thresholds: ul/lw/hw/uh roundToInt; reject unless all in 20..500 AND server ordering urgentLow<lowWarning<highWarning<urgentHigh. Safety limits: reject if min>=max || min !in 20..499 || max !in 21..500 || basal !in 1..15000 || bolus !in 1..25000. AlertThresholdStore.requireSafeThresholds() throws instead: require all four in 20..500 (\"Alert thresholds out of the 20-500 mg/dL safety range\") and require urgentLow \u2264 lowWarning < highWarning \u2264 urgentHigh. HomeViewModel clamps rather than rejects: each of the four coerceIn(20, 500), then rejects the update if urgentLow>low || low>=high || high>urgentHigh; RANGE_REFRESH_INTERVAL_MS = 900_000 (15 min).",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/data/repository/AuthRepository.kt",
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/data/local/AlertThresholdStore.kt",
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/home/HomeViewModel.kt"
+        ],
+        "edge_cases": [
+          "Ordering strictness differs by site: AuthRepository range uses strict < throughout; AlertThresholdStore allows equality at the urgent boundaries (\u2264 \u2026 < \u2026 \u2264).",
+          "Rejecting the response leaves the previously stored thresholds in effect \u2014 the alert floor keeps firing on stale values."
+        ]
+      },
+      {
+        "name": "SettingsViewModel threshold input/display conversion",
+        "behavior": "parseThresholdMgDl(raw, unit): trim, replace ',' with '.', toDoubleOrNull (null \u2192 not-a-number error), reject non-finite; MGDL \u2192 roundToInt(); MMOL \u2192 (value * 18.0156).roundToInt() \u2014 i.e. input is converted to canonical mg/dL BEFORE bounds checking. Validation then errors with \"Enter a number for all four thresholds.\" when any parse fails; \"Thresholds must be between <bounds>.\" when any of ul/lw/hw/uh is !in 20..500; \"Thresholds must increase: urgent low \u2264 low < high \u2264 urgent high.\" when ordering fails. thresholdBoundsLabel(unit): MGDL \u2192 \"20 and 500 mg/dL\"; MMOL \u2192 min = ceil((20 \u2212 0.5) \u00d7 10 / 18.0156)/10 and max = floor((500 + 0.499) \u00d7 10 / 18.0156)/10, i.e. \"1.1 and 27.7 mmol/L\". The documented reason: the naive conversion of 500 is 27.8, which rounds back to 501 mg/dL and would be rejected by the very message quoting it \u2014 so the quoted bounds are the outermost 0.1-step values whose conversion is accepted.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/app/src/main/java/com/glycemicgpt/mobile/presentation/settings/SettingsViewModel.kt"
+        ],
+        "edge_cases": [
+          "Comma decimal separators are accepted on input but output always uses a dot (Locale.US).",
+          "A Swift port that quotes naive mmol bounds will produce a self-rejecting error message."
+        ]
+      },
+      {
+        "name": "CI enforcement of both contract guards",
+        "behavior": "Both guards are plain JVM unit tests under app/src/test/java, run by `.github/workflows/android.yml` job `build` (\"Build & Test\") via `./gradlew testDebugUnitTest`, then `./gradlew lintDebug` and `./gradlew assembleDebug`. JDK 17 (temurin) via actions/setup-java@0f481fcb\u2026 v5.5.0; gradle/actions/setup-gradle@3f131e86\u2026 v6.2.0; actions/checkout@9c091bb2\u2026 v7.0.0 with persist-credentials: false. Triggers: push to main/develop, pull_request to main/develop (opened/synchronize/reopened), workflow_dispatch. Concurrency group android-${{github.ref}}, cancel-in-progress. A `detect-changes` job (dorny/paths-filter@7b450fff\u2026 v4.0.2) gates the build so docs/governance-only PRs skip it. CONTRIBUTING lists the required checks: Android Gate, Security Scan Gate (Semgrep), Dependency Scan Gate (OSV-Scanner), Attribution Check, Workflow Lint (zizmor, advisory).",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.github/workflows/android.yml",
+          "android-unofficial/CONTRIBUTING.md"
+        ],
+        "edge_cases": [
+          "Because the guards read repo files from disk (not classpath resources), they only work when run from within the repo tree.",
+          "detect-changes skipping the build on a docs-only PR also skips the drift guard \u2014 but safety-constants.md edits alone can't desync code."
+        ]
+      },
+      {
+        "name": "SPDX header policy \u2014 identifier, holder, and header form",
+        "behavior": "Identifier is exactly `GPL-3.0-only` \u2014 NOT `GPL-3.0-or-later` (the repo does not extend the \"or any later version\" option) and NOT the deprecated bare `GPL-3.0`. Copyright holder is the individual: `Copyright (C) 2026 Josh Engelbrecht`. \"Lumose Health\" and \"GlycemicGPT\" are organization/project names, not legal entities, and must NEVER appear as the copyright holder. Canonical block, stamped verbatim (never paraphrased or regenerated per file): two lines `// SPDX-License-Identifier: GPL-3.0-only` then `// Copyright (C) 2026 Josh Engelbrecht`, placed as the first thing in Kotlin/Java/Gradle-KTS files, above `package`. Same two lines with `#` markers for shell (immediately after the shebang) and YAML (top of file). The identifier line must match byte-for-byte because the verification greps match it literally. A file that already opens with a descriptive block comment keeps it; SPDX lines go ABOVE, not instead. Nothing authorizes deleting, reordering, or rewording an existing header. LICENSE itself is never edited (verbatim GPL text).",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/docs/dev/spdx-header-policy.md",
+          "android-unofficial/LICENSE"
+        ],
+        "edge_cases": [
+          "README.md carries the program-level copyright notice (line 95); source files carry the per-file block.",
+          "The GPL's \"How to Apply These Terms\" appendix is an instruction, not a template to fill in inside LICENSE."
+        ]
+      },
+      {
+        "name": "SPDX in-scope globs and the exclusion-wins rule",
+        "behavior": "Stamp exactly these 16 globs: app/src/**/*.kt; wear-device/src/**/*.kt; watchface/src/**/*.kt; plugins/pump-driver-api/src/**/*.kt; plugins/example/src/**/*.kt; plugins/shipped/tandem/src/**/*.kt; build.gradle.kts; settings.gradle.kts; app/build.gradle.kts; wear-device/build.gradle.kts; watchface/build.gradle.kts; plugins/pump-driver-api/build.gradle.kts; plugins/example/build.gradle.kts; plugins/shipped/tandem/build.gradle.kts; scripts/*.sh; .github/workflows/*.yml. Where an in-scope glob and an excluded tree both match, THE EXCLUSION WINS. Gradle files are listed individually rather than as `**/*.gradle.kts` precisely so a recursive glob cannot reach plugins/shipped/medtronic/build.gradle.kts or the spike's build files. Anything not matched is not stamped \u2014 deliberately conservative: resource XML, AndroidManifest.xml, ProGuard rules, gradle.properties, shell.nix, renovate.json5, osv-scanner.toml, zizmor.yml, gradle/libs.versions.toml, contract/openapi.json, .githooks/*, lockfiles, any build/ output, binaries, and all Markdown are out of scope; prose and config carry their license via the repository LICENSE.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/docs/dev/spdx-header-policy.md"
+        ],
+        "edge_cases": [
+          "plugins/shipped/medtronic is skipped by construction because the three plugins/ globs name pump-driver-api, example, and shipped/tandem individually."
+        ]
+      },
+      {
+        "name": "SPDX never-stamp trees, the objective test, and EcJpake",
+        "behavior": "Excluded trees (normative list; a PR adding an upstream-derived file must add it in the same PR): plugins/shipped/medtronic/** (whole module, main and test \u2014 a direct port of OpenMinimed's readers to Kotlin whose in-source headers carry upstream copyright; excluded at DIRECTORY level deliberately, because drawing the line file-by-file inside a ported module invites misattribution, even though some di/ and plugin/ files are original); tools/medtronic-ble-spike/** (standalone throwaway project with its own LICENSE, not shipped); gradlew, gradlew.bat, tools/medtronic-ble-spike/gradlew, tools/medtronic-ble-spike/gradlew.bat, gradle/wrapper/** (Gradle's own Apache-2.0 files \u2014 leave exactly as-is; do not add an identifier to the ones lacking it). Objective test: a file is excluded if upstream code was COPIED OR PORTED into it; in scope if upstream work was only STUDIED and reimplemented. Citing an upstream project, or naming an upstream file as a reference, is not grounds for exclusion. When the test and the list disagree, treat the file as excluded and fix the list.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/docs/dev/spdx-header-policy.md",
+          "android-unofficial/docs/THIRD_PARTY_LICENSES.md"
+        ],
+        "edge_cases": [
+          "Five Tandem files cite jwoglom/pumpX2 as a protocol/test-vector reference and ARE in scope: ble/protocol/TandemProtocol.kt, ble/auth/JpakeAuthenticator.kt, ble/messages/StatusResponseParser.kt, ble/crypto/Hkdf.kt, ble/crypto/HmacSha256Util.kt. Keep their reference comments intact.",
+          "docs/THIRD_PARTY_LICENSES.md is authoritative if it and the policy disagree."
+        ]
+      },
+      {
+        "name": "EcJpake.kt \u2014 the open Apache-2.0 attribution gap",
+        "behavior": "plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/crypto/EcJpake.kt is ported from io.particle.crypto.EcJpake (particle-iot/ecjpake-java), Apache-2.0, Copyright 2022 Particle Industries, Inc. Stamping it GPL-3.0-only would assert a license its upstream author did not grant. It is an OPEN ATTRIBUTION GAP, not a settled exclusion: its current header records the port only in prose (\"Ported from io.particle.crypto.EcJpake (Apache 2.0 licensed). Reference: pumpX2 (MIT licensed) by jwoglom.\") with no copyright notice and no license identifier, while the Apache-2.0 notice lives only in docs/THIRD_PARTY_LICENSES.md \u2014 but Apache-2.0 requires the notice travel with the file. The sweep must NOT skip it silently; it must stamp `// SPDX-License-Identifier: Apache-2.0` / `// Copyright 2022 Particle Industries, Inc.`. Verified today: the file still has no SPDX line \u2014 the gap is open.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/tandem/src/main/java/com/glycemicgpt/mobile/ble/crypto/EcJpake.kt",
+          "android-unofficial/docs/dev/spdx-header-policy.md"
+        ],
+        "edge_cases": [
+          "This is the ONLY file under plugins/shipped/tandem/ that is itself a port; the rest of the Tandem implementation is original work from studying MIT-licensed protocol documentation."
+        ]
+      },
+      {
+        "name": "SPDX sweep verification (six checks) and current state",
+        "behavior": "All six must hold, judged by OUTPUT not exit status (grep -L/-l exit non-zero when nothing matches, which is the passing case); each command ends `|| true`. SWEEP_BASE/SWEEP_HEAD are set to the sweep's own revisions. (1) grep -rL 'SPDX-License-Identifier: GPL-3.0-only' --include='*.kt' over app/src wear-device/src watchface/src plugins/pump-driver-api/src plugins/example/src plugins/shipped/tandem/src, piped through `grep -v 'ble/crypto/EcJpake.kt'` \u2014 must print nothing. (2) grep -L over the explicitly listed non-Kotlin in-scope files via git ls-files \u2014 nothing. (3) grep -rl 'GPL-3.0-only' plugins/shipped/medtronic tools/medtronic-ble-spike \u2014 nothing. (4) grep -o on EcJpake.kt must print `SPDX-License-Identifier: Apache-2.0`. (5) git diff --name-only SWEEP_BASE..SWEEP_HEAD -- LICENSE \u2014 nothing. (6) gh api repos/lumose-health/android-unofficial/license?ref=HEAD --jq must report exactly one license, GPL-3.0. Today the sweep has NOT run: only 7 .kt files anywhere mention SPDX (license-screen tests), and root gradlew carries Apache-2.0 while root gradlew.bat does not.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/docs/dev/spdx-header-policy.md"
+        ],
+        "edge_cases": [
+          "The sweep that applies headers is explicitly separate work executed AGAINST this document; the policy is written, the stamping is pending.",
+          "Check 5 only proves the sweep left LICENSE alone; check 6 confirms detection independently."
+        ]
+      },
+      {
+        "name": "AI-attribution policy and the local commit-msg hook",
+        "behavior": "Policy: using AI tools to write code is fine; leaving AI attribution lines in the repo is not \u2014 you own what you submit. The full policy is org-wide (lumose-health/.github CONTRIBUTING); this repo adds two mechanics: the local hook and CI. .githooks/commit-msg holds BOTH commit-message policies in one file (git runs only one commit-msg hook). Install: `cp .githooks/commit-msg .git/hooks/commit-msg && chmod +x`, or `git config core.hooksPath .githooks`. Job 1 strips attribution: AI_TOOLS (character-class case handling for portable macOS/Linux sed -E) = Claude|Anthropic|Copilot|ChatGPT|OpenAI|Cursor|Windsurf|Codeium|CodeWhisperer|Amazon.Q|Gemini|JetBrains.AI|Tabnine|Sourcegraph|Cody|Devin|Aider|Codex|\\[bot\\]|noreply@ \u2014 note the hook (unlike CI) also strips ANY [bot] or noreply@ co-author. It deletes matching `Co-Authored-By:` lines, then deletes `Authored-By:|Generated-By:|AI-Generated-By:` lines, then collapses trailing blank lines with perl -0777. Job 2 warns (non-blocking) if no `^Signed-off-by: .+ <.+@.+>$` trailer. Always exits 0.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.githooks/commit-msg",
+          "android-unofficial/CONTRIBUTING.md"
+        ],
+        "edge_cases": [
+          "The hook's tool list omits gemini.code.assist which CI includes; CI's list omits the bare [bot]/noreply@ patterns the hook strips.",
+          "The hook is opt-in (must be copied); CI is the backstop."
+        ]
+      },
+      {
+        "name": "attribution-check.yml \u2014 three detection layers and severity",
+        "behavior": "Layer 1 (commit trailers) over `git log --format=%B origin/BASE..PR_REF`: any `^Co-Authored-By:.*\\[bot\\]` not matching ALLOWED_BOTS \u2192 CRITICAL; any `^Co-Authored-By:.*(AI_TOOLS)` after dropping [bot] lines \u2192 HIGH; any `^(Authored-By|Generated-By|AI-Generated-By):` \u2192 HIGH. AI_TOOLS = claude|anthropic|copilot|chatgpt|openai|cursor|windsurf|codeium|codewhisperer|amazon\\.q|gemini|gemini\\.code\\.assist|jetbrains\\.ai|tabnine|sourcegraph|cody|devin|aider|codex. Layer 2 (code comments) diffs `origin/BASE...PR_REF` limited to *.py *.ts *.tsx *.js *.jsx *.kt *.java *.sh, keeps added lines (^+, not ^+++), and matches `(generated by|generated with|written by|created by|built with|copilot suggestion|ai-generated|ai generated).*(AI_TOOLS|\\bai\\b|\\bgpt\\b)` case-insensitively \u2192 MEDIUM (first 5 shown in the log). Layer 3 (PR description) matches `generated with claude code|generated with.*(AI_TOOLS)|built with.*\\bai\\b|claude\\.ai/claude-code|generated by (AI_TOOLS)` \u2192 HIGH. Precedence CRITICAL > HIGH > MEDIUM > NONE; the step exits 1 for anything but NONE.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.github/workflows/attribution-check.yml"
+        ],
+        "edge_cases": [
+          "A bare `noreply@` is deliberately NOT CRITICAL: a human co-author's <id+user@users.noreply.github.com> address would otherwise auto-close their PR. AI tools using noreply without [bot] are caught as HIGH.",
+          "sanitise_for_md strips backslash, pipe, backtick, CR and LF before embedding a finding in the markdown table."
+        ]
+      },
+      {
+        "name": "attribution-check.yml \u2014 bot whitelist and Layer-3 CodeRabbit stripping",
+        "behavior": "ALLOWED_BOTS regex is `^Co-Authored-By:[[:space:]]+(github-actions|coderabbitai|glycemicgpt-security|glycemicgpt-ci|glycemicgpt-release|glycemicgpt-merge|glycemicgpt-renovate|dependabot|homebot-0|gitguardian)\\[bot\\]` \u2014 anchored to the start of the co-author NAME (immediately after the trailer key and whitespace) so a crafted trailer like \"Co-Authored-By: not really dependabot[bot] <x>\" cannot substring-match a legitimate entry; the whitelisted name must be the WHOLE name. Kept in sync with CONTRIBUTING's \"Bot Whitelist\". Layer 3 strips the CodeRabbit auto-generated footer via an inline python3 script, but ONLY when it is a properly bracketed block at the trailing end: OPEN marker `<!-- This is an auto-generated comment: release notes by coderabbit.ai -->` found, CLOSE marker `<!-- end of auto-generated comment: release notes by coderabbit.ai -->` found at rfind position after OPEN, and everything after CLOSE is whitespace. Earlier versions stripped from the first occurrence of either marker, letting a contributor bypass the scan by pasting the marker before AI-branding text.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.github/workflows/attribution-check.yml"
+        ],
+        "edge_cases": [
+          "A malicious early OPEN marker without a trailing-only CLOSE leaves the body intact and scanned.",
+          "PR_BODY is passed via env, not interpolated into the shell \u2014 avoiding script injection."
+        ]
+      },
+      {
+        "name": "attribution-check.yml \u2014 reporting, auto-close, and pwn-request hardening",
+        "behavior": "Trigger: pull_request_target on branches [main, develop], types [opened, synchronize, reopened, edited]. Concurrency group attribution-check-<PR number>, cancel-in-progress. Workflow permissions contents: read; the job adds pull-requests: write. Hardening: checkout has NO `ref:` (base ref, persist-credentials false, fetch-depth 0); PR commits are fetched into a remote-only ref `refs/remotes/pr/<N>` with `git fetch --no-tags` and NO --depth (full history, so a long PR can't push a prohibited trailer past a depth cap); the working tree stays at base, and only grep/sed/git-log text inspection runs \u2014 no dependency install, no PR code execution. Reporting step (`if: always() && steps.detect.outputs.severity != ''`, so an early crash never posts a misleading \"Passed\") upserts a sticky comment keyed on `<!-- attribution-check-comment -->`, using github.paginate over listComments (per_page 100) so PRs with >100 comments don't get duplicates. Emoji: CRITICAL red, HIGH orange, MEDIUM yellow. Auto-close step fires only when severity == 'CRITICAL' and NOT (head.ref == 'develop' AND head.repo.full_name == github.repository) \u2014 the same-repo guard prevents a fork naming its branch `develop` from bypassing auto-close.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/.github/workflows/attribution-check.yml",
+          "android-unofficial/CONTRIBUTING.md"
+        ],
+        "edge_cases": [
+          "CRITICAL closes the PR and instructs: new branch from develop, cherry-pick without the trailers, open a new PR \u2014 because a co-author is a permanent PR participant.",
+          "Token: actions/create-github-app-token@bcd2ba49\u2026 v3.2.0 for glycemicgpt-ci with continue-on-error, falling back to secrets.GITHUB_TOKEN.",
+          "Pinned SHAs: checkout 9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 (v7.0.0), github-script f28e40c7f34bde8b3046d885e986cb6290c5673b (v7)."
+        ]
+      },
+      {
+        "name": "CodeRabbit Medical-Safety gate (the 20-500 bound's cross-repo enforcer)",
+        "behavior": ".coderabbit.yaml declares custom_checks with mode \"error\". \"Medical Safety Review\": for PRs touching glucose values, insulin/pump telemetry, or unit conversions \u2014 glucose is STORED and COMPARED in canonical mg/dL; every persisted field, bound, threshold/alert comparison, dedup key, and safety check must stay mg/dL and be bounds-checked to 20-500. mmol/L is display/input only; the single allowed factor is 18.0156. Hard-FAIL if code stores/compares a mmol value as mg/dL (e.g. persisting 3.9 instead of ~70 \u2014 \"this silently suppresses low alerts\"), converts the wrong direction, permits a stored mg/dL outside 20-500 after conversion, or uses any factor other than 18.0156. Do NOT flag a user-facing mmol display literal (3.9, 10.0, 22.2) or an mmol input converted before storage. Also verifies no auto-bolus / therapeutic device-command code exists (monitoring-only, read-only) and that AI suggestions carry safety disclaimers. Sibling checks: \"No Hardcoded Secrets\" and \"BLE Protocol Safety\" (GATT timeouts + serialization, connection-state transitions, Little-Endian for Tandem, no raw pump data/serials/auth material at INFO level).",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.coderabbit.yaml",
+          "android-unofficial/docs/contract/safety-constants.md"
+        ],
+        "edge_cases": [
+          "This gate is cited by safety-constants.md as the backend-side owner of the 20-500 invariant (PR #729) \u2014 there is no single backend constant to import."
+        ]
+      }
+    ],
+    "safety_critical": [
+      "Glucose validity bound 20..500 mg/dL (inclusive) is duplicated across 19 enumerated Android code sites with NO single owner. A desync in any one silently accepts or drops readings. The drift guard is a count-equality source scan, not a real single-source-of-truth \u2014 a Swift port must consolidate to one constant.",
+      "mmol\u2194mg/dL factor 18.0156 exists in two Android copies (GlucoseFormat, wear GlucoseDisplayUtils) and must equal the backend's core/units.py MGDL_PER_MMOL. Using 18.02 or 18.0182 is explicitly forbidden. Convert ONCE from the most precise mg/dL source and round LAST to one decimal (70\u21923.9, 180\u219210.0, 120\u21926.7, 100\u21925.6).",
+      "Canonical storage/comparison unit is mg/dL everywhere; mmol/L is display and input only. Alert and SSE numerics stay mg/dL. Persisting a mmol value as mg/dL (3.9 instead of ~70) silently suppresses low alerts \u2014 CodeRabbit hard-fails this.",
+      "Alert thresholds fetched from /api/settings/alert-thresholds are what the ON-DEVICE alert floor fires from; the app must alarm at exactly the server's levels. If validation rejects a response, the previously stored thresholds keep firing (stale-threshold risk).",
+      "Nightscout pump_events[].units is nullable-consumed: a null DROPS the event, so a silent backend rename deletes all NS bolus/basal and UNDERSTATES IOB with no error. Only the pinned-spec field-presence check catches it.",
+      "Tandem epoch offset 1199145600 s (2008-01-01 UTC) with the deliberate UTC-decode-then-systemDefault-reanchor conversion. Drift or a naive Instant.ofEpochSecond shifts every pump event timestamp and mis-orders insulin history/IOB.",
+      "SafetyLimits absolute bounds: glucose 20..500, max basal 15_000 mU/hr, max bolus 25_000 mU. ABSOLUTE_* alias DEFAULT_*, so widening a default widens the absolute ceiling. safeOf() CLAMPS untrusted backend input rather than throwing (min\u219220..499, max\u2192(min+1)..500).",
+      "App is monitoring-only: no therapeutic or device-control commands, no bolus, no pump writes; the AI never issues device commands (project-wide invariant). Fail-open-with-warning for an unknown backend applies ONLY to read/monitoring paths; any future safety-critical write must be refused when compatibility is unknown.",
+      "AlertThresholdStore.requireSafeThresholds THROWS on out-of-range or mis-ordered thresholds while AuthRepository silently ignores the response \u2014 two different failure modes for the same data. Ordering strictness also differs (strict < in AuthRepository's range check vs \u2264/</\u2264 in AlertThresholdStore).",
+      "Wear-side clamps are a second, independent bound expression: sanitizeThresholds low\u220840..200, high\u2208max(low+1,100)..400, urgentLow\u220820..low, urgentHigh\u2208high..500, plus isValidGlucose 20..500. Watch and phone must not disagree on the same mg/dL value.",
+      "The contract drift gate is BUILD-TIME against the vendored pin only. It provides zero runtime protection against an arbitrary user-configured backend; the runtime compatibility signal that would cover that is designed but NOT implemented."
+    ],
+    "notes": "Coverage is complete for the assigned scope at uniform depth; no section was truncated for budget. I read every file named in the scope plus the transitive definitions the guards depend on (ContractFixtures, GlycemicGptApi, InstantAdapter, NetworkModule.provideMoshi, the DTOs asserted by the smoke test, GlucoseFormat, SafetyLimits, BgmReading/CgmReading/PluginEvent/EnrichedBolusEvent, the wear GlucoseDisplayUtils, StatusResponseParser, and every one of the 19 SCAN_SITES files).\n\nTwo verifications I ran rather than assumed:\n1. I re-implemented ContractSmokeTest's endpoint-presence algorithm in Python against contract/openapi.json and all 34 Retrofit operations resolve \u2014 the missing list is empty today.\n2. I re-implemented countOccurrences + stripComments in Python and ran all 19 SCAN_SITES \u2014 every expected count matches. The drift guard is green as of this commit.\n\nThree discrepancies worth carrying into the port:\n- docs/contract/safety-constants.md cites the display-only Y-axis clamps at `wear-device/.../presentation/WatchGraphRenderer.kt:76-77`, but the file actually lives at `wear-device/src/main/java/com/glycemicgpt/weardevice/complications/WatchGraphRenderer.kt` (lines 76-77 are correct). Stale path in the source-of-truth doc.\n- The SPDX sweep described by docs/dev/spdx-header-policy.md has NOT been executed. Only 7 .kt files in the whole tree contain the string \"SPDX-License-Identifier\", and those are license-screen tests, not headers. EcJpake.kt still carries no identifier and no copyright line \u2014 the \"open attribution gap\" the policy describes is still open. Root `gradlew` carries Apache-2.0; root `gradlew.bat` does not (consistent with the policy's \"do not add one\" instruction).\n- The commit-msg hook and the CI workflow use slightly different AI-tool lists: the hook additionally strips any `[bot]` or `noreply@` co-author; CI additionally matches `gemini.code.assist` and deliberately does NOT treat bare `noreply@` as CRITICAL.\n\nThe pinned spec has no `servers` and no top-level `security` block, so nothing about host, auth scheme, or transport can be derived from it \u2014 a Swift port needs those from BaseUrlInterceptor/AuthInterceptor (a different subsystem)."
+  },
+  "port": {
+    "subsystem": "API contract pin and safety invariants (vendored OpenAPI pin + CONTRACT_VERSION, ContractSmokeTest, SafetyConstantDriftGuardTest, ADRs 0001-0003, safety-constants SoT, SPDX header policy, AI-attribution enforcement, and the CI gates that enforce them) \u2014 ported to Swift for iPhone + Apple Watch",
+    "ports_cleanly": [
+      {
+        "capability": "Vendored OpenAPI pin (contract/openapi.json)",
+        "ios_approach": "Keep the identical byte-for-byte vendored copy at Contract/openapi.json (748,299 bytes, openapi 3.1.0, 164 paths, 274 schemas, no `servers`, no top-level `security`). Refresh = whole-file copy, never hand-edit. Consumed only by tests, never shipped in the app bundle. Parse with JSONSerialization into [String:Any] (or a small JSONValue enum) in a host-macOS SwiftPM test target; cache the parsed root in a `static let` so 748 KB is parsed once per test process instead of Android's per-call re-parse. Excluded from license-header stamping, from SwiftLint, and from any SAST scan scope, exactly as today."
+      },
+      {
+        "capability": "CONTRACT_VERSION file and version-agreement check",
+        "ios_approach": "Keep Contract/CONTRACT_VERSION as the same 2-byte file (`1` + newline). Swift test reads it, trims, string-compares against info.x-contract-version (still a JSON *string*, read as String not Int). Same failure message (\"refresh the pin and its version together\"). ADR 0001's numeric semantics apply only at runtime comparison: parse to Int there, and treat an unparseable value as ABSENT, never as compatible. Both files must land in the same PR."
+      },
+      {
+        "capability": "ContractFixtures repo-root resolution helper",
+        "ios_approach": "Replace the settings.gradle.kts walk with a `#filePath`-anchored walk to the directory containing `Package.swift`. `#filePath` is baked at compile time, so it works identically under `swift test` and `xcodebuild test` and does not depend on the runner's cwd. Run the contract and drift guards as a host-macOS test target (no Simulator destination) so filesystem access to repo sources is unrestricted and fast. Keep the same \"if it moved, update the guard and docs/contract/safety-constants.md\" failure message."
+      },
+      {
+        "capability": "Golden round-trip assertions (4 payloads)",
+        "ios_approach": "Same four hand-authored payloads, same assertions, through the app's real Codable models: health `{\"status\":\"ok\"}`; login access_token/refresh_token/token_type/expires_in=3600/user{id,email,role}; alert thresholds 55/70/180/250 with iob_warning absent \u2192 nil; safety limits 20/500/3000/25000/updated_at. Use Double instead of Float and exact equality (all four threshold values are exactly representable). These remain client-side DTO regression gates only; they do not detect backend drift by themselves."
+      },
+      {
+        "capability": "Incompatible-drift assertions (renamed key, missing nested required field, wrong scalar type)",
+        "ios_approach": "Same three payloads. Replace the JsonDataException cause-chain walk with a direct `DecodingError` case match, which is strictly cleaner: renamed access_token \u2192 .keyNotFound; nested user missing id \u2192 .keyNotFound; min_glucose_mgdl:\"twenty\" \u2192 .typeMismatch. JSONDecoder does not coerce a JSON string to Int, so the \"type coercion is not tolerated\" contract holds unchanged. Bonus: a bad date now surfaces as DecodingError.dataCorrupted from the custom date strategy rather than escaping as a foreign exception type, closing Android's DateTimeParseException hole."
+      },
+      {
+        "capability": "Field-presence coupling for safety-critical responses",
+        "ios_approach": "Port assertConsumedFieldsPresent / assertArrayItemFieldsPresent verbatim over the parsed pin: 200 \u2192 content[\"application/json\"] \u2192 schema \u2192 follow top-level $ref into components.schemas \u2192 assert names in `properties`. Same covered set: safety-limits (min/max_glucose_mgdl), alert-thresholds (urgent_low, low_warning, high_warning, urgent_high), login (access_token, refresh_token, expires_in, user), and nightscout data array items pump_events[units,event_type] / glucose_readings[value]. Harden two known defects while porting: also resolve one level of allOf/oneOf/anyOf, and fail with a readable XCTFail rather than an exception when the spec path literal (snake_case {connection_id}) is missing."
+      },
+      {
+        "capability": "Nightscout pump_events.units nullable-consumed exception",
+        "ios_approach": "Unchanged in substance. Model as `units: Double?`; the persistence mapper still drops any pump event with nil units, so a silent backend rename still deletes all Nightscout bolus/basal rows and understates IOB with no parse error. Because it is optional, round-trip tests cannot catch it \u2014 it stays covered ONLY by the pinned-spec field-presence check. ADR 0003's standing rule carries over verbatim: any new optional consumed field whose absence silently degrades a safety surface must be added to the field-presence list, not left to the round-trip."
+      },
+      {
+        "capability": "Documented blind spots of the smoke test",
+        "ios_approach": "Carry contract/README.md and ADR 0003's blind-spot list over unchanged: it is not a DTO\u2194spec structural diff; it misses removal of optional/defaulted consumed fields, type changes on unexercised surfaces, path-parameter renames (normalized away), request-body drift (responses only), enum-member and nullability changes, and anything about a runtime backend. Keep the README instruction to review unexercised schema changes before relying on a pass."
+      },
+      {
+        "capability": "ADR 0001 Decision 1 \u2014 endpoint versioning left as-is",
+        "ios_approach": "Nothing to build. The iOS client inherits the backend's historical split: only /api/v1/devices, /api/v1/alerts, /api/v1/api-keys, /api/v1/glucose/stream are version-prefixed; auth, settings, ai, food-records and most integrations are unversioned. The standing rule carries over: a breaking change to an unversioned path gets a /v2 sibling with the old path retained until the fleet ages out \u2014 and under fork-and-build the \"shipped fleet\" ages out slower and less predictably than a store fleet, so retention windows should be longer, not shorter."
+      },
+      {
+        "capability": "Scoped fail-open-with-warning state machine (design)",
+        "ios_approach": "Port the three states unchanged, plus a fourth for backend-optional local mode (no backend configured \u2192 no warning, local-only features). Present the one-time dismissible warning as an in-app SwiftUI banner backed by a persisted flag in a shared App Group container, NOT a UNUserNotification. Never hard-refuse the app for an unknown backend. The scope limit is architecturally guaranteed on iOS: the app is monitoring-only with no therapeutic writes ever, so the \"any future safety-critical write must be refused when compatibility is unknown\" clause is unreachable by construction rather than by policy. Mirror the warning state to the Watch via WatchConnectivity applicationContext."
+      },
+      {
+        "capability": "ADR 0002 \u2014 backend tolerant reader (server half)",
+        "ios_approach": "Backend-side; iOS inherits it and must preserve the client half. Two Swift-specific traps to honour: (1) control_iq_mode stays a loose `String?`, never a `enum: String, Codable` \u2014 a raw-value enum throws DecodingError on any unknown member, which would turn a backend adding an enum value into a hard client break, exactly the drift the ADR exists to absorb; every backend-supplied enum-like field must be String-backed or decode through an `init(from:)` with an `.unknown(String)` fallback case. (2) raw_events / pump_info stay loosely typed pass-through values. The consequence clause is unchanged: removing tolerant-reader behaviour is a cross-cadence breaking change requiring a contract-version bump."
+      },
+      {
+        "capability": "The 34 endpoints the app calls (covered surface)",
+        "ios_approach": "Identical set and identical paths, including the version-prefix split, the query defaults (limit=50/offset=0 on food-records and common-foods; since/limit on nightscout data), and the multipart POST /api/food-records upload. POST /api/v1/devices/register and DELETE /api/v1/devices/{deviceToken} carry an APNs token instead of an FCM token \u2014 the path, verb and field name are unchanged, so the contract surface is unaffected. Same known behaviours: meal-intelligence endpoints 404 when the flag is off, photo upload 422 with no vision route, audit 404 until an audit exists."
+      },
+      {
+        "capability": "SafetyLimits value object (bounds, defaults, clamping factory)",
+        "ios_approach": "Swift struct with the same four fields and the same constants: min 20, max 500, max basal 15_000 mU/hr, max bolus 25_000 mU, with ABSOLUTE_* as aliases of the DEFAULT_* values. Strict path becomes `init(...) throws` (Kotlin `require` \u2192 `guard \u2026 else { throw SafetyLimitsError.\u2026 }`) so callers can catch, with the same per-condition messages. Lenient path becomes `static func safe(...)` clamping min into 20...499, max into (min+1)...500, basal into 1...15000, bolus into 1...25000. Derive the off-by-one bounds from the canonical constants, never as literals."
+      },
+      {
+        "capability": "Safety constant #1 \u2014 the 18.0156 mmol\u2194mg/dL factor (the value itself)",
+        "ios_approach": "One `public static let mgdlPerMmol: Double = 18.0156` in a platform-agnostic shared SPM target imported by the iOS app, the watchOS app, every widget/complication extension, and every pump driver module. 18.02 and 18.0182 remain explicitly forbidden. Canonical storage and comparison stay mg/dL everywhere; mmol/L is display and input only; alert and stream numerics stay mg/dL. Convert once from the most precise mg/dL source and round last to one decimal so 70\u21923.9, 180\u219210.0, 120\u21926.7, 100\u21925.6 hold. iOS removes the wear-mirror duplicate entirely \u2014 the watch imports the same target."
+      },
+      {
+        "capability": "Threshold input parsing and mmol bounds-label math",
+        "ios_approach": "Port parseThresholdMgDl and thresholdBoundsLabel exactly. Comma-decimal input matters MORE on iOS because the .decimalPad keyboard emits the device locale's separator and `Double(\"3,9\")` returns nil: normalise ',' \u2192 '.' then parse with a Locale(identifier:\"en_US_POSIX\")-pinned path, reject non-finite. Convert mmol input to canonical mg/dL BEFORE bounds checking. Keep the exact bounds-label math \u2014 min = ceil((20\u22120.5)\u00d710/18.0156)/10, max = floor((500+0.499)\u00d710/18.0156)/10 \u2192 \"1.1 and 27.7 mmol/L\" \u2014 because the naive 27.8 rounds back to 501 and would be rejected by the very message quoting it. Same three error strings."
+      },
+      {
+        "capability": "AI-attribution policy and the local commit-msg hook",
+        "ios_approach": "Copy .githooks/commit-msg verbatim \u2014 it is language-agnostic shell. Same two jobs in one file (git runs only one commit-msg hook): strip Co-Authored-By lines matching the AI_TOOLS character-class list plus any [bot]/noreply@ co-author, strip Authored-By/Generated-By/AI-Generated-By, collapse trailing blanks with perl -0777, warn (non-blocking) on a missing Signed-off-by trailer, always exit 0. Same opt-in install (`git config core.hooksPath .githooks`). Same policy text: using AI to write code is fine, leaving attribution in the repo is not."
+      },
+      {
+        "capability": "attribution-check.yml \u2014 three detection layers and severity precedence",
+        "ios_approach": "Port verbatim. Only change: Layer 2's diff pathspec becomes `*.swift *.sh *.rb *.yml *.py` (Ruby for fastlane, Python for CI scripts) instead of the Kotlin/Java/TS set. Layer 1 (commit trailers \u2192 CRITICAL for non-allowlisted [bot], HIGH for AI_TOOLS and Authored-By/Generated-By/AI-Generated-By), Layer 3 (PR description \u2192 HIGH), the AI_TOOLS regex, the added-lines-only `^+` filter, the first-5-shown log cap, and the CRITICAL > HIGH > MEDIUM > NONE precedence with exit 1 on anything but NONE all carry over unchanged."
+      },
+      {
+        "capability": "attribution-check.yml \u2014 bot whitelist and CodeRabbit footer stripping",
+        "ios_approach": "Verbatim. Keep the ALLOWED_BOTS regex anchored to the start of the co-author NAME so \"not really dependabot[bot]\" cannot substring-match, and keep it in sync with CONTRIBUTING's Bot Whitelist. Keep the strict bracketed-block CodeRabbit stripper (OPEN found, CLOSE found via rfind after OPEN, only whitespace after CLOSE) so a pasted marker cannot bypass the scan. Keep PR_BODY passed via env rather than interpolated into the shell, and keep sanitise_for_md stripping backslash/pipe/backtick/CR/LF."
+      },
+      {
+        "capability": "attribution-check.yml \u2014 reporting, auto-close, and pwn-request hardening",
+        "ios_approach": "Verbatim. pull_request_target on [main, develop] with types [opened, synchronize, reopened, edited]; checkout with NO ref (base tree, persist-credentials false, fetch-depth 0); PR commits fetched into refs/remotes/pr/<N> with --no-tags and no --depth; text inspection only, never PR code execution \u2014 which matters more on iOS where a malicious PR could otherwise land a Package.swift build-tool plugin that executes at resolve time. Keep the paginated sticky comment keyed on the HTML marker, the `if: always() && severity != ''` guard, and the CRITICAL auto-close with the same-repo develop-branch exemption."
+      },
+      {
+        "capability": "CodeRabbit Medical-Safety gate (cross-repo enforcer of the 20-500 bound)",
+        "ios_approach": "Keep .coderabbit.yaml with custom_checks mode \"error\" and the same three checks, rule text rewritten for Swift/Core Bluetooth. Medical Safety Review is unchanged in substance: glucose stored and compared in canonical mg/dL, every persisted field/bound/threshold/dedup key bounds-checked to 20-500, 18.0156 the only factor, hard-fail on storing an mmol value as mg/dL, wrong-direction conversion, or an out-of-range stored value; do not flag mmol display literals. BLE Protocol Safety becomes Core Bluetooth: CBPeripheral command timeouts and serialisation, centralManager(_:didUpdateState:) transition handling, Little-Endian for Tandem, and no raw pump data / serials / auth material logged \u2014 on iOS specifically, no `privacy: .public` interpolation of pump identifiers in OSLog. Swap detekt for SwiftLint in the tools list; gitleaks, semgrep, osvScanner, checkov, actionlint and shellcheck stay enabled."
+      },
+      {
+        "capability": "Workflow Lint and Workflow Security gates",
+        "ios_approach": "Both port verbatim \u2014 they analyse GitHub Actions YAML, not application code. Workflow Lint keeps actionlint + shellcheck, the SHA-pin guard over .github/workflows/** and .github/actions/**, and the composite-action `${{ secrets.* }}` guard, all installed as SHA-256-verified pinned binaries. Workflow Security keeps zizmor at Medium+ with the pull_request_target-checkout guard. Both gain importance under fork-and-build because the release pipeline itself is a workflow that handles each user's Apple signing secrets."
+      },
+      {
+        "capability": "SPDX header identifier, holder, and canonical block form",
+        "ios_approach": "Unchanged: exactly `GPL-3.0-only` (not -or-later, not the deprecated bare GPL-3.0), holder exactly `Copyright (C) 2026 Josh Engelbrecht`, never \"Lumose Health\" or \"GlycemicGPT\". Same two-line block stamped verbatim, `//` markers for Swift, `#` for shell/YAML/Ruby (after the shebang). Byte-for-byte identifier line because verification greps match literally. Existing descriptive header comments are kept with SPDX lines above; nothing authorises deleting, reordering, or rewording an existing header; LICENSE is never edited. The source-distribution model (no project-published binary, no App Store listing) is what keeps GPL-3.0-only workable here."
+      }
+    ],
+    "needs_redesign": [
+      {
+        "capability": "ContractSmokeTest harness (MockWebServer + real Retrofit + real Moshi)",
+        "why": "None of the three pieces exist. There is no Retrofit, no Moshi, and MockWebServer has no first-class Swift equivalent. Critically, Android's guarantee that the test exercises the app's REAL deserialisation config is maintained by hand-copying NetworkModule.provideMoshi() into the test \u2014 a drift hazard the port should close by construction rather than reproduce.",
+        "options": [
+          "Embedded HTTP server in-process (swift-nio / Swifter) to mimic MockWebServer most literally \u2014 binds a real port, slower, flaky under CI sandboxes.",
+          "Custom URLProtocol subclass registered on an ephemeral URLSessionConfiguration to stub canned 200 responses \u2014 no port binding, deterministic, works on a host-macOS test target.",
+          "Bypass transport entirely and test JSONDecoder against the payloads \u2014 loses coverage of the real client's request construction and response handling."
+        ],
+        "recommendation": "URLProtocol stub. Expose ONE `APIDecoder.shared` (JSONDecoder with the app's exact date strategy and key policy) as the single object both the production client and the test consume, so Moshi-style config drift is impossible rather than merely discouraged. Model Instant as Date with a custom decoding strategy that accepts ISO-8601 both with and without fractional seconds (ISO8601DateFormatter needs .withFractionalSeconds explicitly, unlike Instant.parse) and throws DecodingError.dataCorrupted on failure. Use explicit CodingKeys per field rather than .convertFromSnakeCase, mirroring Android's explicit @Json(name:) posture."
+      },
+      {
+        "capability": "Additive-drift tolerance \u2014 \"optional field absent is tolerated (older backend)\"",
+        "why": "Half of this ports free and half breaks silently. Swift's synthesised Codable ignores unknown keys (matching Moshi) and decodes a missing key for an Optional-typed property to nil. But a NON-optional property with a Swift default value does NOT tolerate a missing key \u2014 the synthesised decoder throws .keyNotFound and ignores the default. Kotlin constructor defaults are exactly what makes absent-optional tolerated today, so a mechanical port turns fields like NightscoutConnectionDto.isActive = true and NightscoutPumpEventDto.isAutomated = false from tolerant into hard failures.",
+        "options": [
+          "Make every defaulted field Optional and apply the default at the mapping layer \u2014 changes the domain type shape.",
+          "Hand-write init(from:) using decodeIfPresent(...) ?? default for each defaulted field \u2014 explicit, verbose, auditable.",
+          "A @Defaulted property wrapper (or a macro) that supplies decodeIfPresent semantics with a declared default \u2014 concise but adds machinery."
+        ],
+        "recommendation": "Property wrapper / macro for the common case, hand-written init(from:) for the safety-critical models. Whichever is chosen, add a test that enumerates every model field the Android side declares with a Kotlin default and asserts that omitting that key decodes successfully \u2014 otherwise this regression is invisible until an older backend is hit. Keep the existing two tolerance tests (unknown extra fields incl. unknown nested objects; glucose_unit_source absent \u2192 nil) as-is."
+      },
+      {
+        "capability": "Endpoint-presence coupling to the pinned spec",
+        "why": "Android derives the endpoint list by Java reflection over @GET/@POST/@PUT/@DELETE/@PATCH on the Retrofit interface. Swift has no runtime metadata for method attributes and Mirror cannot see them, so the list cannot be derived from the client at test time. The guard must instead couple to something the client is structurally forced to use.",
+        "options": [
+          "An `enum APIEndpoint: CaseIterable` carrying (method, pathTemplate) that is the ONLY way the networking layer forms a URLRequest \u2014 the test iterates allCases.",
+          "Generate the client from the pin with swift-openapi-generator using its `filter:` config restricted to the 34 operations, making endpoint absence a compile error.",
+          "Regex-scan the client source for URL string literals \u2014 brittle, easy to bypass."
+        ],
+        "recommendation": "CaseIterable endpoint table, plus a lint rule that no URLRequest is constructed outside the routing layer. Port normalizePath unchanged (`\\{[^}]+\\}` \u2192 `{}`) so client {deviceToken} still matches spec {device_token}, build specOps as [normalizedPath: Set<lowercased method>], and assert the missing list is empty with the same message naming Contract/openapi.json. All 34 operations must resolve, as they do today. Note the same two blind spots survive: path-parameter names are erased, and only presence \u2014 not shape \u2014 is checked."
+      },
+      {
+        "capability": "ADR 0001 Decision 2 \u2014 app-compatibility signal (designed, deliberately not implemented)",
+        "why": "The deferral rationale was \"this work is guard-only and adds no runtime path.\" That rationale does not survive the iOS distribution model. Under fork-and-build, every user compiles from an arbitrary commit at an arbitrary time and points it at their own self-hosted backend of arbitrary age, so app/backend version skew becomes the normal case rather than an edge case. On Android the shipped fleet moves as one; on iOS it does not.",
+        "options": [
+          "Port the ADR as a design and stay deferred, matching Android exactly.",
+          "Implement only the READ side now: parse an X-Contract-Version response header on /health (or a body field), compare numerically against the built-in CONTRACT_VERSION, treat missing/unparseable as absent \u2014 inert until the backend ships the signal, zero cost if it never does.",
+          "Implement read side plus a version handshake gate on first contact with a new backend URL."
+        ],
+        "recommendation": "Implement the read side now. It is a few dozen lines, it is dead code until the backend emits the signal, and it means a self-hoster who upgrades the app ahead of the backend gets a real warning instead of scattered per-call failures. Keep ADR 0001's ordering rules verbatim: monotonically increasing integer starting at 1, numeric comparison, never semver, unparseable treated as absent and routed to the older/unknown branch \u2014 never silently as compatible."
+      },
+      {
+        "capability": "ADR 0002 \u2014 supported compatibility directions",
+        "why": "ADR 0002 establishes only two proven directions (older app \u2192 newer backend via backend legacy-value migration and loose pass-through fields; newer backend \u2192 older app via client unknown-field tolerance). The third \u2014 newer app \u2192 older backend \u2014 is explicitly NOT established and is handled defensively. A source-distributed iOS app built from HEAD by each user lands in that unproven third direction by default, on day one, for every user whose backend lags their last build.",
+        "options": [
+          "Accept the defensive posture unchanged and rely on per-call error handling plus on-device defaults.",
+          "Document and enforce a minimum backend contract version in the fork-and-build README and in the app's backend-setup flow.",
+          "Implement the ADR 0001 compat signal so the unproven direction is at least detected."
+        ],
+        "recommendation": "All three, in that order of cheapness: keep per-call handling and on-device defaults as the floor; state the minimum backend version the build was validated against in the release notes and on the in-app About/diagnostics screen; implement the read-side compat signal. Preserve the explicit instruction not to treat the tolerant reader as a blanket cross-cadence guarantee \u2014 gate specific operations per ADR 0001 rather than assuming tolerance."
+      },
+      {
+        "capability": "ADR 0003 Decision 1 \u2014 smoke test chosen over a full DTO\u2194spec structural diff",
+        "why": "The decision may well land the same way, but its stated rationale no longer holds and must be re-taken. The alternative was rejected because it would require building a Kotlin-reflection + JSON-Schema resolver modelling @Json renames, defaulted/nullable semantics and Instant adapters. In Swift that infrastructure exists off the shelf: swift-openapi-generator consumes the pin at build time and supports a `filter:` restricted to specific operations, so structural drift on the covered surface becomes a compile error rather than a test assertion.",
+        "options": [
+          "Keep the hand-written models + smoke test exactly as on Android \u2014 cheapest, preserves full hand control over tolerant-reader semantics.",
+          "Generate a filtered client from the pin for the 34 operations and map generated types into domain models \u2014 turns endpoint presence and response-shape drift into build failures.",
+          "Full generation from all 164 paths / 274 schemas \u2014 large generated surface, slow builds, no benefit on unused endpoints."
+        ],
+        "recommendation": "Keep the smoke test as the shipped posture (option 1), and record option 2 as evaluated-and-declined with a reason, so the ADR stays honest. The decisive argument for hand-written models is the nullable-consumed exception: generated types make every spec-required field required and every optional field optional, which removes the ability to deliberately declare a field non-optional so it fails loudly (auth tokens, glucose bounds) while another stays optional-but-field-presence-checked (pump_events.units). That hand-tuned asymmetry IS the safety design. Re-evaluate if the covered surface grows well past 34 operations."
+      },
+      {
+        "capability": "ADR 0003 Decision 2 \u2014 safety constants: guard now, consolidate later",
+        "why": "The follow-up should become the design. Android deferred consolidation because it edits safety validators and would enlarge a guard-only change's blast radius, and because :wear-device cannot depend on :app so the wear copy is structurally forced. Neither constraint exists on iOS: a plain Swift SPM target with no platform dependencies is importable by the iOS app, the watchOS app, widget and complication extensions, and every compile-time-linked pump driver module. There is nothing to force a second copy.",
+        "options": [
+          "Reproduce the 19 scattered sites and port the count-equality scan guard for parity.",
+          "Consolidate up front into one shared target and replace the enumeration scan with direct constant reads plus an inverse forbidden-literal scan.",
+          "Consolidate the named constants but leave inline literals in validators."
+        ],
+        "recommendation": "Consolidate up front (option 2). One `GlucoseSafety` enum (mgdlPerMmol, validRange 20...500, and the derived clamp sub-ranges) in a shared target; every validator, view model, store, chart clamp and persistence predicate references it. This is the single largest safety win available in this subsystem: it converts a 19-site count-equality guard into a real single source of truth, and it retires the acknowledged cost that adding a duplication site requires updating both the guard enumeration and safety-constants.md in the same PR."
+      },
+      {
+        "capability": "GlucoseFormat API surface (phone conversion choke-point)",
+        "why": "The API shape ports, but two formatting behaviours silently differ. (1) Rounding mode: Java's String.format(\"%.0f\") rounds HALF_UP, so formatMean(72.5) \u2192 \"73\"; C/Swift printf uses the IEEE round-half-to-even mode, so String(format:\"%.0f\", 72.5) \u2192 \"72\". The mg/dL mean string is explicitly documented as byte-identical to a legacy string, so this is a visible parity break. (2) Locale: String(format:) with no locale is non-localised and safe, but NumberFormatter and the modern .formatted() FormatStyle localise by default and would emit a comma separator, breaking cross-surface consistency and release-log scrubbing.",
+        "options": [
+          "Use String(format:) everywhere and accept half-even ties.",
+          "Round explicitly with .rounded(.toNearestOrAwayFromZero) before formatting, then format the already-rounded value.",
+          "Route all numeric formatting through a NumberFormatter pinned to Locale(identifier:\"en_US_POSIX\") with roundingMode = .halfUp."
+        ],
+        "recommendation": "Option 2 for integers and option 3's locale pin for decimals: explicit half-up rounding then integer formatting for mg/dL means; String(format:\"%.1f\") (non-localised) for mmol. Add unit tests at exact tie values (72.5, 137.5) to lock the behaviour. Preserve the convertValue/convertSpread distinction exactly \u2014 a spread has no zero anchor, keeps a decimal in mg/dL where a value shows as an integer, and reusing convertValue for a spread remains a named bug class. Add a lint rule banning .formatted() and unpinned NumberFormatter on any glucose value."
+      },
+      {
+        "capability": "Wear GlucoseDisplayUtils (mirror + on-watch clamps + trend glyphs)",
+        "why": "The mirror exists only because :wear-device cannot depend on :app. On watchOS the app imports the same shared Swift package, so the duplicate \u2014 and the 18.0156 and 20..500 scan sites inside it \u2014 disappear. Separately, two rendering details need watchOS-specific treatment: the ARGB colours must remain distinguishable in the always-on-display dimmed state, and the Unicode trend glyphs (\u21c8 \u2191 \u2197 \u2192 \u2198 \u2193 \u21ca) are the wrong primitive for a complication or Smart Stack widget.",
+        "options": [
+          "Port GlucoseDisplayUtils verbatim as a watchOS-only file, preserving the duplication.",
+          "Move isValidGlucose, sanitizeThresholds, bgColor, alertColor, formatGlucose, formatAge and trend mapping into the shared target; watch and phone import identical logic.",
+          "Split: shared numeric/validation logic, watchOS-local presentation."
+        ],
+        "recommendation": "Option 2. Keep the clamp arithmetic byte-identical \u2014 low clamped to 40...200, high to max(low+1,100)...400, urgentLow to 20...low, urgentHigh to high...500, isValidGlucose 20...500 \u2014 and keep the KDoc rule that formatted output is never fed back into validation, colouring, clamping or plotting geometry, which stay mg/dL. Map trends to SF Symbols for complications and Smart Stack while keeping the glyph strings for accessibility labels and speech. Verify red 0xEF4444 / yellow 0xEAB308 / green 0x22C55E remain distinguishable at AOD luminance and to a deuteranope; pair colour with shape or text, never colour alone."
+      },
+      {
+        "capability": "Safety constant #2 \u2014 the 20..500 mg/dL glucose-validity bound",
+        "why": "Nineteen enumerated Android sites with no single owner: importable public constants, private constants, inline range literals in require blocks, a SQL `BETWEEN 20 AND 500`, off-by-one forms 20..499 and 21..500, and two wear coerceIn clamps. Reproducing that on iOS reproduces the hazard the map flags first: a desync in any one site silently accepts or drops readings.",
+        "options": [
+          "Reproduce all 19 sites and port the count-equality scan.",
+          "One canonical `GlucoseSafety.validRange: ClosedRange<Int> = 20...500` with every site referencing it and all derived forms computed (lowerBound, upperBound, lowerBound...(upperBound-1), (lowerBound+1)...upperBound).",
+          "Consolidate constants but keep the SQL literal, since a persistence predicate cannot reference a Swift constant."
+        ],
+        "recommendation": "Option 2, including the persistence predicate \u2014 GRDB lets the range be interpolated into the SQL from the constant, and SwiftData/Core Data #Predicate can capture it directly, so there is no reason for a literal to survive. Bound stays inclusive at both ends: 20 and 500 are valid. Any legitimate change still lands in both repos in the same coordinated release with the SoT doc updated in the same PR."
+      },
+      {
+        "capability": "Domain validators enforcing 20..500 (BgmReading, CgmReading, PluginEvent.CalibrationRequested, EnrichedBolusEvent)",
+        "why": "Kotlin `require` throws IllegalArgumentException, which is catchable and which the drift guard exercises at min, max, min\u22121 and max+1. Swift's idiomatic equivalent, `precondition`, TRAPS \u2014 it cannot be caught and cannot be asserted against by XCTest. Worse, a trap inside a Core Bluetooth delegate callback during a background state-restoration launch kills the process invisibly, with no user-facing signal, and repeated background crashes get the app deprioritised for future relaunch. That failure mode does not exist on Android, where a foreground service crash is visible.",
+        "options": [
+          "`init(...) throws` for all four types, callers use try/catch as today.",
+          "Failable `init?(...)` returning nil so a parser drops the reading and logs, never crashing.",
+          "precondition \u2014 matches Kotlin's terseness, unacceptable on background paths."
+        ],
+        "recommendation": "Throwing init for the domain types (so the drift guard can use XCTAssertThrowsError at all four boundary points) plus a failable convenience initialiser used by every parser and BLE ingestion path, so an out-of-range reading is dropped and logged rather than fatal. Never precondition on any value that originates from BLE, the backend, or persisted data. Preserve the per-site details: CgmReading keeps MIN_MG_DL/MAX_MG_DL as named constants; EnrichedBolusEvent still allows a nil bgAtEvent and still bounds units, correctionUnits and mealUnits to 0...MAX_BOLUS_UNITS; CgmTrend keeps all eight members including UNKNOWN."
+      },
+      {
+        "capability": "Safety constant #3 \u2014 Tandem epoch offset 1199145600 and its conversion",
+        "why": "The constant ports trivially; the conversion does not. Android does LocalDateTime.ofEpochSecond(raw, 0, UTC).atZone(systemDefault()).toInstant() \u2014 a deliberate UTC decode followed by re-anchoring to the device zone, because the pump counts seconds since LOCAL midnight 2008-01-01 while the constant is UTC-based. Foundation has no LocalDateTime; Date is always an absolute instant. A naive Date(timeIntervalSince1970: raw) is wrong by the device's UTC offset, which mis-orders insulin history and IOB.",
+        "options": [
+          "Extract calendar components with a UTC-pinned Calendar, then recompose with a device-zone Calendar \u2014 the literal equivalent.",
+          "Compute the device's UTC offset at the event's wall time and subtract it \u2014 fewer allocations, more room for sign errors.",
+          "Store pump timestamps as wall-clock components plus the capture zone and resolve at read time."
+        ],
+        "recommendation": "Option 1, written once in the Tandem driver with the arithmetic covered by tests at DST boundaries in both hemispheres. Two details to pin: use a fixed Calendar(identifier: .gregorian) with TimeZone(identifier: \"UTC\") for the decode; use TimeZone.current captured at parse time (not .autoupdatingCurrent) so a later timezone change does not retroactively reinterpret already-parsed events, matching Java's systemDefault() snapshot. Handle the DST spring-forward gap explicitly \u2014 Calendar.date(from:) for a non-existent wall time must be documented and tested, not left to Foundation's default. Keep the existing rule that all parsers in this object return nil on malformed cargo rather than throwing."
+      },
+      {
+        "capability": "Drift guard \u2014 three-layer mechanism",
+        "why": "Layer 1 (direct constant reads) ports and expands to cover nearly everything once constants are consolidated. Layer 2 (behavioural boundary checks) ports only if the validators throw rather than trap. Layer 3 (comment-stripped source scan of remaining duplication sites) is the layer that changes character: with one canonical constant there is almost nothing left to enumerate, and a count-equality enumeration would then be pure maintenance overhead.",
+        "options": [
+          "Port all three layers unchanged including a 19-entry enumeration.",
+          "Layers 1 and 2 unchanged; replace Layer 3 with an INVERSE scan \u2014 assert that no source file outside the canonical constants file contains a bare 20/500/18.0156/1199145600 glucose-context literal.",
+          "Layers 1 and 2 only; drop source scanning entirely."
+        ],
+        "recommendation": "Option 2. The inverse scan is strictly better than the enumeration: it is self-maintaining (a new duplication site fails without anyone remembering to update a list), it fails on the thing you actually fear (a new hardcoded bound) rather than on any edit, and it needs no per-site expected counts. Keep Layer 1's exact assertions \u2014 mgdlPerMmol == 18.0156 with zero tolerance, min/max == 20/500 on every importable constant \u2014 and Layer 2's four types \u00d7 four boundary points. Keep the failure message that names both the guard and docs/contract/safety-constants.md."
+      },
+      {
+        "capability": "Drift guard SCAN_SITES \u2014 the 19-entry enumeration",
+        "why": "Directly downstream of consolidation. Fifteen of the 19 entries exist only because the bound is duplicated; two more exist because :wear-device cannot import :app; one is a SQL literal; one is the Tandem offset. On iOS the wear-mirror entries vanish, the SQL literal can reference the constant, and the private VALID_GLUCOSE_MIN/MAX and MIN/MAX_THRESHOLD constants become references. The enumeration collapses to roughly the Tandem offset alone.",
+        "options": [
+          "Port the 19 entries mechanically to Swift paths and maintain the counts.",
+          "Let the enumeration shrink to whatever genuinely cannot reference the shared constant (realistically: the Tandem epoch offset), and cover everything else by direct constant read plus the inverse scan.",
+          "Drop the enumeration entirely."
+        ],
+        "recommendation": "Option 2, and document the collapse in the iOS safety-constants SoT doc so a reader is not confused by the count difference from Android. Also fix the stale path Android carries: safety-constants.md cites WatchGraphRenderer under presentation/ while the file lives under complications/ \u2014 do not reproduce that error. Preserve the ongoing obligation from ADR 0003: adding any new site or any new nullable consumed field on a safety surface requires updating the SoT doc and the guard in the same PR."
+      },
+      {
+        "capability": "Drift guard scan matching algorithm (countOccurrences + stripComments)",
+        "why": "Both halves have Swift-specific defects. stripComments is a naive regex that removes /* \u2026 */ then truncates each line at the first // \u2014 but Swift permits NESTED block comments (/* /* */ */), which the regex terminates early on, and a // or /* inside a string literal or string interpolation silently eats code. The token regex also assumes Kotlin literal syntax: Swift numeric literals conventionally use underscore grouping (1_199_145_600), which the un-underscored token 1199145600 will not match, and Swift has no trailing L suffix.",
+        "options": [
+          "Port the regex verbatim and accept the string-literal and nested-comment hazards.",
+          "Keep regex matching but strip comments with SwiftSyntax Trivia, which understands nesting and string literals exactly.",
+          "Do the whole scan over SwiftSyntax tokens \u2014 match on integer/float literal token text in code position only, no regex at all."
+        ],
+        "recommendation": "Option 3 if the scan survives consolidation at all, else option 2. swift-syntax is a first-party SPM package, so the comment-stripping hazard is fully removable rather than merely mitigated. Whatever the mechanism, preserve the boundary semantics that make the guard catch widening: a following digit, '.', '_', 'e' or 'E' must not match, so 500\u21925000 and 18.0156\u219218.01565 stop matching and fail. Normalise underscore grouping before comparison so 1_199_145_600 and 1199145600 are the same token."
+      },
+      {
+        "capability": "Documented exclusions from the drift scan",
+        "why": "Two of the three exclusion categories change meaning on iOS. The 'example plugins are sample code, not shipped' carve-out does not survive: the simulated/demo glucose driver is not optional on iOS \u2014 Core Bluetooth does not exist in the Simulator and the lead developer has no iPhone, so a simulated driver is the ONLY way he can validate anything, and it will be compile-time linked into the shipped binary like every other driver. It is therefore shipped code and cannot be excluded. The display-only exclusion still holds but moves (SwiftUI Charts Y-axis clamps rather than a Canvas renderer).",
+        "options": [
+          "Exclude the simulated driver as Android excludes plugins/example.",
+          "Require the simulated driver to import the shared GlucoseSafety constants like every other driver, and delete the exclusion.",
+          "Ship the simulated driver only in Debug configurations so it is genuinely not in release builds."
+        ],
+        "recommendation": "Option 2, and additionally build the simulated driver in Debug and TestFlight configurations only if the product wants it hidden from a user's own release build \u2014 but either way it references the shared constants, so the exclusion is unnecessary. Keep the comment-only exclusion (a proper SwiftSyntax scan makes it automatic). Keep the display-only exclusion for chart axis clamps, with the same explicit revisit trigger: if any display clamp ever feeds a validation or alerting path, it becomes a scan site."
+      },
+      {
+        "capability": "Backend-response validation sites (reject-and-ignore rules)",
+        "why": "Three sites apply the same bound to the same class of data with three different failure modes and two different ordering strictnesses: AuthRepository logs and ignores the whole response (strict < throughout), AlertThresholdStore throws (\u2264 \u2026 < \u2026 \u2264 at the urgent boundaries), HomeViewModel clamps each value into 20...500 then rejects on ordering. The map itself flags this as safety-critical, and the consequence \u2014 rejecting a response leaves the previously stored thresholds firing the alert floor on stale values \u2014 is invisible to the user.",
+        "options": [
+          "Port all three verbatim for exact parity, including the divergent ordering strictness.",
+          "Unify on one validation policy per data class: validate against the shared bound, reject atomically on failure, keep the last known-good values, and surface staleness.",
+          "Unify and additionally hard-fail (refuse to alert) when thresholds are stale beyond a bound."
+        ],
+        "recommendation": "Option 2. Keep every numeric predicate byte-identical (20...500 membership; range ul<lo<hi<uh; safety limits min<max, min in 20...499, max in 21...500, basal 1...15000, bolus 1...25000; the 900_000 ms / 15-minute refresh interval) but pick ONE ordering rule and ONE failure mode, and make the stale-threshold condition visible: show 'alert thresholds last synced <time>' on the phone and mirror it to the watch. Do not adopt option 3 \u2014 refusing to alert is strictly more dangerous than alerting on slightly stale thresholds for a monitoring-only app."
+      },
+      {
+        "capability": "CI enforcement of the contract and drift guards (Android Gate \u2192 iOS Gate)",
+        "why": "Both guards are plain JVM unit tests run by ./gradlew testDebugUnitTest on ubuntu-latest. On iOS they need macOS runners and a different test invocation, and the build step changes fundamentally: upstream CI can build but cannot SIGN, because under fork-and-build the signing identity belongs to each user, not the project.",
+        "options": [
+          "One job running everything through xcodebuild test against an iOS Simulator destination.",
+          "Split: `swift test` on a host-macOS SwiftPM target for the contract and drift guards (no Simulator, seconds not minutes, unrestricted filesystem access to repo sources), plus `xcodebuild test -destination 'platform=iOS Simulator'` for app and watchOS tests, plus `xcodebuild build CODE_SIGNING_ALLOWED=NO`.",
+          "Keep guards on a Linux runner via the open-source Swift toolchain \u2014 possible for a Foundation-only package, cheapest, but diverges from the toolchain that builds the app."
+        ],
+        "recommendation": "Option 2, published as a single required status named 'iOS Gate' so branch protection stays a one-status rule as today. Keep the dorny/paths-filter detect-changes fan-out unchanged so docs-only PRs skip the build. Replace ./gradlew lintDebug with SwiftLint plus SwiftFormat --lint. Add an 'App Config Gate' asserting Info.plist and entitlements posture (no blanket NSAllowsArbitraryLoads, UIBackgroundModes exactly the declared set, no get-task-allow in Release, every required usage-description string present and non-empty) \u2014 this is the honest source-level substitute for the artifact-level checks Android declined MobSF for. Note that the guards must still run from within the repo tree, since they read repo files by path."
+      },
+      {
+        "capability": "Security Scan Gate (Semgrep p/kotlin + p/java + p/secrets)",
+        "why": "Semgrep's p/kotlin and p/java rulesets do not apply to Swift and there is no Swift ruleset of comparable breadth from any vendor. Semgrep does support Swift as a language and a p/swift pack exists, but it is thin \u2014 a small fraction of p/kotlin's rule count. Satisfying 'the same security testing as the Android repo' in substance therefore requires a different primary tool, not a renamed one.",
+        "options": [
+          "Semgrep p/swift + p/secrets only \u2014 keeps the tool name, materially weaker coverage.",
+          "CodeQL with the `swift` language pack via github/codeql-action/init + analyze as the primary Swift SAST, retaining Semgrep p/secrets (regex-based and language-agnostic, so it works unchanged) and adding SwiftLint custom/analyzer rules for project-specific patterns.",
+          "MobSF or an artifact-level iOS scan \u2014 blocked upstream because CI cannot produce a signed device build."
+        ],
+        "recommendation": "Option 2, published under the SAME required status name 'Security Scan Gate' so the branch ruleset does not change. CodeQL's Swift pack is the deepest Swift static analysis available and is free on public repositories, which this one is. Keep the gate policy identical \u2014 fail on HIGH/ERROR only, WARNING/INFO surfaced but non-blocking \u2014 and keep the same posture on secret scanning: no dedicated gate, because gitleaks runs via CodeRabbit and GitGuardian runs org-wide. Also carry over the medical-device framing in the workflow header, since it is what justifies the gate being required. State plainly in docs/dev/security-testing.md that Swift SAST rule coverage is thinner than Kotlin's and that the mitigation is a deliberately small dependency surface plus CodeRabbit review."
+      },
+      {
+        "capability": "Dependency Scan Gate (OSV-Scanner over committed gradle.lockfile files)",
+        "why": "Gradle dependency locking is what gives OSV-Scanner something to read; the six committed lockfiles are the scannable artifact. SwiftPM's equivalent is Package.resolved, but the ecosystem coverage behind it is materially thinner: Swift advisories in OSV/GitHub Advisory Database are sparse compared with Maven, and OSV-Scanner's Package.resolved support must be confirmed at implementation time rather than assumed.",
+        "options": [
+          "OSV-Scanner over committed Package.resolved, mirroring the Android gate exactly if the parser supports it.",
+          "GitHub Dependabot with package-ecosystem: swift for alerts and version updates, plus a manual pinned-manifest review gate.",
+          "Both, with the gate failing on any known CVE as today."
+        ],
+        "recommendation": "Both, under the same required status name 'Dependency Scan Gate', with the OSV lane verified against a real Package.resolved before it is made required and Dependabot as the always-on backstop. Commit Package.resolved, pin every dependency with .exact(...) rather than a range (the SwiftPM analogue of Gradle dependency locking), and keep the same trigger paths so any file that can change the resolved graph re-runs the scan, plus the weekly Monday cron that catches newly disclosed CVEs. The strongest available mitigation for thin Swift advisory coverage is a deliberately tiny dependency surface \u2014 the Loop/xDrip4iOS projects ship with very few third-party packages and this one should too."
+      },
+      {
+        "capability": "SPDX in-scope globs and the exclusion-wins rule",
+        "why": "All 16 Android globs are Gradle/Kotlin-shaped and must be rewritten, and one Swift file has a hard constraint the policy's 'first thing in the file, above package' rule violates: Package.swift REQUIRES its `// swift-tools-version:x.y` comment to be the literal first line, so SPDX lines must go on lines 2-3, not line 1. The deliberate 'list Gradle files individually so a recursive glob cannot reach an excluded module' technique still applies and should be preserved for Package.swift files.",
+        "options": [
+          "Rewrite the globs and add a documented Package.swift carve-out.",
+          "Skip Package.swift entirely to avoid the ordering exception.",
+          "Move all Package.swift SPDX metadata into a REUSE-style .reuse/dep5 file instead of in-file headers."
+        ],
+        "recommendation": "Option 1. In-scope: Sources/**/*.swift and Tests/**/*.swift per module, every Package.swift (lines 2-3), *.xcconfig, scripts/*.sh, fastlane/Fastfile and fastlane/*.rb, and .github/workflows/*.yml. Out of scope, consistent with Android's conservative posture: Contract/openapi.json, Info.plist, *.entitlements, *.xcodeproj/**, *.xcscheme, Assets.xcassets/**, Package.resolved, .swiftlint.yml, renovate/osv/zizmor configs, all Markdown, and anything under .build/ or DerivedData/. Keep the exclusion-wins rule verbatim: where an in-scope glob and an excluded tree both match, the exclusion wins."
+      },
+      {
+        "capability": "SPDX never-stamp trees and the copied-or-ported objective test",
+        "why": "The objective test \u2014 excluded if upstream code was COPIED OR PORTED into the file, in scope if upstream was only STUDIED and reimplemented \u2014 ports verbatim and is the right rule. What changes is the population it applies to. On iOS the likely ports are different and larger: a Medtronic driver would again be a port of OpenMinimed (excluded at directory level, same reasoning that drawing the line file-by-file inside a ported module invites misattribution), and any adoption of LoopKit/CGMBLEKit-derived code brings MIT obligations. There is no gradlew/gradle-wrapper equivalent to leave alone; Xcode-generated project files replace it as the untouched category.",
+        "options": [
+          "Port the exclusion list structure and repopulate it as iOS modules land.",
+          "Adopt REUSE/SPDX tooling (reuse lint) to make the in-scope/excluded partition machine-checkable.",
+          "Keep a prose list only."
+        ],
+        "recommendation": "Option 1 as the baseline with option 2 as a stretch. Preserve the two rules that matter most: citing an upstream project or naming an upstream file as a reference is NOT grounds for exclusion (the five Tandem files that cite jwoglom/pumpX2 as a protocol and test-vector reference stay in scope and keep their reference comments intact, and their Swift equivalents should too), and when the objective test and the list disagree, treat the file as excluded and fix the list. Keep docs/THIRD_PARTY_LICENSES.md authoritative on conflict."
+      },
+      {
+        "capability": "EcJpake \u2014 the open Apache-2.0 attribution gap",
+        "why": "The gap does not just port, it gets harder. Apple's CryptoKit does not implement EC-JPAKE, so the Tandem authenticator needs an implementation in Swift, and every route carries an Apache-2.0 obligation: hand-porting particle-iot/ecjpake-java reproduces the exact gap that is open today; wrapping mbedTLS (which has mbedtls_ecjpake) brings Apache-2.0 in as a dependency. Either way the notice must travel with the code, which is why the Android file's prose-only mention in a header plus a notice living only in THIRD_PARTY_LICENSES.md is insufficient.",
+        "options": [
+          "Swift port of the Java EcJpake, stamped SPDX-License-Identifier: Apache-2.0 / Copyright 2022 Particle Industries, Inc.",
+          "Vendor or depend on mbedTLS via SPM and use its EC-JPAKE, recording the Apache-2.0 notice in THIRD_PARTY_LICENSES.md and in the app's in-app licences screen.",
+          "Reimplement EC-JPAKE from RFC 8236 / the Thread spec without reference to either codebase \u2014 clean-room, expensive, and hard to prove."
+        ],
+        "recommendation": "Option 1 or 2, whichever the crypto review prefers, isolated in its OWN SPM target so the GPL-3.0-only sweep never touches it and the licence boundary is structural rather than a per-file exception. Apache-2.0 is one-way compatible with GPL-3.0, so including it in this GPL-3.0-only work is fine; the obligation is attribution, not relicensing. Do not carry the Android bug forward: the header must contain a real SPDX identifier and a real copyright line, not a prose sentence. Also fix it in the Android repo while the policy is fresh."
+      },
+      {
+        "capability": "SPDX sweep verification (six checks) \u2014 one-time sweep to continuous gate",
+        "why": "The Android sweep is described but has NOT been executed: only seven .kt files in the whole tree contain the string SPDX-License-Identifier and those are licence-screen tests, so no source file carries a header and EcJpake still has no identifier. A greenfield Swift repo has no such backlog, so the right move is to enforce from commit one rather than schedule a sweep that then rots.",
+        "options": [
+          "Port the six-check sweep script and run it once, as designed for Android.",
+          "Turn the same six checks into a required per-PR CI gate that runs on every PR.",
+          "Adopt `reuse lint` as the gate and drop the bespoke greps."
+        ],
+        "recommendation": "Option 2, named 'License Header Gate'. Port the checks with the same output-not-exit-status discipline (grep -L/-l exits non-zero when nothing matches, which is the passing case): (1) no in-scope Swift file lacks GPL-3.0-only, with the EC-JPAKE target filtered out; (2) no listed non-Swift in-scope file lacks it; (3) no excluded/ported tree contains it; (4) the EC-JPAKE file DOES contain SPDX-License-Identifier: Apache-2.0; (5) LICENSE is unmodified by the PR; (6) the GitHub licence API reports exactly one licence, GPL-3.0. Add a seventh for Swift: every Package.swift has swift-tools-version on line 1 and SPDX on lines 2-3."
+      }
+    ],
+    "impossible": [
+      {
+        "capability": "Guaranteed audible urgent-low/urgent-high alerting at the server's exact thresholds, regardless of silent switch, Focus, or Do Not Disturb, for every user out of the box",
+        "why": "Bypassing the ringer switch and Focus requires a UNNotificationInterruptionLevel of .critical, which needs the com.apple.developer.usernotifications.critical-alerts entitlement. Apple grants that entitlement per Team ID, only on individual request through a justification form, and it cannot be self-enabled in Xcode. Under the fork-and-build model every user signs with their OWN Apple Developer team, so the entitlement would have to be requested and granted to each user individually \u2014 Apple will not grant it at scale to hobbyist individual accounts. This directly limits the safety invariant that the app must alarm at exactly the server's alert-threshold levels: the thresholds will be correct, but the alarm's audibility is not guaranteed.",
+        "closest_alternative": "Ship .timeSensitive as the default interruption level \u2014 its entitlement (com.apple.developer.usernotifications.time-sensitive) is self-serve in Xcode, it breaks through Focus when the user permits Time Sensitive notifications, and it plays sound \u2014 while respecting the silent switch. Detect the critical-alerts entitlement at build time and upgrade urgent-low/urgent-high to .critical when it is present, so users who do obtain it get the stronger behaviour with no code change. Document in the fork-and-build guide how to request the entitlement, how to grant the app Time Sensitive permission, and that silent mode will suppress audio otherwise. Where the app is foregrounded or holds an active audio session, play an in-app alarm that does not depend on the notification path. Disclose the limitation in MEDICAL-DISCLAIMER.md."
+      },
+      {
+        "capability": "Upstream-enforced safety gates on the binary each user actually installs",
+        "why": "On Android, upstream CI builds the APK that users side-load, so the Android Gate, Security Scan Gate, Dependency Scan Gate and the two contract guards all ran against the exact artifact. Under the iOS fork-and-build model the installed binary is produced by the USER's own GitHub Actions run, from THEIR fork, at THEIR chosen commit, signed with THEIR certificate, and uploaded to THEIR App Store Connect. Upstream has no signing identity, no visibility into the fork's workflow, and no ability to require a status check there \u2014 a fork owner can disable or edit any gate. Additionally, upstream CI cannot produce a signed device build at all, so artifact-level scanning (the iOS analogue of the MobSF/APK class Android evaluated) is unreachable upstream even in principle.",
+        "closest_alternative": "Make the gates unbypassable-by-default inside the build workflow the user forks: the release job runs the contract guards, the safety-constant drift guard, SwiftLint and the App Config Gate as hard prerequisites of the archive step, so a red guard means no artifact rather than a warning. Have the workflow build from a pinned upstream tag by default rather than the fork's HEAD. Stamp the upstream commit SHA, the CONTRACT_VERSION the build was validated against, and the guard results into the build's Info.plist, and surface all three on an in-app About/Diagnostics screen so a user (and a maintainer helping them) can verify exactly what is running. Substitute source-level Info.plist/entitlements linting upstream for the artifact scan that cannot run there."
+      },
+      {
+        "capability": "A Swift SAST ruleset with the breadth of Semgrep's p/kotlin + p/java packs",
+        "why": "No such thing exists from any vendor as of 2026. Semgrep supports Swift as a language and publishes a p/swift pack, but its rule count is a small fraction of p/kotlin's, and the Java pack contributes nothing to a Swift codebase. This is a genuine tooling gap, not a configuration choice, and it means 'the same security testing as the Android repo' cannot be satisfied by keeping the same tool.",
+        "closest_alternative": "Compose equivalent coverage in substance from three tools rather than one: CodeQL with the `swift` language pack as the primary taint/dataflow analysis (deepest Swift analysis available, free on public repositories); Semgrep p/secrets retained unchanged, since it is regex-based and language-agnostic; and SwiftLint custom rules encoding project-specific prohibitions that no generic pack will ever have \u2014 unpinned NumberFormatter or .formatted() on a glucose value, bare 20/500/18.0156 literals outside the canonical constants file, raw-value enums decoded from backend fields, precondition on externally-sourced data, and `privacy: .public` interpolation of pump identifiers in OSLog. Those custom rules are worth more here than any generic pack, because they encode this app's actual safety invariants. Record the residual gap and its mitigation in docs/dev/security-testing.md exactly as Android recorded the MobSF decision."
+      }
+    ],
+    "ios_requirements": [
+      "The repository must vendor a byte-for-byte copy of the backend's OpenAPI contract at Contract/openapi.json alongside a Contract/CONTRACT_VERSION file, and a maintainer must be able to refresh both in a single PR by copying the whole spec and setting the version from info.x-contract-version \u2014 never by hand-editing the spec.",
+      "A maintainer must be able to run the full contract guard suite locally on a Mac in seconds without an iOS Simulator, an App Store Connect account, or a network connection.",
+      "CI must fail any PR in which the vendored CONTRACT_VERSION does not equal info.x-contract-version inside the pinned spec, with a message telling the developer to refresh the pin and its version together.",
+      "CI must fail any PR in which an endpoint or HTTP method the app calls is absent from the pinned spec, naming Contract/openapi.json in the failure, and the app's networking layer must expose its complete endpoint list to the test rather than hiding it behind hand-written URL construction.",
+      "CI must fail any PR in which the pinned spec stops declaring a field the app consumes on a safety-critical response: safety-limits min/max glucose, alert-thresholds urgent_low/low_warning/high_warning/urgent_high, login access_token/refresh_token/expires_in/user, and the Nightscout data array items pump_events[units, event_type] and glucose_readings[value].",
+      "The project must maintain a written standing rule, enforced in review, that any newly consumed optional field whose absence would silently degrade a safety surface is added to the pinned-spec field-presence check rather than left to round-trip tests.",
+      "The app must decode responses through exactly one shared decoder configuration, and the contract tests must exercise that same object, so the test cannot silently diverge from what ships.",
+      "The app must tolerate a newer backend adding unknown fields, including unknown nested objects, and must tolerate an older backend omitting any field the app treats as optional or defaulted \u2014 including fields with non-nil defaults, which require explicit handling in Swift.",
+      "The app must fail loudly and refuse to use a response when a field it treats as required is renamed, removed, or sent with the wrong scalar type, and must never coerce a JSON string into a numeric field.",
+      "The app must never model a backend-supplied enumerated value as a strict enum; any unrecognised member must decode to a well-defined unknown case rather than failing the whole response.",
+      "The app must read a backend contract-version signal where one is offered, compare it numerically against the version the build was validated against, and treat a missing or unparseable signal as an older/unknown backend \u2014 never as compatible.",
+      "On first contact with a backend that is older or of unknown version, the app must continue to work on all read and monitoring paths and show a single dismissible warning that some features may not work; it must never refuse to run, and it must never show that warning at all when no backend is configured (local mode).",
+      "The app must show the user which upstream commit it was built from, which contract version it was validated against, and which backend it is paired with, on a screen reachable without a backend connection.",
+      "There must be exactly one definition in the codebase of the 20-500 mg/dL glucose validity bound and exactly one definition of the 18.0156 mmol conversion factor, shared unchanged by the iPhone app, the Apple Watch app, every widget and complication extension, and every compile-time-linked pump driver.",
+      "CI must fail any PR that introduces a hardcoded glucose bound or conversion factor outside those canonical definitions.",
+      "Glucose must be stored and compared in mg/dL on every surface; mmol/L must exist only as display and input; converting must divide once from the most precise mg/dL source and round last so that 70 shows as 3.9, 100 as 5.6, 120 as 6.7 and 180 as 10.0 on both phone and watch.",
+      "Every numeric glucose string the app produces must use a dot decimal separator and half-up rounding regardless of the device's locale, and must be byte-identical between phone and watch for the same input.",
+      "Constructing a domain reading with an out-of-range glucose value must fail in a way the caller can handle; no code path that consumes Bluetooth, backend, or persisted data may terminate the process on invalid input.",
+      "The app must reject a backend settings response atomically when any threshold or safety limit is out of range or mis-ordered, retain the last known-good values, and show the user when the values in force were last successfully synced.",
+      "A user must be able to enter thresholds in either unit using their own keyboard's decimal separator, and any out-of-range error message must quote bounds that would themselves be accepted if re-entered.",
+      "A maintainer must be able to validate every part of this subsystem in the iOS and watchOS Simulators, with no physical iPhone, Apple Watch, or pump \u2014 which requires a simulated data source that links against the same shared safety constants as every real driver.",
+      "Every shipped source file must carry the project's SPDX header, every file containing ported third-party code must carry that upstream's identifier and copyright instead, and CI must fail a PR that violates either rule \u2014 including the EC-JPAKE implementation, which must carry Apache-2.0 attribution in the file itself and not only in a documentation page.",
+      "CI must block any PR whose commits, code comments, or description carry AI-tool attribution, using the same severity model, bot allowlist, and auto-close behaviour as the Android repository, extended to Swift source files.",
+      "The upstream repository must build, test, lint, and security-scan the app without any Apple signing material, and the fork-and-build release workflow must run every safety and contract guard as a hard prerequisite of producing an installable artifact."
+    ],
+    "risks": [
+      {
+        "risk": "Swift's synthesised Codable throws on a missing key for a non-optional property even when it has a default value. A mechanical port of the Kotlin DTOs converts every defaulted-but-non-null field from tolerant into a hard failure, breaking the newer-backend/older-app compatibility direction ADR 0002 depends on \u2014 and it breaks only against an older backend, which upstream CI never exercises.",
+        "severity": "high",
+        "mitigation": "Enumerate every Kotlin DTO field that carries a constructor default and add an explicit omit-this-key decoding test for each. Use a property wrapper or hand-written init(from:) with decodeIfPresent to restore default-on-absent semantics. Add a CI check that flags any non-optional Codable property with a default value."
+      },
+      {
+        "risk": "Under fork-and-build, the newer-app/older-backend direction \u2014 the one ADR 0002 explicitly does NOT establish \u2014 becomes the normal case for every user whose self-hosted backend lags their last build. Failures surface as scattered per-call errors with no single explanation.",
+        "severity": "high",
+        "mitigation": "Implement the read side of the ADR 0001 compat signal now rather than deferring it, publish the minimum backend contract version each release was validated against, and show it in-app on the About/Diagnostics screen. Keep per-call graceful degradation and on-device defaults as the floor."
+      },
+      {
+        "risk": "Urgent-low alerts may be silent for most users. The critical-alerts entitlement is granted per Apple Developer team on individual request, and under fork-and-build every user signs with their own team. Correct thresholds fetched from the backend do not produce an audible alarm if the phone is on silent.",
+        "severity": "high",
+        "mitigation": "Default to .timeSensitive, upgrade to .critical automatically when the entitlement is present at build time, document the entitlement request and the Time Sensitive permission in the fork-and-build guide, play an in-app alarm when foregrounded, and state the limitation plainly in MEDICAL-DISCLAIMER.md."
+      },
+      {
+        "risk": "A precondition or fatalError on an out-of-range glucose value inside a Core Bluetooth delegate callback during a background state-restoration launch kills the app invisibly; repeated background crashes cause iOS to deprioritise future relaunches, so the app silently stops monitoring. Android's foreground-service crash is at least visible.",
+        "severity": "high",
+        "mitigation": "Ban precondition/fatalError on any value originating from BLE, the backend, or persistence via a SwiftLint custom rule. Use throwing initialisers for domain types and failable initialisers on parser paths so invalid readings are dropped and logged. Add a background-crash counter surfaced on the diagnostics screen."
+      },
+      {
+        "risk": "Java's %.0f rounds half-up while C/Swift printf rounds half-to-even, so a mechanically ported formatMean produces a different string at exact tie values (72.5 \u2192 \"73\" on Android, \"72\" on iOS). The mg/dL mean string is documented as byte-identical to a legacy string, and glucose values shown differently on two of a user's devices erode trust in the numbers.",
+        "severity": "medium",
+        "mitigation": "Round explicitly with .rounded(.toNearestOrAwayFromZero) before formatting rather than relying on the format specifier, and add tie-value unit tests (72.5, 137.5) shared by the phone and watch targets."
+      },
+      {
+        "risk": "The Tandem epoch conversion is not a straight port: Foundation has no LocalDateTime, and a naive Date(timeIntervalSince1970:) is wrong by the device's UTC offset, shifting every pump event timestamp and mis-ordering insulin history and IOB. The error is systematic, plausible-looking, and invisible in a Simulator run in UTC.",
+        "severity": "high",
+        "mitigation": "Implement the UTC-decode-then-device-zone-recompose explicitly with a fixed UTC Calendar and a TimeZone.current snapshot captured at parse time; test in non-UTC zones in both hemispheres and across a DST spring-forward gap; verify against real pump captures on Daniel's t:slim X2."
+      },
+      {
+        "risk": "Swift dependency vulnerability data is materially thinner than Maven's, and OSV-Scanner's Package.resolved support must be verified rather than assumed. The Dependency Scan Gate could be green because nothing is known, not because nothing is wrong.",
+        "severity": "medium",
+        "mitigation": "Keep the dependency surface deliberately tiny (the Loop/xDrip4iOS posture), pin every package with .exact(...), commit Package.resolved, run both OSV-Scanner and Dependabot, and record the coverage gap explicitly in docs/dev/security-testing.md with a revisit trigger."
+      },
+      {
+        "risk": "macOS GitHub Actions runners are free for public repositories but bill at a 10x multiplier for private ones. A user who forks privately to keep their backend URL out of public view will burn the free-minute allowance quickly on xcodebuild archives, and may respond by disabling the guard steps in the release workflow.",
+        "severity": "medium",
+        "mitigation": "Document that a public fork is safe (GitHub secrets are not exposed in forks) and recommend it. Split CI so the fast host-macOS guard job runs on every push and the expensive Simulator/archive job runs only on release. Make guard steps hard prerequisites of the archive step so disabling them fails the build rather than skipping a check."
+      },
+      {
+        "risk": "The EC-JPAKE attribution gap is still open in the Android repo and gets structurally larger on iOS, where CryptoKit provides no EC-JPAKE at all and every implementation route carries an Apache-2.0 obligation into a GPL-3.0-only source-distributed project.",
+        "severity": "medium",
+        "mitigation": "Isolate EC-JPAKE in its own SPM target carrying SPDX-License-Identifier: Apache-2.0 and the upstream copyright line in the file itself, list it in THIRD_PARTY_LICENSES.md and in an in-app licences screen, and make the License Header Gate assert its Apache-2.0 line positively rather than merely excluding it. Close the same gap in the Android repo while the policy is fresh."
+      },
+      {
+        "risk": "The lead developer has no iPhone and no Apple Watch, and Core Bluetooth does not exist in the Simulator. Every safety invariant that only manifests on real hardware \u2014 background BLE relaunch behaviour, notification audibility, AOD colour legibility, real pump timestamp decoding \u2014 is validated by exactly one person on one set of devices.",
+        "severity": "medium",
+        "mitigation": "Build the simulated driver as a first-class shipped module linked against the shared safety constants, so bounds, conversion, formatting and threshold logic are fully Simulator-testable. Define an explicit hardware-validation checklist that Daniel runs per release, and record its results against the build's commit SHA."
+      },
+      {
+        "risk": "Consolidating the 20..500 bound into one constant touches every safety validator at once \u2014 exactly the blast-radius concern that caused Android to defer it. Doing it up front on iOS is right, but it lands the highest-risk refactor in the codebase before there is a large regression suite behind it.",
+        "severity": "medium",
+        "mitigation": "Land the shared constants target and its direct-read tests first, migrate call sites one module at a time with the behavioural boundary tests (min, max, min-1, max+1 on all four domain types) in place before each migration, and turn on the inverse forbidden-literal scan only after the last site has moved."
+      },
+      {
+        "risk": "Contract and drift guards read repository files by path, so they only work when run from inside the repo tree. Running them under an iOS Simulator destination, or relying on the test runner's working directory, produces either a sandbox failure or a silently wrong root.",
+        "severity": "low",
+        "mitigation": "Anchor repo-root resolution on #filePath (baked at compile time) walking up to Package.swift, and run the guards exclusively on a host-macOS SwiftPM test target rather than a Simulator destination."
+      }
+    ],
+    "questions_for_pm": [
+      "Under fork-and-build, urgent-low alerts will not bypass silent mode or Focus for any user who has not obtained Apple's critical-alerts entitlement for their own developer team \u2014 and Apple does not grant that entitlement at scale to individual accounts. Is shipping a glucose monitor whose most safety-relevant alert can be silenced by the ringer switch acceptable for this product, and if so, how should that be disclosed (MEDICAL-DISCLAIMER.md, first-run onboarding, both) and is it acceptable to require each user to attempt the entitlement request as part of setup?"
+    ]
+  }
+}

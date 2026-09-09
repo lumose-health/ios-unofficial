@@ -1,0 +1,959 @@
+{
+  "key": "medtronic-driver",
+  "label": "Medtronic 680G/770G/780G read-only driver",
+  "map": {
+    "subsystem": "Medtronic MiniMed 680G/770G/780G read-only BLE driver (plugins/shipped/medtronic) \u2014 phone-as-peripheral connection + SAKE session + CGM/IDD/history read layer + plugin capability surface, plus the tools/medtronic-ble-spike offline de-risk harness and the user pairing doc.",
+    "capabilities": [
+      {
+        "name": "Inverted BLE topology: phone is the peripheral, pump is the central",
+        "behavior": "Unlike Tandem (phone = GATT client/central), the MiniMed 700-series pump is the BLE central. The phone advertises as a connectable peripheral named \"Mobile 000001\" and stands up a GATT server; the pump scans, finds it, connects, and drives the SAKE handshake. There is no active scan and no device address to dial: DevicePlugin.connect(address, config) ignores `address` entirely. Pairing style is PairingStyle.ADVERTISE_AND_WAIT with advertisedName = \"Mobile 000001\". After SAKE completes, the phone opens a second GATT *client* connection back to the same BluetoothDevice (captured from the server callback) to read the pump's CGM/IDD/Battery/DIS services \u2014 it must never start a fresh scan/advertise cycle for that.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/connection/MedtronicPeripheral.kt",
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/connection/MedtronicBleConnectionManager.kt",
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/plugin/MedtronicDevicePlugin.kt"
+        ],
+        "edge_cases": [
+          "Emulators and some chipsets cannot advertise as a BLE peripheral at all: isSupported() = adapter != null && isEnabled && isMultipleAdvertisementSupported && bluetoothLeAdvertiser != null. Failure surfaces as PERIPHERAL_UNSUPPORTED and the flow can never pair.",
+          "A pump connecting during scan(), CONNECTING or RECONNECTING all collapse into ConnectionState.CONNECTING; other states ignore the event."
+        ]
+      },
+      {
+        "name": "Advertising contract (what the pump scans for)",
+        "behavior": "AdvertiseSettings: connectable=true, timeout=0 (advertise until stopped), txPower = ADVERTISE_TX_POWER_MEDIUM. Mode is ADVERTISE_MODE_LOW_LATENCY for RECONNECT (paired pumps scan infrequently and miss long intervals) and ADVERTISE_MODE_BALANCED for FIRST_PAIR. AdvertiseData carries manufacturer data under company ID 0x01F9 with payload `0x00 || ASCII(localName) || 0x00`, plus the service UUID (SIG-based 0xFE82 first-pair / 0xFE81 reconnect), setIncludeDeviceName(false) (GAP name intentionally omitted to stay inside the 31-byte budget) and setIncludeTxPowerLevel(true). The pump only connects to advertisers whose name matches Regex(\"Mobile .{0,7}\"); LOCAL_NAME_PREFIX = \"Mobile \". BLE pairing security is Just Works, IO capability NoInputNoOutput (io-cap 3); the pump requests MITM but has no LE Secure Connections, so the stack falls back to Just Works. App-layer auth is SAKE, not BLE pairing.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/protocol/MedtronicProtocol.kt",
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/connection/AndroidMedtronicPeripheral.kt"
+        ],
+        "edge_cases": [
+          "DEFAULT_LOCAL_NAME is a hard-coded \"Mobile 000001\" for every install (TODO: per-install identity).",
+          "advertisingModeFor(paired, forceFirstPair) = RECONNECT only when paired && !forceFirstPair; everything else FIRST_PAIR.",
+          "startAdvertising SecurityException or a null BluetoothLeAdvertiser reports synthetic error code -1 (ADVERTISER_UNAVAILABLE); a failed GATT-server open reports -2 (GATT_SERVER_UNAVAILABLE)."
+        ]
+      },
+      {
+        "name": "UUID base scheme: SIG base vs Medtronic vendor base (issue #844 fix)",
+        "behavior": "Two 128-bit expansions of 16-bit short codes. SIG base: 0000XXXX-0000-1000-8000-00805f9b34fb. Medtronic vendor base: 0000XXXX-0000-1000-0000-009132591325 \u2014 note the variant field is 0000, NOT the SIG 8000. Getting this wrong silently broke pairing and every IDD/HAT/CM read. Split today: SAKE *service* is advertised/registered on the SIG base (0xFE82), but the SAKE *characteristic* the pump subscribes to is the vendor-base 0xFE82. The phone's Device Information container is the vendor 0x0900 service (not SIG 0x180A), even though the characteristics inside it are standard SIG DIS UUIDs; a pump only sees 0x180A and refuses to pair. Pump-side IDD (0x100), HAT (0x300), CM (0x600) are vendor base; CGM (0x181F), Battery (0x180F), RACP (0x2A52), CCCD (0x2902) are SIG.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/protocol/MedtronicProtocol.kt"
+        ],
+        "edge_cases": [
+          "0x0900 is discovered, never advertised.",
+          "The read layer addresses the pump's DIS by characteristic UUID, not service UUID, so it works against the pump's own 0x180A."
+        ]
+      },
+      {
+        "name": "Full GATT UUID inventory",
+        "behavior": "Advertised/SAKE: SAKE_SERVICE_FIRST_PAIR_16 = 0xFE82, SAKE_SERVICE_RECONNECT_16 = 0xFE81 (both SIG-based), SAKE_CHARACTERISTIC = vendor 0xFE82 (NOTIFY + WRITE, PERMISSION_WRITE, with a CCCD). Phone-exposed DIS container = vendor 0x0900 holding SIG 0x2A29 manufacturer, 0x2A24 model, 0x2A25 serial, 0x2A26 firmware, 0x2A27 hardware, 0x2A28 software, 0x2A23 systemId, 0x2A50 PnP ID, 0x2A2A regulatory cert (empty). Pump-side: Battery service 0x180F / level 0x2A19; CGM service 0x181F with measurement 0x2AA7, feature 0x2AA8, SOCP 0x2AAC; IDD vendor 0x100 with status 0x102, features 0x104, SRCP 0x105, history data 0x108; HAT vendor 0x300 (slice 0x350, RTMCP 0x360, RMCPSE 0x370) \u2014 present but deliberately unused; CM vendor 0x600 (0x601/0x602) unused. RACP 0x2A52 is shared by CGM, IDD and HAT. CCCD 0x2902.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/protocol/MedtronicProtocol.kt"
+        ],
+        "edge_cases": [
+          "HAT is explicitly not used: upstream hats.py returns \"Not Supported\"/\"No Records Found\" for every request, so history goes over the IDD RACP instead.",
+          "CM (certificate management) is not needed for read-only."
+        ]
+      },
+      {
+        "name": "Phone-side GATT server registration order and placeholder DIS values",
+        "behavior": "openGattServer() populates a ConcurrentLinkedQueue with [DeviceInfoService, SakeService] and adds them one at a time: addService -> onServiceAdded -> addNextService, because the Android GATT server accepts only one add in flight. Advertising is deferred (pendingAdvertise) until the last service is registered, so a fast pump cannot discover an empty GATT table. A failed onServiceAdded status calls failPendingAdvertise() -> onAdvertiseFailed(-2) \u2014 this is the one BLE step with no timeout, so without it the manager would hang in CONNECTING forever. DIS placeholder values: manufacturer \"GlycemicGPT\", model \"Mobile\", serial = the advertised local name, hardware/firmware/software \"0\", systemId = 8 zero bytes, PnP ID = 7 zero bytes, regulatory cert = empty. The characteristic *set* mirrors JavaPumpConnector so a pump enumerating DIS membership sees the same table.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/connection/AndroidMedtronicPeripheral.kt"
+        ],
+        "edge_cases": [
+          "Open TODO(48.A2): confirm a real pump does not validate any DIS field value (JavaPumpConnector spoofs a realistic app-version string).",
+          "onDescriptorReadRequest is deliberately ungated and answers ANY descriptor read with its stored value (default 0x0000), because Android peripherals get no auto-response and an unanswered read stalls the pump (issue #844).",
+          "onCharacteristic/DescriptorReadRequest honor the ATT offset; offset < 0 or > size responds GATT_INVALID_OFFSET."
+        ]
+      },
+      {
+        "name": "SAKE CCCD subscribe/unsubscribe detection on the phone's GATT server",
+        "behavior": "onDescriptorWriteRequest gates on descriptor.uuid == CCCD && descriptor.characteristic.uuid == SAKE_CHARACTERISTIC && value.size >= 2. If (value[0] & 0x01) != 0 -> onSakeSubscribed() (this is the cue to emit the wake-up frame). If value[0]==0 && value[1]==0 -> onSakeUnsubscribed(). Anything else is logged and ignored. The descriptor's stored value is then updated and, if responseNeeded, GATT_SUCCESS is returned with the written value echoed. onCharacteristicWriteRequest forwards any write on the SAKE characteristic verbatim to onSakeWrite(value) and responds GATT_SUCCESS when responseNeeded. onMtuChanged is observational only \u2014 the driver never requests an MTU and keeps its own PDUs <= 20 bytes regardless of what the central negotiates.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/connection/AndroidMedtronicPeripheral.kt"
+        ],
+        "edge_cases": [
+          "Indication-enable (0x02) also satisfies the `& 0x01`? No \u2014 0x02 & 0x01 == 0 and 0x02/0x00 is not the disable pattern, so it falls to the \"unexpected, ignoring\" branch."
+        ]
+      },
+      {
+        "name": "Connection state machine",
+        "behavior": "States (shared ConnectionState enum): DISCONNECTED, SCANNING, CONNECTING, AUTHENTICATING, AUTH_FAILED, CONNECTED, RECONNECTING. Transitions: startSession() -> CONNECTING (advertise FIRST_PAIR or RECONNECT); reconnectIfPaired() -> CONNECTING (RECONNECT, no-op if unpaired); scan() -> SCANNING (FIRST_PAIR, autoReconnect=false). Pump connects to the GATT server -> cancel pairing-wait timer, clear fault, record address, stopAdvertising() (single-peer), SCANNING|CONNECTING|RECONNECTING -> CONNECTING, emit DiscoveredDevice. Pump subscribes to SAKE -> AUTHENTICATING + arm auth timeout + driver.onSubscribed(). Handshake completes -> cancel timeout, store sakeSession, savePairing(address, localName), CONNECTED. Handshake fails or times out -> AUTH_FAILED (latched), autoReconnect=false, stopAdvertising(). Disconnect while AUTH_FAILED -> stays AUTH_FAILED, stopAdvertising(), no reconnect. Disconnect otherwise: if autoReconnect && isPaired -> RECONNECTING + re-advertise RECONNECT; else teardown -> DISCONNECTED.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/connection/MedtronicBleConnectionManager.kt",
+          "android-unofficial/plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/model/PumpModels.kt"
+        ],
+        "edge_cases": [
+          "Every public entry point and every BLE callback hops onto the SerialWorker before touching lifecycle state; fields stay @Volatile so UI/read layer observe latest values without locking.",
+          "AUTH_FAILED is deliberately sticky so the inevitable pump disconnect does not reset it or start a reconnect loop against a pump that just rejected us.",
+          "close() tears down synchronously on the caller thread (a posted teardown could be dropped as the worker stops), then worker.stop() + scope.cancel(); the manager is unusable afterwards."
+        ]
+      },
+      {
+        "name": "Connection faults and their timers",
+        "behavior": "MedtronicConnectionFault enum, exposed as a StateFlow<MedtronicConnectionFault?> alongside connectionState because several faults produce no state transition: PERIPHERAL_UNSUPPORTED, ADVERTISE_FAILED, HANDSHAKE_TIMEOUT, AUTH_FAILED, BOUND_ELSEWHERE_SUSPECTED. Timers: DEFAULT_HANDSHAKE_TIMEOUT_MS = 30_000 (SAKE is six round trips of 20-byte frames), armed on AUTHENTICATING; on expiry, if still AUTHENTICATING -> HANDSHAKE_TIMEOUT + AUTH_FAILED + autoReconnect=false + stopAdvertising. DEFAULT_PAIRING_WAIT_MS = 60_000, armed only for FIRST_PAIR advertising; on expiry, if state is CONNECTING or SCANNING -> BOUND_ELSEWHERE_SUSPECTED (the pump is probably still bound to another phone). RECONNECT advertising waits indefinitely (the paired pump scans infrequently). Both timers run on the manager's coroutine scope but re-check state on the worker thread so they cannot flip an already-CONNECTED session. Mapped 1:1 to the platform PairingFault enum for the UI.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/connection/MedtronicBleConnectionManager.kt",
+          "android-unofficial/plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/plugin/PairingFault.kt"
+        ],
+        "edge_cases": [
+          "BOUND_ELSEWHERE_SUSPECTED is an explicitly-labelled working assumption from desk research; TODO(48.A2) to tune/confirm the 60s window against a real pump.",
+          "PERIPHERAL_UNSUPPORTED and BOUND_ELSEWHERE produce NO ConnectionState change \u2014 the fault flow is the only signal."
+        ]
+      },
+      {
+        "name": "Pairing persistence, auto-reconnect and unpair",
+        "behavior": "Pairing is persisted via the shared PumpCredentialProvider: on handshake completion, credentialStore.savePairing(connectedAddress, localName). SAKE has no pairing code (authentication is the static-key handshake plus the OS BLE bond), so the credential \"code\" slot records the advertised identity string instead. isPaired() gates reconnectIfPaired() and the auto-reconnect branch. disconnect() sets autoReconnect=false and tears down advertising + session but KEEPS the pairing. unpair() reads getPairedAddress() ?: connectedAddress, tears down, clearPairing(), then removeBond(address) \u2014 implemented by reflection on the hidden BluetoothDevice.removeBond() and returning false if not BOND_BONDED. The plugin wires onActivated() -> reconnectIfPaired(), onDeactivated() -> disconnect(), shutdown() -> close().",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/connection/MedtronicBleConnectionManager.kt",
+          "android-unofficial/plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/pump/PumpCredentialProvider.kt",
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/plugin/MedtronicPumpStatus.kt"
+        ],
+        "edge_cases": [
+          "The JPAKE credential slots on PumpCredentialProvider are Tandem-only and unused here.",
+          "MAC addresses are logged at DEBUG only; WARN+ is Sentry-eligible and must not carry a device identifier."
+        ]
+      },
+      {
+        "name": "Discovery is advertise-and-wait, not a scan",
+        "behavior": "scan() returns a callbackFlow. If !peripheral.isSupported() it logs WARN, posts PERIPHERAL_UNSUPPORTED and closes the flow immediately. Otherwise it installs an onDiscovered trySend hook, sets autoReconnect=false and begins FIRST_PAIR advertising in state SCANNING. When a pump connects to the GATT server it emits DiscoveredDevice(name = localName, address = pump MAC, pluginId = \"com.glycemicgpt.medtronic\") \u2014 note the emitted name is the PHONE's advertised name, not a pump name. awaitClose clears the hook and, only if state is still SCANNING (i.e. no pump connected), tears down; once a pump is connecting/authenticating the session owns the lifecycle. Unlike a central scan, a discovered pump cannot be \"connected to later\" \u2014 the connection it initiated proceeds straight into SAKE.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/connection/MedtronicBleConnectionManager.kt"
+        ],
+        "edge_cases": [
+          "PLUGIN_ID = \"com.glycemicgpt.medtronic\" is the single source of truth, re-exported by MedtronicDevicePlugin.PLUGIN_ID and PluginMetadata.id."
+        ]
+      },
+      {
+        "name": "SAKE handshake wire choreography (SakeHandshakeDriver)",
+        "behavior": "State on the worker thread: session, pumpSubscribed, complete, failed. onSubscribed(): if already pumpSubscribed, no-op; if !complete && session.stage != 0, rebuild the session (\"pump resubscribed mid-handshake; restarting SAKE state\"); set pumpSubscribed, emit the 20-byte all-zero wake-up notification. onUnsubscribed(): clear pumpSubscribed so a later subscribe restarts cleanly. onPumpWrite(value): copies the array, posts to the worker; if complete||failed it is ignored (post-handshake traffic belongs to the read layer); otherwise session.onPumpWrite(copy) -> non-null response is notified back, null means handshake complete -> complete=true, listener.onAuthenticated(session). Any exception latches failed=true and fires listener.onAuthFailed(e) exactly once. reset() re-arms a fresh session and clears all flags. All notifications go through PduFramer.fragment (SAKE frames are exactly 20 bytes so it is a single PDU) and a failed notifySink is logged at WARN.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/connection/SakeHandshakeDriver.kt"
+        ],
+        "edge_cases": [
+          "The wake-up frame is NOT part of the handshake state machine \u2014 feeding it into onPumpWrite would advance the machine with the wrong input.",
+          "The pump's FIRST write is 20 zero bytes and produces msg0.",
+          "Failure is latched so a corrupted session cannot fire onAuthFailed repeatedly."
+        ]
+      },
+      {
+        "name": "MedtronicSakeSession: JavaSake wrapper and session keying model",
+        "behavior": "Wraps org.openminimed.sake.SakeServer(keyDb, DeviceType.MOBILE_APPLICATION, rng) \u2014 the phone is the SAKE *server*, the pump is the SAKE *client* (DeviceType.INSULIN_PUMP). Default keyDb is Constants.KEYDB_PUMP_EXTRACTED (firmware-extracted static key database shipped inside the JavaSake artifact); default RNG is SecureRandomRngSource. Stages advance 0 -> 1 -> 3 -> 5 -> 6; HANDSHAKE_COMPLETE_STAGE = 6, isComplete == (stage == 6). newWakeUpFrame() = ByteArray(Session.MESSAGE_SIZE) (20 zero bytes, fresh allocation each call). onPumpWrite() throws MacFailureException on CMAC/permit verification failure. Post-handshake: encryptForPump() uses server.session().serverCrypt().encrypt (phone -> pump), decryptFromPump() uses clientCrypt().decrypt (pump -> phone) \u2014 mirroring JavaSake's own handshake5C which decrypts the pump's stage-5 permit with clientCrypt; its rx_seq ends at 2, aligned with the pump's clientCrypt tx_seq. Not thread-safe: drive from one worker thread only.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/sake/MedtronicSakeSession.kt"
+        ],
+        "edge_cases": [
+          "encrypt/decrypt throw IllegalStateException if called before stage 6.",
+          "The cipher direction mapping is flagged for live re-confirmation (48.A2) \u2014 there is a CipherDirectionConfirmationTest.",
+          "Decrypting advances the inbound sequence counter, so encrypted static reads must be ordered against the other reads on the same session; a late/duplicate notification after an exchange finishes would consume the next operation's sequence slot and desync the session (guarded by the `finished` flags)."
+        ]
+      },
+      {
+        "name": "JavaSake / OpenMinimed dependency and pinned versions",
+        "behavior": "org.openminimed:javasake:0.2.0 from Maven Central (previously vendored under src/.../org/openminimed/sake/). Its only third-party runtime dep is BouncyCastle for AES-CMAC (the JDK/Android JCE has no CMAC); the driver explicitly pins org.bouncycastle:bcprov-jdk18on:1.84 over JavaSake's transitive 1.79 to clear a HIGH timing-channel advisory affecting >= 1.71, < 1.84. AES-CTR/ECB use the platform JCE. Both versions are locked in plugins/shipped/medtronic/gradle.lockfile and tools/medtronic-ble-spike/gradle.lockfile. Consumer ProGuard rules keep org.bouncycastle.crypto.macs.CMac, engines.AESEngine, params.KeyParameter and -dontwarn org.bouncycastle.**. Licensing: OpenMinimed is GPL-3.0, used with explicit permission of palmarci (P\u00e1l Marci); GlycemicGPT is GPL-3.0, so copyleft propagation is a non-issue. Every ported file cites its upstream source file.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/build.gradle.kts",
+          "android-unofficial/gradle/libs.versions.toml",
+          "android-unofficial/plugins/shipped/medtronic/consumer-proguard-rules.pro",
+          "android-unofficial/docs/THIRD_PARTY_LICENSES.md"
+        ],
+        "edge_cases": [
+          "Four upstream repos feed the driver: PythonSake (SAKE reference), PythonPumpConnector (reader logic, ported line-for-line to Kotlin), JavaSake (runtime dependency), JavaPumpConnector (BLE peripheral scaffolding, informed structure only).",
+          "Renovate tracks javasake as a Tier D (crypto) dependency requiring manual review.",
+          "Module targets: compileSdk 35, minSdk 30, Java 17."
+        ]
+      },
+      {
+        "name": "AesEcb Semgrep exclusion (documented security decision)",
+        "behavior": "The security-scan workflow runs Semgrep 1.169.0 (pip-pinned) with rulesets p/kotlin, p/java, p/secrets over app/, wear-device/, watchface/, plugins/, tools/, and passes `--exclude 'AesEcb.java' --exclude '.gradle'`. Stated reason: AesEcb.java is vendored from OpenMinimed JavaSake and is re-vendored (not patched) on upstream bumps (#695/#696), so its intentional legacy AES/ECB usage must never fail the gate. Because JavaSake is now consumed as the Maven artifact with no vendored source in-tree, the exclusion is documented as INERT today and retained only for the re-vendor case. Gate policy: fail on HIGH/ERROR-severity findings only; WARNING/INFO are printed but do not block; a crashed scanner fails closed. Note the rule packs are fetched from the registry at scan time, so rule content can move between runs even with the CLI pinned.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/.github/workflows/security-scan.yml",
+          "android-unofficial/docs/dev/security-testing.md"
+        ],
+        "edge_cases": [
+          "Documented revisit trigger for the broader SAST posture: add an APK/manifest SAST gate if the app is ever distributed via the Play Store, or if ANY write/therapeutic surface (bolus, basal, pump-setting, device-command) is introduced.",
+          "tools/medtronic-ble-spike is deliberately inside Semgrep scope but outside the plugins/shipped/**/ble/** BLE-review path rules."
+        ]
+      },
+      {
+        "name": "Static SAKE key-database posture",
+        "behavior": "org.openminimed.sake.Constants (inside the JavaSake artifact) and the spike's SakeTestVectors embed firmware-extracted SAKE key databases and a captured 780G pairing trace. Documented posture for security review: these are SHARED SAKE protocol constants \u2014 the same values live inside every 700-series pump and authenticate any phone that pairs with it. They are not session secrets, not unique per device, and not credentials. They already ship publicly in OpenMinimed's GPL-3.0 repository and artifact, so using them introduces no new secret. The CUSTOM_* databases are synthetic generated test keys. Any scanner flag on these values is to be treated as a known, published-upstream artifact, not a leak. The driver selects Constants.KEYDB_PUMP_EXTRACTED as the default KeyDatabase; the manager accepts an injectable keyDatabase parameter for tests.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/tools/medtronic-ble-spike/README.md",
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/connection/MedtronicBleConnectionManager.kt"
+        ],
+        "edge_cases": []
+      },
+      {
+        "name": "SerialWorker: single-thread serialization discipline",
+        "behavior": "Interface SerialWorker { post(task); stop() } guarantees tasks never run concurrently and preserve submission order, so the not-thread-safe MedtronicSakeSession needs no locking. Production impl HandlerThreadSerialWorker wraps an Android HandlerThread (name \"medtronic-sake\"), started eagerly and reused across connect/disconnect cycles; stop() sets a volatile stopped flag, removes all callbacks and quitSafely()s \u2014 post() is a no-op afterwards. The same single worker instance is shared by the connection manager, the handshake driver AND the GATT-client transport (AndroidMedtronicGattLink hops inbound notification PDUs onto it), so every onPdu callback across every subscribed characteristic is delivered serialized on one thread \u2014 the explicit threading contract MedtronicSessionReader relies on to keep its per-exchange state lock-free. Rationale: blocking the binder thread that delivers GATT callbacks stalls the whole Bluetooth stack.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/connection/SerialWorker.kt",
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/di/MedtronicPumpModule.kt"
+        ],
+        "edge_cases": [
+          "A reader calls unsubscribe from inside its onPdu handler (on the worker thread), so the blocking CCCD round trip is deliberately deferred off that thread onto the watchdog executor \u2014 otherwise it would stall connection-lifecycle events."
+        ]
+      },
+      {
+        "name": "MTU policy and PDU framing",
+        "behavior": "PduFramer: DEFAULT_MTU = 23, ATT_HEADER_SIZE = 3, MAX_PDU_SIZE = 20. The driver NEVER calls requestMtu() in either direction (peripheral or client). fragment(payload, maxPduSize = 20) requires maxPduSize in 1..20; a payload that already fits returns one chunk (a copy); an empty payload yields a single empty chunk so the boundary is still transmitted. reassemble(list) is the exact inverse. Inbound is looser: the ATT MTU is per-bearer and the pump raises it from its own side (it advertises MTU 184), so pump-to-phone notifications can exceed 20 bytes \u2014 live multi-PDU history reads (PR #852) arrive as per-PDU SAKE ciphertext whose 20-byte plaintext fragments imply 23-byte on-wire notifications. Inbound reassembly lives above the transport seam in NotificationReassembler.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/protocol/PduFramer.kt"
+        ],
+        "edge_cases": [
+          "SAKE handshake messages are already exactly 20 bytes and pass through unfragmented; the framer is the single MTU choke point."
+        ]
+      },
+      {
+        "name": "AndroidMedtronicGattLink: GATT-client transport, serialization and timeouts",
+        "behavior": "Implements MedtronicGattLink over a BluetoothGatt client to the pump's own GATT server, using the BluetoothDevice captured by the peripheral. Every read/write/subscribe/unsubscribe and the watchdog cleanup runs under a single ReentrantLock (opLock) and BLOCKS the calling thread until the matching GATT callback fires, bounded by operationTimeoutMs. DEFAULT_OPERATION_TIMEOUT_MS = 10_000; DEFAULT_CONNECT_TIMEOUT_MS = 10_000; subscriptionTimeoutMs defaults to MedtronicReadGateway.DEFAULT_OPERATION_TIMEOUT_MS = 30_000. Connect is lazy on first use: device.connectGatt(ctx, autoConnect=false, cb, TRANSPORT_LE) -> on STATE_CONNECTED go straight to discoverServices() (never requestMtu) -> onServicesDiscovered completes the connect slot. Only after success are `gatt`, connectedAddress and the service index published. Reused until disconnect. CCCD payloads are literal byte arrays: enable-notification 0x01 0x00, enable-indication 0x02 0x00, disable 0x00 0x00.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/connection/AndroidMedtronicGattLink.kt"
+        ],
+        "edge_cases": [
+          "Stale-completion safety: an operation timeout tears the client GATT down (closeGatt); every operational callback rejects any BluetoothGatt that is not the current `gatt`, so a late completion lands on a discarded handle and can never satisfy a later op's slot. Connect-phase callbacks are additionally identity-checked against `connectingGatt`.",
+          "Synthetic statuses: -1 LOCAL_TIMEOUT, -2 LOCAL_REJECTED. gattStatusName maps 0x02/0x03/0x05/0x06/0x07/0x08/0x0D/0x13/0x16/0x22/0x3E/0x85 to names for WARN logs.",
+          "API 33+ uses the new writeCharacteristic/writeDescriptor returning BluetoothStatusCodes.SUCCESS; below that the deprecated setValue+write path.",
+          "Subscribe chooses indication vs notification from PROPERTY_INDICATE on the characteristic."
+        ]
+      },
+      {
+        "name": "Read-only enforcement in the transport (defense in depth)",
+        "behavior": "MedtronicGattLink.write() checks the characteristic against a hard allow-list WRITABLE_CONTROL_POINTS = { RACP 0x2A52, CGM SOCP 0x2AAC, IDD SRCP vendor 0x105 }. Anything else is refused with a WARN (\"characteristic is not a permitted control point\") and the write silently returns \u2014 so a buggy caller can never issue a therapeutic write opcode. Beyond that, only static reads and CCCD descriptor writes are ever issued. A failed control-point write is best-effort: it removes the handler and degrades to the gateway's operation timeout (the pump simply never responds) rather than escaping the readers' Result<T> contract. At the plugin layer the driver declares only GLUCOSE_SOURCE, INSULIN_SOURCE, PUMP_STATUS \u2014 there is no PUMP_CONTROL capability in the platform and no method writes to the pump. HistoryReader issues only RACP report/count opcodes, never delete/abort.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/connection/AndroidMedtronicGattLink.kt",
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/plugin/MedtronicDevicePlugin.kt",
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/read/HistoryReader.kt"
+        ],
+        "edge_cases": [
+          "Only GET-class SOCP/SRCP opcodes are allowed by convention in MedtronicSessionReader \u2014 no calibration or control opcode is constructed anywhere.",
+          "MedtronicHistoryParser parses records only; it never constructs a write/control message."
+        ]
+      },
+      {
+        "name": "Shared RACP characteristic service-scoping",
+        "behavior": "The SIG 0x2A52 RACP characteristic exists under BOTH the CGM and IDD services on the pump, so a bare-UUID lookup is ambiguous and picking wrong silently reads the wrong log. buildServiceIndex maps bare characteristic UUID -> list of (serviceUuid, characteristic) and computes racpServiceUuids = the set of services exposing RACP. resolve(): 0 candidates -> throw; 1 candidate -> use it and, only if its service is in racpServiceUuids, record lastResolvedServiceUuid (so a Battery/Device-Info read can never poison scoping); >1 candidates -> resolveAmbiguous, which prefers the candidate whose service == lastResolvedServiceUuid, then falls back to a service with a live subscription, and otherwise THROWS rather than guessing. This works because each reader resolves that exchange's data characteristic (CGM Measurement 0x2AA7 or IDD History Data 0x108) immediately before touching the control point. Preferring the resolved context over live subscriptions stops a dangling handler from a failed prior exchange hijacking the scope.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/connection/AndroidMedtronicGattLink.kt"
+        ],
+        "edge_cases": [
+          "The deferred CCCD-disable path compares the *resolved characteristic identity*, not the bare UUID, so a new subscription on the other service's RACP does not shield this one's CCCD from being disabled."
+        ]
+      },
+      {
+        "name": "Dangling-subscription watchdog and cancellation cleanup",
+        "behavior": "A reader only unsubscribes when the pump responds, so a gateway timeout that cancels the driving coroutine would leave dangling subscriptions that desync the next exchange. Two mechanisms: (1) SubscriptionWatchdog (production: a single daemon ScheduledExecutorService thread \"medtronic-gatt-watchdog\") is armed for subscriptionTimeoutMs (30_000) whenever a subscription registration is still current after its CCCD ack; on fire it drops all handlers lock-free, then disables each CCCD under opLock. (2) MedtronicGattLink.cancelAllSubscriptions() is invoked from the gateway's cont.invokeOnCancellation: it clears handlers immediately (the no-dangling-notification guarantee) and DEFERS the blocking CCCD disables onto the watchdog executor, because the cancellation handler may run on kotlinx's process-global timeout thread where blocking would stall every delay/withTimeout in the app. unsubscribe() follows the same discipline (drop handler first, defer the disable).",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/connection/AndroidMedtronicGattLink.kt",
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/read/MedtronicGattLink.kt"
+        ],
+        "edge_cases": [
+          "disableNotifications skips if the owning BluetoothGatt was replaced by a reconnect, and skips if the same resolved characteristic has been re-subscribed by a newer exchange (which would otherwise silently starve that read).",
+          "Arming the watchdog is guarded by an identity check (handlers[uuid] === sub) because cancelAllSubscriptions runs lock-free and could clear the registration while the CCCD ack is in flight."
+        ]
+      },
+      {
+        "name": "NotificationReassembler and the exact-multiple ambiguity",
+        "behavior": "Each inbound notification PDU is individually SAKE-encrypted, so the reassembler is fed decrypted PLAINTEXT fragments. Rule: full fragments until a short one ends the frame \u2014 a fragment smaller than maxPduSize (20) completes the frame; an empty PDU is ignored (a real encrypted frame is never empty and must not falsely terminate). MAX_FRAME_SIZE = 512; exceeding it resets and throws MedtronicReadException, capping the memory a malfunctioning or hostile peer can force. hasPartialFrame() / fragmentCount() / flush() / reset() expose the pending state. The documented ambiguity: a frame whose plaintext length is an exact multiple of 20 never gets a short terminator. For the FINAL record of an exchange the pending fragments can be flushed as one last frame \u2014 live 780G reads hit this on real records. An INTERMEDIATE exact-multiple record still merges silently with its successor; pinning exact on-wire fragment sizes is TODO(48.A2).",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/read/MedtronicSessionReader.kt"
+        ],
+        "edge_cases": [
+          "Flushed bytes are transport-indistinguishable from a record truncated mid-stream, so callers MUST validate before accepting (HistoryReader does; the CGM path relies on its own parse + the fact that no cursor advances)."
+        ]
+      },
+      {
+        "name": "MedtronicSessionReader: the six control-point exchange patterns",
+        "behavior": "(1) reportLastRecord(dataChar, controlPoint): subscribe both, write plaintext RACP_REPORT_LAST_RECORD = [0x01,0x06] (Report Stored Records / Last Record), decrypt each measurement PDU, reassemble; terminate when the plaintext indication equals RACP_REPORT_SUCCESS = [0x06,0x00,0x01,0x01]; anything else fails. (2) socpGet: appends a little-endian E2E-CRC to the request, SAKE-encrypts it, writes it, and returns the first reassembled decrypted response. (3) srcpGet: same but with NO E2E-CRC wrapper (the 780G does not enable E2E in the IDD service; TODO(48.A2) to honor the features flag per model). (4) decryptedRead(uuid): synchronous plain GATT read then clientCrypt decrypt, for the encrypted static IDD Status/Features characteristics. (5) reportRecords: multi-record streaming with caller-supplied isSuccess and validateRecoveredFrame predicates; MAX_RECORDS_PER_REPORT = 50_000. (6) controlPointQuery: write, deliver the first indication verbatim (used for record-count). All exchanges unsubscribe both characteristics on finish and are idempotent via a `finished` flag. The framework carries NO timers by design \u2014 the caller must bound every exchange.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/read/MedtronicSessionReader.kt"
+        ],
+        "edge_cases": [
+          "CGM report-last recovery: RACP success + pending fragments + no record -> flush and deliver (safe, no cursor advances, a bad parse just retries next poll). RACP success + a complete record AND pending fragments -> FAIL (report-last returns exactly one record). RACP success + no record at all -> FAIL.",
+          "IDD reportRecords: success + pending fragments -> flush, then validateRecoveredFrame decides; rejection FAILS the exchange loudly so cursors stay put (accepting a truncated record would let history cursors advance past a record the pump sent = permanent skip). The default validator rejects.",
+          "Any decrypt/MAC/length exception inside a notification handler is converted to Result.failure rather than escaping the delivery thread and hanging the exchange."
+        ]
+      },
+      {
+        "name": "MedtronicReadGateway: single-flight, timeouts and history paging",
+        "behavior": "Bundles all reads behind suspend Result<T>. Two mutexes: readMutex (fair/FIFO) serializes EVERY exchange into single-flight because the link is strictly one-exchange-at-a-time with no transaction id, and the polling orchestrator drives tiers as independent coroutines; historyMutex additionally serializes whole getHistoryLogs walks so two callers cannot interleave paging loops. DEFAULT_OPERATION_TIMEOUT_MS = 30_000 wraps every read via withTimeout; expiry becomes Result.failure(MedtronicReadException). sessionRead resolves link + session BEFORE queueing (so \"not connected\" fails fast instead of blocking), registers cont.invokeOnCancellation { link.cancelAllSubscriptions() }, and runs on ioDispatcher. blockingRead uses runInterruptible so a timeout becomes a thread interrupt (a blocking GATT read is not a suspension point). History paging: read last record; if null or lastSeq <= sinceSequence return empty; then walk newest-first in HISTORY_BATCH_SIZE = 200 sequence windows, lowSeq = max(sinceSequence+1, highSeq-199), each page its own sessionRead/timeout, highSeq = lowSeq-1 after each page.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/read/MedtronicReadGateway.kt"
+        ],
+        "edge_cases": [
+          "The walk is driven by the REQUESTED window, never by page content: a page routinely parses smaller than its window, and ending on content would let cursor-advancing callers skip older records permanently.",
+          "An EMPTY page ends the walk (the pump purges oldest-first, so retained sequences are contiguous).",
+          "A failed page fails the WHOLE call \u2014 returning partial newer pages would advance callers' cursors past the un-fetched older window.",
+          "maxTotalHistoryRecords defaults to 50_000 across all pages; exceeding it fails loudly with cursors unchanged.",
+          "readMutex is released between pages so a CGM/keep-alive read can interleave with a long backfill.",
+          "WARN logs deliberately carry only op + exception class name \u2014 reader failure messages embed health values (SG, IOB, basal, reservoir) and raw pump bytes, and WARN is forwarded to Sentry."
+        ]
+      },
+      {
+        "name": "CgmReader: sensor glucose read path and safety gating",
+        "behavior": "readLatest(): plain-read CGM Feature 0x2AA8, parse it for the E2E-CRC bit (per pump, never hard-coded for 780G as upstream does), then reportLastRecord over CGM Measurement 0x2AA7 + RACP under the CGM service. toReading(): parse the record; if glucoseMgDl is non-finite (an SFLOAT sentinel) throw \"SG is a non-finite SFLOAT sentinel (no value)\"; round to Int; if mgDl < safetyLimits.minGlucoseMgDl (20) or > maxGlucoseMgDl (500) throw a MedtronicReadException \u2014 REJECT, never clamp, because a wrong SG is more dangerous than a missing one. This explicit check exists so CgmReading's own init (which re-asserts 20..500) never leaks an IllegalArgumentException to callers. Timestamp is now() (report-last returns the most recent measurement, so read time approximates capture time; per-record absolute time via CGM Session Start Time is a later refinement).",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/read/CgmReader.kt",
+          "android-unofficial/plugins/pump-driver-api/src/main/java/com/glycemicgpt/mobile/domain/pump/SafetyLimits.kt"
+        ],
+        "edge_cases": [
+          "Open TODO(48.C2/F): the sensor-status annunciation (CgmMeasurement.status) is NOT yet gated, so a sensor in warm-up or error can still surface an SG.",
+          "The CGM Feature flag is re-read on every call (acceptable for a single-shot read; caching belongs with polling)."
+        ]
+      },
+      {
+        "name": "CGM trend-arrow mapping",
+        "behavior": "trendArrowFor(ratePerMin: Double?) maps the CGM rate of change (mg/dL/min) onto the app-wide 7-state CgmTrend. null or non-finite -> UNKNOWN. |rate| < 1.0 -> FLAT. Rising: |rate| >= 3.0 -> DOUBLE_UP, >= 2.0 -> SINGLE_UP, else FORTY_FIVE_UP. Falling: >= 3.0 -> DOUBLE_DOWN, >= 2.0 -> SINGLE_DOWN, else FORTY_FIVE_DOWN. Thresholds follow the 780G manual (1-2 / 2-3 / >3 mg/dL/min = 1/2/3 arrows), folding Medtronic's three-arrow scale onto the Dexcom-style enum. A measurement whose trend-present flag is clear yields null -> UNKNOWN. Trend is only magnitude-bucketed, which is exactly why MedtronicCodec special-cases the reserved SFLOAT codes as non-finite \u2014 otherwise a \"no value\" sentinel would decode into a bogus arrow.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/read/CgmReader.kt"
+        ],
+        "edge_cases": [
+          "CGM readings extracted from HISTORY records always carry CgmTrend.UNKNOWN \u2014 the SG history record has no rate-of-change field."
+        ]
+      },
+      {
+        "name": "CGM Measurement record parser (SIG GSS 3.43)",
+        "behavior": "parse(record, useCrc). Mandatory prefix 6 bytes: size(1) + flags(1) + glucose SFLOAT(2) + timeOffset(2). Minimum length is 6, or 8 with CRC. The size field counts the WHOLE record including the CRC and is validated against record.size before the CRC is stripped. With useCrc, checkE2eCrc must pass and 2 bytes are stripped from the end. Flag bits: 0x01 trend present, 0x02 quality present, 0x20 warning present, 0x40 cal/temp present, 0x80 status present. Optional octets are consumed in wire order status(1), cal/temp(1), warning(1), trend(SFLOAT 2), quality(SFLOAT 2), each bounds-checked so a flag promising an absent field is rejected rather than read out of bounds. Trailing bytes after the declared fields are an error. Glucose and trend are mg/dL.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/read/CgmMeasurement.kt"
+        ],
+        "edge_cases": [
+          "mmol/L decision (load-bearing): per the SIG CGM Service spec the Measurement glucose is mandated mg/dL with no per-record unit flag, and the CGM Feature characteristic carries no measurement-unit field, so a spec-compliant 700-series cannot emit mmol/L and the canonical-mg/dL invariant holds. The only residual is a proprietary Medtronic deviation. NO conversion is added until a real European mmol/L-display sample exists (hardware-blocked; tracked in #809 and #708). Revisit instruction: if such a sample appears, convert via the shared 18.0156 factor and PRESERVE the existing reject-outside-20..500 ordering."
+        ]
+      },
+      {
+        "name": "CGM Feature characteristic parser",
+        "behavior": "Expected length exactly 6: feature field (3 bytes LE) + type/sample-location (1) + E2E-CRC (2). The spec's chicken-and-egg workaround: the flag saying whether E2E-safety is supported lives inside the otherwise CRC-protected packet, so the CRC field is ALWAYS present and set to 0xFFFF when unsupported. This implementation reads the trailing 2-byte field first and validates the CRC only when it is not the 0xFFFF sentinel, then takes e2eCrcEnabled from the feature bit (1 << 12) in the 24-bit feature word. Explicit divergence from upstream: OpenMinimed's cgm_features.py compares data[:-2] instead of the trailing two bytes against 0xFFFF, which never matches and so always validates the CRC; this port compares the actual CRC field per the documented intent. Reading this flag per pump is the fix for upstream's 780G hard-code \u2014 680G/770G must not be assumed to use the CRC.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/read/CgmFeature.kt"
+        ],
+        "edge_cases": [
+          "Any length != 6 or a CRC mismatch throws MedtronicReadException and fails the CGM read."
+        ]
+      },
+      {
+        "name": "MedtronicCodec: numeric decoding primitives",
+        "behavior": "readUIntLe(data, offset, n) \u2014 LE unsigned int, n bounded to 1..3 because a signed Int cannot hold a full uint32. readULongLe(data, offset, n) \u2014 n in 1..4, for the uint32 fields (record sequence, bolus start-time offset, annunciation timestamp). u32Le(value) encodes RACP sequence operands. signExtend(value, bits) with an explicit bits==32 short-circuit (Kotlin masks shift counts to 5 bits so `1 shl 32 == 1` would corrupt the result). decodeMedFloat16 (IEEE-11073 SFLOAT): 4-bit signed exponent high nibble, 12-bit signed mantissa, value = mantissa * 10^exponent via a precomputed POW10 table (exponent bias 8). decodeMedFloat32: 8-bit signed exponent in the high byte, 24-bit signed mantissa, via Math.pow. e2eCrc = CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF, no reflection, zero final XOR); checkE2eCrc compares the trailing 2 LE bytes. CRC_SIZE = 2.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/read/MedtronicCodec.kt"
+        ],
+        "edge_cases": [
+          "SAFETY: decodeMedFloat16 returns NON-FINITE Doubles for the reserved IEEE-11073 mantissa codes \u2014 0x07FE -> +Infinity, 0x07FF -> NaN, 0x0800 (NRes) -> NaN, 0x0801 (reserved) -> NaN, 0x0802 -> -Infinity. Upstream does NOT special-case these; this port does, so callers reject them instead of surfacing a sentinel as a real glucose or trend.",
+          "decodeMedFloat32 deliberately does NOT special-case reserved codes (upstream doesn't either, and 32-bit reserved codes differ), so a garbled insulin field decodes to a bogus finite or non-finite number \u2014 every caller MUST gate it with isFinite() plus a physiological range check.",
+          "Upstream uses float(f\"{m}e{e}\") to minimize FP drift; the table approach is deemed immaterial because glucose rounds to Int and trend is only magnitude-bucketed."
+        ]
+      },
+      {
+        "name": "IDD Features parsing and per-model capability tiering",
+        "behavior": "IddFeatures.parse: mandatory 8-byte prefix = e2e-crc(2) + e2e-counter(1) + insulin concentration SFLOAT(2) + flags(3 LE). Bit 0 = E2E Protection Supported -> e2eProtectionEnabled. Bit 23 = Feature Extension -> another flags byte follows, folded in at shift 24, continuing while the extension byte's 0x80 continue-bit is set (a promised-but-missing byte throws). Unlike upstream, this does NOT hard-assert that the CRC/counter bytes are 0xFFFF/0 (upstream can, because the 780G leaves E2E off). MedtronicPumpModel.fromFeatureFlags: flags == 0 -> UNKNOWN; HCL bit (1<<28) clear -> MINIMED_680G; HCL set + Smart Settings bit (1<<29) set -> MINIMED_780G; HCL set without smart settings -> MINIMED_770G. supportsSmartGuard = 770G || 780G; supportsAutoCorrectionBolus = 780G only. Rationale for capability bits over the model string: the marketing name is not on the wire \u2014 DIS model is an MMT part number (e.g. \"MMT-1885\") never mapped upstream, so substring-matching is unreliable.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/read/IddFeatures.kt",
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/read/MedtronicPumpModel.kt"
+        ],
+        "edge_cases": [
+          "TODO(48.A2): confirm the exact feature-bit-to-model boundary against a real 680G/770G/780G; the inference is explicitly \"the best that can be done offline\".",
+          "The tier only governs interpretation/labeling and sanity logging \u2014 individual records stay flag-driven and parse safely regardless."
+        ]
+      },
+      {
+        "name": "IDD Status / IOB / active-basal parsing and validation bounds",
+        "behavior": "All three are SAKE-encrypted; the caller decrypts first, then stripIddE2e(value, useE2e) validates and strips a trailer of counter(1)+CRC(2) when E2E is on. IddStatusRecord: body must be exactly 9 bytes \u2014 therapy state(1), operational state(1), reservoir medfloat32(4), flags(1, bit0 = reservoir attached), sensor connectivity(1), sensor message state(1). IddInsulinOnBoard: SRCP request 0x03F3 -> response opcode 0x03FC; min body 7 = opcode(2)+flags(1)+IOB f32(4); flag bit0 = remaining duration(2), bit1 = IOB partial status (2+2); trailing bytes are an error. IddActiveBasalRate: request 0x0365 -> response 0x036A; min body 8 = opcode(2)+flags(1)+template(1)+rate f32(4); flag bit0 = TBR block (type 1 + adjustment f32 4 + programmed dur 2 + remaining dur 2, read past \u2014 the mandatory rate already reflects any TBR adjustment), bit1 = TBR template number(1), bit2 = basal delivery context(1).",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/read/IddStatus.kt",
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/read/IddStatusReader.kt"
+        ],
+        "edge_cases": [
+          "SAFETY bounds, all REJECT not clamp: reservoir must be finite and 0..MAX_RESERVOIR_UNITS = 300.0 IU; IOB must be finite and 0..MAX_IOB_UNITS = 100.0 IU; basal must be finite and >= 0 and (rate*1000).roundToInt() <= safetyLimits.maxBasalRateMilliunits (default 15_000 mU/h = 15 U/h).",
+          "Enum raw codes: TherapyControlState UNDETERMINED 0x0F / STOP 0x33 / PAUSE 0x3C / RUN 0x55. OperationalState UNDETERMINED 0x0F / OFF 0x33 / STANDBY 0x3C / PREPARING 0x55 / PRIMING 0x5A / WAITING 0x66 / READY 0x96. SensorMessageState 0x00..0x0E (NO_MESSAGE, WAIT_TO_CALIBRATE, DO_NOT_CALIBRATE, CALIBRATION_REQUIRED, CALIBRATING, SEARCHING_FOR_SENSOR_SIGNAL, NO_SENSOR_SIGNAL, CHANGE_SENSOR, WARM_UP, SG_BELOW_LOWER_LIMIT, SG_ABOVE_UPPER_LIMIT, GST_BATTERY_DEPLETED, SENSOR_CONNECTED, WAITING_WARM_UP, NO_PAIRED_SENSOR). BasalDeliveryContext UNDETERMINED 0x0F / DEVICE_BASED 0x33 / REMOTE_CONTROL 0x3C / AP_CONTROLLER 0x55. Unrecognized raw values map to UNKNOWN(-1), never throw.",
+          "BasalReading.isAutomated = (context == AP_CONTROLLER); if that appears on a non-SmartGuard tier it is logged WARN but still treated as automated (data-shape sanity, not a hard failure). activityMode is always PumpActivityMode.NONE \u2014 pump activity mode is not in the IDD basal payload.",
+          "The IDD Features read is re-issued on every IOB/basal/reservoir/status call."
+        ]
+      },
+      {
+        "name": "Battery and Device Information readers (unencrypted SIG reads)",
+        "behavior": "BatteryReader reads Battery Level 0x2A19 \u2014 a plain, NOT SAKE-encrypted, single percentage byte. An empty value throws. A percentage outside 1..100 is REJECTED, not clamped; 0 is explicitly rejected as a no/empty reading (matching upstream's `0 < batt < 101`) because a pump reporting a true 0% over an active link would already be powered off, so 0x00 is spurious. BatteryStatus.isCharging is always false: the 700-series runs on a replaceable battery and exposes no charging state. DeviceInfoReader reads the pump's own DIS characteristics by UUID (model 0x2A24, serial 0x2A25, hardware 0x2A27, firmware 0x2A26, software 0x2A28, system ID 0x2A23) as plain GATT reads; strings are UTF-8 with only trailing NULs trimmed (upstream strips a fixed terminator byte; trimming only NULs avoids truncating a value that isn't null-terminated); the 8-byte System ID is rendered as lower-case hex.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/read/BatteryReader.kt",
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/read/DeviceInfoReader.kt"
+        ],
+        "edge_cases": [
+          "These two are the only reads that need no live SAKE session (gateway.blockingRead), though the transport must still be connected."
+        ]
+      },
+      {
+        "name": "HistoryReader: IDD RACP record fetch",
+        "behavior": "History deliberately uses the IDD service's RACP + IDD History Data 0x108, NOT the CGM RACP and NOT the HAT service (upstream's hats.py returns Not Supported / No Records Found for every request). Opcodes/operators (decimal shown as in code): OP_REPORT_RECORDS 51 (0x33), OP_REPORT_NUMBER_OF_RECORDS 90 (0x5A), NUMBER_OF_RECORDS_RESPONSE 102 (0x66), RESPONSE_CODE 15 (0x0F), OPERATOR_NULL 15, OPERATOR_ALL_RECORDS 51, OPERATOR_WITHIN_RANGE 90, OPERATOR_LAST_RECORD 105 (0x69), FILTER_SEQUENCE_NUMBER 15, RESPONSE_SUCCESS 240 (0xF0), RESPONSE_NO_RECORDS_FOUND 6. Requests: last record = [0x33,0x69,0x0F]; count = [0x5A,0x33,0x0F]; range = [0x33,0x5A,0x0F] + u32LE(firstSeq) + u32LE(lastSeq). Terminators: success = [0x0F,0x0F,0x33,0xF0]; no-records = [0x0F,0x0F,0x33,0x06] (treated as a SUCCESSFUL empty list \u2014 the gateway's paging walk relies on it to find the oldest retained record). readRecordCount parses response[0]==0x66 && response[1]==0x0F then a 2-byte LE count.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/read/HistoryReader.kt"
+        ],
+        "edge_cases": [
+          "A \"no records found\" terminator that arrives AFTER frames were streamed is a self-contradiction and FAILS the read (trusting either side risks stale/misordered data or silently dropped records).",
+          "ANY undecodable frame in a page fails the whole page rather than silently shrinking it \u2014 the walk advances past this window and callers advance their cursor to the max sequence seen, so a dropped record would be skipped for good (this is bolus history feeding IOB). Checked BEFORE dedup, since duplicate frames legitimately shrink the list.",
+          "A flush-recovered final record is validated by MedtronicHistoryParser.isStructurallyCompleteRecordFrame before acceptance."
+        ]
+      },
+      {
+        "name": "History record framing, event types and per-event parsing",
+        "behavior": "Record header is 8 bytes: event_type u16 + sequence u32 + relative_offset u16, then the event body, optionally wrapped in the Medtronic E2E trailer. toHistoryLogRecord() preserves the E2E-STRIPPED body base64'd in HistoryLogRecord(sequenceNumber = seq.toInt(), rawBytesB64, eventTypeId, pumpTimeSeconds = relativeOffset). Event type IDs: REFERENCE_TIME 0x000F, BOLUS_PROGRAMMED_P1 0x005A, BOLUS_PROGRAMMED_P2 0x0066, BOLUS_DELIVERED_P1 0x0069, BOLUS_DELIVERED_P2 0x0096, DELIVERED_BASAL_RATE_CHANGED 0x0099, MAX_BOLUS_AMOUNT_CHANGED 0x03FC, AUTO_BASAL_DELIVERY 0xF001, CL1_TRANSITION 0xF002, THERAPY_CONTEXT 0xF004, MEAL 0xF005, BG_READING 0xF007, CALIBRATION_COMPLETE 0xF008, CALIBRATION_REJECTED 0xF009, INSULIN_DELIVERY_STOPPED 0xF00A, INSULIN_DELIVERY_RESTARTED 0xF00B, SG_MEASUREMENT 0xF00C, CGM_ANALYTICS_DATA_BACKFILL 0xF00D, NGP_REFERENCE_TIME 0xF00E, ANNUNCIATION_CLEARED 0xF00F, ANNUNCIATION_CONSOLIDATED 0xF010, MAX_AUTO_BASAL_RATE_CHANGED 0xF01A, UNDEFINED 0xFFFF.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/messages/MedtronicHistoryParser.kt"
+        ],
+        "edge_cases": [
+          "Body layouts: bolus amounts (>=13B) bolus_id u16 @0, type @2, fast f32 @3, extended f32 @7, duration u16 @11. Bolus programmed P2 flags bit0 delay-time(2), bit1 template(1), bit2 activation(1), bit3 = correction reason, bit4 = meal reason. Bolus delivered P2 (>=5B) flags @0, start_time_offset u32 @1, then bit0 = activation type(1) \u2014 a DIFFERENT flag layout from programmed. Basal-rate-changed (>=9B) flags @0, old f32 @1, new f32 @5, optional context @9 when bit0 set and size>=10. Auto-basal micro-bolus (>=5B) bolusNumber u8 @0, amount f32 @1. SG measurement (>=8B) time_offset i16 @0 (sign-extended), sg u16 @2, isig u16, v_counter i16. BG reading (>=4B) time_offset i16 @0, bg SFLOAT @2 in kg/L converted to mg/dL by * 1e5. Annunciation consolidated (>=10B) event_flags @0, annunciation_id u16 @1, type u16 @3 (must have high nibble 0xF000 else throw; stored masked & 0x0FFF), status @5, timestamp u32 @6 = seconds since 2000-01-01T00:00:00Z. Annunciation cleared (>=4B) raw type u16 @0, statusRaw = CLEARED_NO_STATUS (-1), timestamp null.",
+          "BolusActivationType raw: UNDETERMINED 0x0F, MANUAL 0x33, RECOMMENDED 0x3C, MANUALLY_CHANGED_RECOMMENDED 0x55, COMMANDED 0x5A (= closed-loop/SmartGuard). HistoryBasalDeliveryContext raw: 0x0F/0x33/0x3C/ARTIFICIAL_PANCREAS_CONTROLLER 0x55.",
+          "parseRecordBody catches only MedtronicReadException and IllegalArgumentException and degrades the event to Unparsed (preserving the record); a broader catch would mask programming errors as bad data. isStructurallyCompleteRecordFrame re-runs the typed parse WITHOUT that fallback, and accepts unhandled types (they extract as Unparsed either way and feed no dosing math)."
+        ]
+      },
+      {
+        "name": "History timestamp resolution (relative offsets + NGP reference time)",
+        "behavior": "Records carry only a relative offset; absolute time is resolved by walking records in sequence order and carrying the most recent NGP_REFERENCE_TIME forward. Reference-time body (>=8B): recording_reason(1) then year u16 @1, month @3, day @4, hour @5, minute @6, second @7. The pump stores this as NAIVE LOCAL wall-clock with no TZ/DST field (it is set to the user's local time), so it is anchored via LocalDateTime.atZone(ZoneId.systemDefault()).toInstant(). Documented reason: interpreting it as UTC shifts every history timestamp by the local offset (into the future east of UTC, e.g. +2h in CEST). A java.time.DateTimeException yields a null reference (logged) and offsets after it cannot be anchored. Each event's absolute time = reference.plusSeconds(relativeOffsetSeconds). Records seen BEFORE any reference time, or whose body fails to parse, are DROPPED (counted, logged at VERBOSE because all three extractors call timedRecords on the same batch) rather than mis-timestamped.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/messages/MedtronicHistoryParser.kt"
+        ],
+        "edge_cases": [
+          "Explicitly UNRESOLVED: DST gap/overlap hours, and a phone timezone that differs from the pump's, are inherently ambiguous.",
+          "Annunciation timestamps use a different, absolute epoch (2000-01-01T00:00:00Z + seconds), not the reference-time mechanism."
+        ]
+      },
+      {
+        "name": "Domain extraction from history (CGM / bolus / basal) and the SmartGuard exclusion",
+        "behavior": "extractCgmFromHistoryLogs: SG_MEASUREMENT events only; SG_SENTINELS = {0x0301, 0x0303, 0x030D} are dropped; readings outside limits.minGlucoseMgDl..maxGlucoseMgDl are DROPPED, never clamped; trend is always UNKNOWN; sorted by timestamp. extractBolusesFromHistoryLogs: BOLUS_DELIVERED_P1 only (programmed is skipped); total = fastIu + extendedIu, dropped if non-finite or < 0, dropped if (total*1000).roundToInt() > limits.maxBolusDoseMilliunits (default 25_000 mU), and dropped if total > BolusEvent.MAX_BOLUS_UNITS (25f) so the domain init's require never throws. isAutomated comes from the immediately-following BOLUS_DELIVERED_P2 activation == COMMANDED (a positional heuristic; a dropped/interleaved record degrades to manual). correction/meal reason is joined by bolus id from the programmed-P1 -> programmed-P2 pair. extractBasalFromHistoryLogs: DELIVERED_BASAL_RATE_CHANGED newRate; non-finite/<0 dropped; > limits.maxBasalRateMilliunits dropped; isAutomated = context == ARTIFICIAL_PANCREAS_CONTROLLER.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/ble/messages/MedtronicHistoryParser.kt"
+        ],
+        "edge_cases": [
+          "DELIBERATE OMISSION (load-bearing): AUTO_BASAL_DELIVERY (0xF001) SmartGuard auto-correction micro-boluses on 770G/780G are NOT mapped to bolus events. Stated reason: how they should be attributed (bolus vs basal, double-count risk) is unresolved without live validation, so they are counted and logged at DEBUG rather than guessed. Revisit trigger: TODO(48.A2) live validation. The user doc mirrors this: \"SmartGuard auto-basal micro-boluses are not yet fully attributed\".",
+          "Medtronic reports only the delivered TOTAL with no numeric correction/meal split, so correctionUnits = total only when correction && !meal, mealUnits = total only when meal && !correction, and BOTH are 0 when neither or both reasons are set."
+        ]
+      },
+      {
+        "name": "MedtronicDevicePlugin: capability surface and pairing UX contract",
+        "behavior": "Metadata: id \"com.glycemicgpt.medtronic\", name \"Medtronic MiniMed Pump\", version \"1.0.0\", apiVersion PLUGIN_API_VERSION, protocolName \"Medtronic\", description \"Medtronic MiniMed 700-series pumps (680G / 770G / 780G) over Bluetooth (read-only, BETA)\". Capabilities: GLUCOSE_SOURCE, INSULIN_SOURCE, PUMP_STATUS only. pairingProfile = PairingProfile(ADVERTISE_AND_WAIT, advertisedName = \"Mobile 000001\"). observeConnectionState() proxies the manager's StateFlow; observePairingFault() maps MedtronicConnectionFault -> PairingFault 1:1 (needed because several faults produce no state transition, so the UI would otherwise have nothing to show). connect(address, config) ignores address and calls startSession(forceFirstPair = config[\"forceFirstPair\"].toBoolean()). scan() proxies the manager's advertise-and-wait flow. settingsDescriptor() contributes exactly one item: a \"Connection\" section InfoText keyed \"single_peer_note\" stating a MiniMed pump pairs with only one phone at a time and must be removed from the official Medtronic app first. observeDashboardCards() emits an empty list.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/plugin/MedtronicDevicePlugin.kt",
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/plugin/MedtronicPluginFactory.kt"
+        ],
+        "edge_cases": [
+          "initialize(context) is a no-op (BLE components are injected ready-to-use).",
+          "shutdown() calls connectionManager.close() (terminal: releases the worker thread and cancels the scope); onDeactivated() calls disconnect() so the plugin can be reactivated without re-pairing."
+        ]
+      },
+      {
+        "name": "Capability delegates: glucose, insulin (bolus cursor), pump status",
+        "behavior": "MedtronicGlucoseSource.observeReadings() is a naive `while(true) { getCgmReading().onSuccess { emit } ; delay(POLL_INTERVAL_MS = 60_000) }` loop; getCurrentReading() is a direct gateway call. MedtronicInsulinSource: getIoB()/getBasalRate() proxy the gateway. getBolusHistory(since, limits) runs entirely under a bolusSyncMutex so the read-fetch-advance of the in-memory `bolusCursor: Int?` is atomic. Bootstrap: on the first call of the process, gateway.getHistoryCursor() (one read-last-record exchange, no paging) seeds the cursor past all existing history and returns an EMPTY list; an empty pump log seeds 0. Subsequent calls fetch getHistoryLogs(sinceSequence = cursor), set cursor = max sequence seen (or keep the old cursor if the page is empty), extract delivered boluses via MedtronicHistoryParser applying `limits`, and filter to timestamps not before `since`. MedtronicPumpStatus proxies battery/reservoir/settings/hardware/history and exposes the three pure extract* helpers plus unpair()/autoReconnectIfPaired().",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/plugin/MedtronicGlucoseSource.kt",
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/plugin/MedtronicInsulinSource.kt",
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/plugin/MedtronicPumpStatus.kt"
+        ],
+        "edge_cases": [
+          "bolusCursor is explicitly BEST-EFFORT, not the durable record: it advances on a successful fetch before the orchestrator persists, so a transient save failure could skip a bolus on this path. Tolerated because the orchestrator's slow-loop raw-history sync is the durable, self-healing bolus path (persists each raw HistoryLogRecord to Room keyed by sequence before advancing its own cursor, restores it on restart, re-extracts the same boluses).",
+          "Each process restart re-seeds from the pump's latest sequence rather than rescanning; boluses delivered while the app was down reach the platform via the slow loop's backfill.",
+          "observeReadings' 60s cadence is superseded in practice by the app's PumpPollingOrchestrator (fast 15s, medium 300s, slow 300s), which is a separate subsystem."
+        ]
+      },
+      {
+        "name": "Device-info mapping onto the shared (Tandem-shaped) domain models",
+        "behavior": "toPumpSettings() is the faithful lossless mapping: firmwareVersion = firmwareRevision, serialNumber, modelNumber carried across verbatim as strings. toPumpHardwareInfo() is an explicitly lossy best-effort adaptation because PumpHardwareInfo's identity fields are Long while Medtronic's are alphanumeric: serialNumber/modelNumber/armSwVer are numericId(...) = the numeric value of the LONGEST run of digits in the string (\"MMT-1880\" -> 1880, \"NG1234567H\" -> 1234567), 0 when there are no digits, and truncated to the trailing 18 digits (MAX_LONG_DIGITS) to avoid Long overflow. pumpRev = firmwareRevision, pcbaRev = hardwareRevision. partNumber, mspSwVer, configABits, configBBits, pcbaSn are left 0 and pumpFeatures is left EMPTY \u2014 deliberately, because pumpFeatures is a feature-flag map uploaded verbatim to the backend as `pump_features` and must not be repurposed to smuggle identity strings.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/plugin/MedtronicDeviceInfoMapper.kt"
+        ],
+        "edge_cases": [
+          "TODO(48.D): prefer surfacing MedtronicDeviceInfo/toPumpSettings directly to the dashboard once the UI consumes pump identity, rather than round-tripping through the lossy Long-keyed view.",
+          "Medtronic exposes no dedicated settings characteristic, so both settings and hardware info derive from DIS."
+        ]
+      },
+      {
+        "name": "Hilt DI wiring and lifecycle ownership",
+        "behavior": "MedtronicPumpModule (SingletonComponent) @Binds @IntoSet MedtronicPluginFactory into the platform's Set<PluginFactory> so PluginRegistry discovers it. Singleton providers: MedtronicPeripheral = AndroidMedtronicPeripheral(appContext); SerialWorker = HandlerThreadSerialWorker(\"medtronic-sake\"); MedtronicBleConnectionManager(peripheral, credentialStore, worker, CoroutineScope(SupervisorJob() + Dispatchers.IO)); AndroidMedtronicGattLink(context, deviceProvider = { connectionManager.connectedPumpDevice }, worker = the SAME SerialWorker so inbound notifications stay serialized with SAKE work); MedtronicReadGateway(sessionProvider = { connectionManager.sakeSession }, linkProvider = { if (connectionManager.connectionState.value == ConnectionState.CONNECTED) gattLink else null }). The gated linkProvider is the mechanism by which every read reports a clean \"not connected\" failure rather than reading a dead link or fabricating data.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/plugins/shipped/medtronic/src/main/java/com/glycemicgpt/mobile/di/MedtronicPumpModule.kt"
+        ],
+        "edge_cases": [
+          "The module's manifest merges BLUETOOTH_ADVERTISE (tools:targetApi=\"s\") and BLUETOOTH_CONNECT into the app manifest; the host app requests them at runtime. Below API 31 ACCESS_FINE_LOCATION is also required (declared by the host)."
+        ]
+      },
+      {
+        "name": "User-facing pairing procedure (what the user must do ON THE PUMP)",
+        "behavior": "Documented flow: (1) In the app, open pump settings and choose Medtronic. (2) Open Pump Pairing; a \"Before you start\" note explains removing the pump from the manufacturer's app. (3) Tap Start Pairing \u2014 the phone becomes discoverable as \"Mobile 000001\" and shows \"Waiting for your pump.\" (4) ON THE PUMP, open the Bluetooth pairing menu (Add / Pair new device) and select \"Mobile 000001.\" (5) Confirm the pairing on the pump if prompted. The app moves waiting -> connecting -> connected. Prerequisite: the pump MUST first be removed from MiniMed Mobile or any other phone \u2014 a MiniMed pump pairs with only one phone at a time. Once paired, the pump is remembered and GlycemicGPT reconnects on its own when it is back in range. Read-only is stated explicitly: no boluses, no basal changes, no setting changes, no Medtronic account, no cloud, no browser step.",
+        "user_visible": true,
+        "key_files": [
+          "android-unofficial/docs/daily-use/connecting-medtronic-pump.md"
+        ],
+        "edge_cases": [
+          "Documented failure messages with Try Again: \"No pump has connected yet.\" (BOUND_ELSEWHERE), \"This phone can't act as a Bluetooth accessory.\" (PERIPHERAL_UNSUPPORTED), \"Couldn't start Bluetooth advertising.\" (ADVERTISE_FAILED), \"The secure handshake timed out\" / \"the pump rejected the secure handshake.\" (HANDSHAKE_TIMEOUT / AUTH_FAILED).",
+          "Doc states what it reads: sensor glucose, IoB, active basal rate, bolus history, reservoir, pump battery. Explicit caveats: SmartGuard auto-basal micro-boluses are not yet fully attributed; IoB is read straight off the pump and has been confirmed against a live 780G's on-screen Active Insulin (subject to display rounding).",
+          "The whole BLE path is labelled BETA and unverified on hardware in the repo README; the doc tells users to sanity-check important values against the pump itself.",
+          "Bluetooth pairing is presented as an alternative to (not a prerequisite for) CareLink cloud sync."
+        ]
+      },
+      {
+        "name": "tools/medtronic-ble-spike: offline de-risk harness",
+        "behavior": "A standalone JVM Gradle project (not part of the app build, own settings.gradle.kts, application plugin, Java 11 target, JDK 17+ required by the Gradle 9.1 wrapper) that proves two gating unknowns with NO physical pump. (1) The SAKE handshake on the JVM: org.openminimed:javasake:0.2.0 completes the 6-stage handshake with the phone in MOBILE_APPLICATION (SAKE-server) role and the pump as INSULIN_PUMP client, validated byte-for-byte against OpenMinimed's captured 780G pairing trace; SeqCrypt encrypt/decrypt round-trips and rejects tampering. `./gradlew test` is the acceptance gate; `./gradlew run` narrates stage-by-stage and prints \"SUMMARY: 16 passed, 0 failed -> ALL CHECKS PASSED\". Files: SakeTestVectors.java (capture + matched pair), QueuedRngSource.java (deterministic RNG replaying a captured trace), SakeSpikeHarness.java, MedtronicSakeSpikeTest.java. (2) android-peripheral-probe/PeripheralModeProbe.kt: reference-only Android code recording advertiser presence, isMultipleAdvertisementSupported, openGattServer+addService(0xFE82) success and startAdvertising outcome into a PeripheralCapability.",
+        "user_visible": false,
+        "key_files": [
+          "android-unofficial/tools/medtronic-ble-spike/README.md",
+          "android-unofficial/tools/medtronic-ble-spike/build.gradle.kts",
+          "android-unofficial/tools/medtronic-ble-spike/android-peripheral-probe/README.md"
+        ],
+        "edge_cases": [
+          "Known harness limitation: `./gradlew run` lives outside the org.openminimed.sake package so it cannot set the package-private msg4 pad byte; it validates msg0/msg2 bytes + full completion + live cipher round-trip and defers exact msg4 byte-parity to upstream's in-package JUnit suite. The emitted msg4's first 16 bytes (the encrypted permit) DO match the capture; only the pad-dependent 4-byte trailer differs, which does not affect completion.",
+          "Support matrix: the Android emulator is an authoritative KNOWN-NEGATIVE \u2014 its Bluetooth stack has no radio, getBluetoothLeAdvertiser() returns null, so no central can ever connect. Physical device rows are TBD pending the hardware-gated follow-up.",
+          "Implementation notes carried into production: advertise -> connect -> stop advertising -> restart on disconnect; serialize SAKE off the binder thread on a HandlerThread; 20-byte zero wake-up on CCCD subscribe; graceful degradation with a clear message when isPeripheralCapable is false."
+        ]
+      }
+    ],
+    "safety_critical": [
+      "GLUCOSE VALIDATION \u2014 REJECT, NEVER CLAMP. CgmReader rejects any SG outside SafetyLimits 20..500 mg/dL with a MedtronicReadException before constructing CgmReading (whose init re-asserts 20..500). History-extracted CGM readings outside the same bounds are DROPPED. A wrong SG is explicitly deemed more dangerous than a missing one. The Swift port must preserve reject-not-clamp and the ordering (sentinel check -> round -> range check).",
+      "SFLOAT SENTINEL HANDLING. decodeMedFloat16 returns NaN/\u00b1Infinity for the reserved IEEE-11073 mantissa codes 0x07FE, 0x07FF, 0x0800, 0x0801, 0x0802 \u2014 a divergence from upstream added specifically so a 'no value' sentinel cannot surface as a real glucose or as a bogus trend arrow (trend is only magnitude-bucketed). CgmReader explicitly rejects non-finite glucose. Losing this in the port silently turns sentinels into readings.",
+      "MEDFLOAT32 HAS NO SENTINEL HANDLING. decodeMedFloat32 (used for reservoir, IOB, basal rate, bolus units) deliberately does NOT special-case reserved codes. Every caller MUST gate with isFinite() plus a physiological range check: reservoir 0..300 IU, IOB 0..100 IU, basal >= 0 and <= SafetyLimits.maxBasalRateMilliunits (15_000 mU/h), bolus total <= maxBolusDoseMilliunits (25_000 mU) and <= BolusEvent.MAX_BOLUS_UNITS (25 U). Dropping any of these gates lets a garbled read surface as a real insulin/reservoir number.",
+      "UNIT CONVERSION. Glucose is canonical mg/dL end to end; NO mmol/L conversion exists in this driver and one must not be added without a real European mmol/L-display sample (documented decision, tracked in #809/#708). If ever added, use the shared 18.0156 factor and preserve the reject-outside-20..500 ordering. History BG readings ARE converted: SFLOAT kg/L * 1e5 = mg/dL. Basal/bolus math converts IU to milliunits by *1000 then roundToInt before comparing to limits.",
+      "HISTORY CURSOR SKIP HAZARD (the single most dangerous class of bug here). Multiple layers exist solely to stop a history cursor advancing past data the pump actually sent, which would permanently lose bolus records feeding IOB: (a) any undecodable frame in a page fails the whole page; (b) a failed page fails the whole getHistoryLogs call rather than returning partial newer pages; (c) the paging walk is driven by the requested window, never by page content; (d) a flush-recovered unterminated final record must pass isStructurallyCompleteRecordFrame or the exchange fails loudly; (e) a 'no records found' terminator arriving after streamed frames fails the read. All five must be reproduced.",
+      "BLE PROTOCOL CORRECTNESS \u2014 UUID BASES. The Medtronic vendor base uses variant field 0000 (0000XXXX-0000-1000-0000-009132591325), not the SIG 8000. The SAKE characteristic must be vendor-base 0xFE82 while the service is SIG-base 0xFE82, and the phone's DIS container must be vendor 0x0900 not SIG 0x180A. Getting either wrong causes the pump to find the service but not the characteristic, so the handshake never begins and no data is ever read (issue #844).",
+      "RACP SERVICE SCOPING. The SIG 0x2A52 RACP is exposed under BOTH the CGM and IDD services. Resolving it to the wrong service silently reads the wrong log \u2014 i.e. glucose data interpreted as insulin history or vice versa. The implementation prefers the last-resolved RACP-bearing service, falls back to an actively-subscribed service, and THROWS rather than guessing. It also refuses to let a Battery/Device-Info read move the scoping context.",
+      "STALENESS / TIMESTAMPS. CGM and IDD status readings are stamped with the phone's now() at read time, NOT a pump-provided capture time (report-last-record returns the most recent measurement; per-record absolute time via CGM Session Start Time is a deferred refinement). History records carry only relative offsets anchored to a naive-local NGP reference time interpreted in ZoneId.systemDefault(); DST gap/overlap and a phone/pump timezone mismatch are explicitly unresolved. Records before any reference time are dropped rather than mis-timestamped.",
+      "SENSOR STATUS NOT YET GATED. Open TODO(48.C2/F) in CgmReader: the CGM Measurement status/annunciation byte is parsed but NOT used, so a sensor in warm-up or an error state can still surface a misleading SG. SensorMessageState (WARM_UP, NO_SENSOR_SIGNAL, CHANGE_SENSOR, SG_BELOW/ABOVE_LIMIT, etc.) is decoded in the IDD status path but not wired into glucose gating.",
+      "READ-ONLY GUARANTEE. Three independent layers: the transport's WRITABLE_CONTROL_POINTS allow-list (RACP, CGM SOCP, IDD SRCP only), only GET/report-class opcodes constructed anywhere, and a plugin that declares no control capability. Any weakening of the allow-list makes a therapeutic write physically possible. Note the documented revisit trigger: introducing ANY write/therapeutic surface requires raising the SAST/threat model.",
+      "SMARTGUARD MICRO-BOLUS ATTRIBUTION GAP. AUTO_BASAL_DELIVERY (0xF001) events are deliberately excluded from bolus extraction because bolus-vs-basal attribution and double-count risk are unvalidated. On 770G/780G this means displayed bolus history under-reports delivered insulin. The user doc states this. Do not 'fix' it in the port by guessing an attribution.",
+      "BOLUS ACTIVATION CORRELATION IS A POSITIONAL HEURISTIC. isAutomated is taken from the record immediately following BOLUS_DELIVERED_P1 in sequence order; a dropped or interleaved record makes the join miss and the bolus silently degrade to manual/non-correction rather than failing. Correction/meal reason is joined by bolus id across programmed-P1/P2. Whole mapping is flagged TODO(48.A2).",
+      "BATTERY 0% IS REJECTED. Valid range is 1..100; 0x00 is treated as spurious (a pump at true 0% over an active link would be powered off). isCharging is hard-coded false.",
+      "SESSION CIPHER SEQUENCE DESYNC. Each notification PDU is individually SAKE-encrypted with its own 3-byte trailer and decrypting advances a sequence counter. A late or duplicate notification decrypted after an exchange finishes would consume the next operation's sequence slot and desync the session (guarded by per-exchange `finished` flags, the subscription watchdog, and the gateway's single-flight mutex). All three guards are load-bearing.",
+      "AUTH_FAILED IS LATCHED. A terminal handshake failure must not be reset by the inevitable pump disconnect and must not start a reconnect loop against a pump that just rejected us; the user has to re-pair. Advertising is stopped on both the auth-failure and handshake-timeout paths."
+    ],
+    "external_dependencies": [
+      "org.openminimed:javasake:0.2.0 (Maven Central, GPL-3.0, used with author's permission) \u2014 SakeServer 6-stage handshake, Session, SeqCrypt (serverCrypt/clientCrypt), DeviceType, KeyDatabase, Constants.KEYDB_PUMP_EXTRACTED, RngSource/SecureRandomRngSource, MacFailureException, Session.MESSAGE_SIZE (20). This is the ONLY hard external crypto dependency and it has no Swift equivalent \u2014 the port must either reimplement the SAKE state machine and SeqCrypt or bridge to a compiled library.",
+      "org.bouncycastle:bcprov-jdk18on:1.84 \u2014 supplies AES-CMAC (org.openminimed.sake.crypto.AesCmac); explicitly pinned over JavaSake's transitive 1.79 to clear a HIGH timing-channel advisory (>= 1.71, < 1.84). AES-CTR/ECB use the platform JCE. CryptoKit/CommonCrypto has AES-CMAC-equivalent primitives (CMAC is not in CryptoKit; would need an implementation).",
+      "Android platform BLE: BluetoothLeAdvertiser, BluetoothGattServer/BluetoothGattServerCallback, BluetoothGatt/BluetoothGattCallback (client), BluetoothManager, BluetoothDevice.removeBond() via reflection (hidden API). Permissions BLUETOOTH_ADVERTISE + BLUETOOTH_CONNECT (API 31+), ACCESS_FINE_LOCATION below.",
+      "kotlinx.coroutines (Flow/StateFlow/callbackFlow, Mutex, withTimeout, runInterruptible, suspendCancellableCoroutine), Hilt/Dagger DI, Timber logging, androidx.core.ktx.",
+      "Internal module dependency: :pump-driver-api \u2014 SafetyLimits, PumpCredentialProvider, ConnectionState, CgmReading/CgmTrend, IoBReading, BasalReading, BolusEvent, BatteryStatus, ReservoirReading, PumpSettings, PumpHardwareInfo, HistoryLogRecord, PumpActivityMode, DevicePlugin/PluginFactory/PluginMetadata/PluginCapability, PairingProfile/PairingStyle/PairingFault, PluginSettingsDescriptor.",
+      "Upstream reference sources ported line-for-line (not runtime deps): OpenMinimed PythonPumpConnector (sg_reader.py, cgm_measurement.py, cgm_features.py, socp.py, idd/status/*, idd/features/*, history_reader.py, history_data.py, device_info.py, parse_utils.py, value_converter.py) and JavaPumpConnector (BlePeripheralDevice, SakeHandler)."
+    ],
+    "permissions_and_platform_apis": [
+      "android.permission.BLUETOOTH_ADVERTISE (declared in the module manifest with tools:targetApi=\"s\") \u2014 required because the phone is the BLE peripheral; this is the permission Tandem does not need. iOS equivalent: CBPeripheralManager usage.",
+      "android.permission.BLUETOOTH_CONNECT (API 31+) and ACCESS_FINE_LOCATION (below API 31), declared/requested by the host app.",
+      "BluetoothAdapter.isMultipleAdvertisementSupported() + getBluetoothLeAdvertiser() != null \u2014 the peripheral-capability gate; some Android chipsets and all emulators fail it, producing PERIPHERAL_UNSUPPORTED.",
+      "BluetoothGattServer with two registered primary services (vendor 0x0900 DIS, SIG 0xFE82 SAKE), added sequentially via onServiceAdded; advertising is deferred until registration completes.",
+      "BluetoothGatt CLIENT connection opened back to the same device with BluetoothDevice.TRANSPORT_LE and autoConnect=false; requestMtu() is never called in either direction.",
+      "BluetoothDevice.removeBond() invoked by Java reflection (hidden API) during unpair; returns false if the device is not BOND_BONDED.",
+      "Android HandlerThread + Handler for the single 'medtronic-sake' serial worker; a separate daemon ScheduledExecutorService thread 'medtronic-gatt-watchdog' for subscription cleanup.",
+      "API-level branching: Build.VERSION_CODES.TIRAMISU (33) selects the new writeCharacteristic/writeDescriptor/notifyCharacteristicChanged overloads returning BluetoothStatusCodes.SUCCESS; older APIs use the deprecated setValue-then-write pattern. Module minSdk 30, compileSdk 35, Java 17."
+    ],
+    "notes": "COVERAGE: complete for the requested scope \u2014 all 24 main-source files under plugins/shipped/medtronic (connection/, sake/, protocol/, read/, messages/, plugin/, di/), the module build.gradle.kts + manifest + consumer-proguard rules + gradle.lockfile, tools/medtronic-ble-spike (README, build.gradle.kts, peripheral-probe README), docs/daily-use/connecting-medtronic-pump.md, plus the referenced shared types in :pump-driver-api and the Semgrep/security + third-party-license docs. I did not read the 20 test files in detail (they are ~4400 lines and largely restate the behaviors above); if the port needs golden test vectors, the highest-value ones are ReadTestSupport.kt, MedtronicSessionReaderTest.kt, HistoryReaderTest.kt, MedtronicHistoryParserTest.kt, CgmMeasurementTest.kt and MedtronicSakeSessionTest.kt.\n\nVERIFICATION STATUS (important for the port): almost nothing in this driver is live-verified. The repo README lists Medtronic as \"Beta, read-only, unverified on hardware\". Only two things are claimed verified: (1) the IOB read matched a live MiniMed 780G's on-screen Active Insulin (2026-07, modulo display rounding), and (2) multi-PDU history records MAC-pass through the per-PDU SAKE decrypt path on a live 780G (PR #852) \u2014 which is cryptographic proof of the per-PDU framing model. Everything else carries a \"rides with 48.A2 / Milestone F\" or \"DESK\" marker.\n\nOPEN TODOs THAT ARE LOAD-BEARING FOR A PORT: (a) TODO(48.A2) tune/confirm the 60s first-pair BOUND_ELSEWHERE window against a real pump; (b) TODO(48.A2) confirm the pump does not validate any DIS field value; (c) TODO(48.A2) honor the IDD Features E2E flag per model for SRCP requests (currently SRCP requests are never E2E-CRC-wrapped because the 780G leaves E2E off); (d) TODO(48.A2) pin the exact on-wire fragment sizes so the exact-multiple reassembly ambiguity can be removed; (e) TODO(48.A2) resolve SmartGuard auto-basal micro-bolus attribution; (f) TODO(48.C2/F) gate SG on the sensor-status annunciation; (g) TODO(48.A2) confirm the feature-bit-to-model boundary; (h) TODO(48.A2) re-confirm the serverCrypt/clientCrypt direction mapping; (i) TODO(48.A2/D) per-install advertised identity instead of the fixed \"Mobile 000001\"; (j) TODO(48.D) surface MedtronicDeviceInfo directly instead of the lossy Long-keyed PumpHardwareInfo view.\n\nTHE DOCUMENT medtronic-ble-reverse-engineering.md, cited by section number throughout the source (Sec. 3 topology, Sec. 4-5 SAKE, Sec. 6 MTU, Sec. 7 single-peer/reconnect, Sec. 8 GATT map, Sec. 9 E2E-CRC, Sec. 11 threading), is NOT present in this repository. Its content is only recoverable from the in-source comments captured above.\n\nPOLLING CADENCE lives outside this subsystem in app/.../service/PumpPollingOrchestrator.kt: INTERVAL_FAST_MS 15_000 (IoB + basal + CGM, doubling as a keep-alive because the pump drops idle connections at ~30s), INTERVAL_MEDIUM_MS 300_000 (bolus history), INTERVAL_SLOW_MS 300_000 (battery + reservoir), REQUEST_STAGGER_MS 500, MEDIUM_LOOP_INITIAL_DELAY_MS 60_000, SLOW_LOOP_INITIAL_DELAY_MS 30_000, MAX_INITIAL_SYNC_DURATION_MS 1_200_000 (raised from 10m to 20m specifically because Medtronic initial sync can take 15+ minutes). The ~30s pump idle-timeout is the reason the driver's read gateway holds its single-flight lock for whole exchanges and the orchestrator releases the link between backfill batches."
+  },
+  "port": {
+    "subsystem": "Medtronic MiniMed 680G/770G/780G read-only BLE driver \u2014 phone-as-peripheral (CBPeripheralManager) + SAKE session + CGM/IDD/history read layer + driver capability surface, plus the offline SAKE de-risk harness and the user pairing doc.",
+    "ports_cleanly": [
+      {
+        "capability": "UUID base scheme: SIG base vs Medtronic vendor base (issue #844 fix)",
+        "ios_approach": "CBUUID accepts arbitrary 128-bit UUID strings for both local (peripheral-role) and remote (central-role) services and characteristics, with no variant-field validation. Build the two bases as string constants exactly as Kotlin does: SIG 0000XXXX-0000-1000-8000-00805f9b34fb and vendor 0000XXXX-0000-1000-0000-009132591325 (variant 0000, not 8000). Keep the same split: SAKE service on the SIG base 0xFE82, SAKE characteristic on the vendor base 0xFE82, phone-exposed DIS container on vendor 0x0900. Note CBUUID normalizes 16-bit-shaped SIG UUIDs to their short form in description output only; identity comparison is unaffected. Port MedtronicProtocol as a single Swift enum of static CBUUIDs with a golden unit test asserting all 128-bit expansions byte-for-byte."
+      },
+      {
+        "capability": "Full GATT UUID inventory (SAKE, DIS, CGM, Battery, IDD, HAT, CM, RACP, CCCD)",
+        "ios_approach": "Direct constant translation. One iOS-specific deletion: CCCD 0x2902 must NOT appear in the local GATT table (Core Bluetooth owns it \u2014 see the subscribe/unsubscribe entry). Keep HAT 0x300 and CM 0x600 declared-but-unused with the same comments so the deliberate non-use survives the port. RACP 0x2A52 stays shared across CGM and IDD."
+      },
+      {
+        "capability": "Phone-side GATT server registration order and placeholder DIS values",
+        "ios_approach": "CBMutableService/CBMutableCharacteristic; call add(_:) one service at a time and chain on peripheralManager(_:didAdd:error:), same ConcurrentLinkedQueue discipline (a Swift array + index on the driver's serial queue). Defer startAdvertising until the last didAdd succeeds; a didAdd error maps to the synthetic GATT_SERVER_UNAVAILABLE (-2) fault exactly as today \u2014 still the one step with no timeout, so the fault path is load-bearing. DIS placeholders port verbatim, declared as read-only characteristics with static values (Core Bluetooth requires cached-value characteristics be read-only, which the DIS set already is). The SAKE characteristic must have value nil (dynamic) because it is notify+write."
+      },
+      {
+        "capability": "SAKE CCCD subscribe/unsubscribe detection",
+        "ios_approach": "Strictly better on iOS. Core Bluetooth manages the CCCD itself and delivers peripheralManager(_:central:didSubscribeTo:) and didUnsubscribeFrom:, so the whole byte-sniffing branch (value[0] & 0x01, the 0x00/0x00 disable pattern, the 'unexpected, ignoring' case) collapses into two delegate methods. The ungated onDescriptorReadRequest workaround for issue #844 becomes unnecessary and must be deleted, not translated. Gate both callbacks on characteristic.uuid == vendor 0xFE82. didSubscribeTo is the cue to emit the 20-byte zero wake-up frame."
+      },
+      {
+        "capability": "Characteristic write and read request handling on the local server",
+        "ios_approach": "peripheralManager(_:didReceiveWrite requests:) forwards request.value verbatim to the SAKE driver, then respond(to: requests[0], withResult: .success) once for the batch. peripheralManager(_:didReceiveRead request:) honors request.offset with the same bounds rule, responding .invalidOffset when offset < 0 or > value.count, else setting request.value to the offset slice and responding .success. Core Bluetooth handles ATT blob-read continuation when you respond correctly."
+      },
+      {
+        "capability": "Connection state machine (7 states + transitions)",
+        "ios_approach": "Pure logic; port as-is onto a single serial DispatchQueue. Substitutions: 'pump connected to the GATT server' becomes the first didSubscribeTo (Core Bluetooth surfaces no connect event for a central attaching to your peripheral \u2014 subscription is the earliest observable), and 'pump disconnected' becomes didUnsubscribeFrom plus a CBCentralManager disconnect on the client link. Keep AUTH_FAILED sticky, keep stopAdvertising on connect (single-peer), keep autoReconnect=false on both failure paths, keep the synchronous close()-on-caller-thread teardown."
+      },
+      {
+        "capability": "Connection faults and their timers",
+        "ios_approach": "MedtronicConnectionFault ports as a Swift enum published alongside connection state (two separate streams, because several faults produce no state change). Timers port to Task.sleep races or DispatchSourceTimer on the serial queue: 30_000 ms handshake timeout armed on AUTHENTICATING, 60_000 ms pairing wait armed only for FIRST_PAIR advertising, RECONNECT waiting indefinitely. Both re-check state on the driver queue before firing. PERIPHERAL_UNSUPPORTED remaps to CBManagerState .unsupported/.unauthorized/.poweredOff (see the capability-gate entry) but keeps its identity in the enum and in the UI mapping."
+      },
+      {
+        "capability": "Peripheral capability gate (isSupported)",
+        "ios_approach": "Android's isMultipleAdvertisementSupported / bluetoothLeAdvertiser != null check has no analogue: every iPhone Apple currently supports can act as a BLE peripheral. Replace with CBManagerState from peripheralManagerDidUpdateState: .unsupported (which is what the iOS Simulator always reports) and .unauthorized map to PERIPHERAL_UNSUPPORTED; .poweredOff maps to a distinct 'Bluetooth is off' fault. The user-facing string 'This phone can't act as a Bluetooth accessory.' should be re-worded for iOS since the real causes are Simulator, Bluetooth off, or permission denied."
+      },
+      {
+        "capability": "Discovery is advertise-and-wait, not a scan",
+        "ios_approach": "scan() becomes an AsyncThrowingStream (or AsyncStream of Result) with the same semantics: check CBManagerState, install a discovery hook, set autoReconnect=false, start FIRST_PAIR advertising in state SCANNING, tear down on termination only if still SCANNING. DiscoveredDevice.name stays the phone's own advertised name. DiscoveredDevice.address changes meaning: iOS never exposes a peer BLE MAC, so it carries CBCentral.identifier (an opaque per-app UUID). Keep the rule that a discovered pump cannot be 'connected to later'."
+      },
+      {
+        "capability": "SAKE handshake wire choreography (SakeHandshakeDriver)",
+        "ios_approach": "Pure state machine over the transport seam; ports line-for-line onto the serial queue. Keep all four flags (session, pumpSubscribed, complete, failed), the mid-handshake session rebuild when stage != 0, the latched failure so onAuthFailed fires exactly once, the ignore-after-complete rule, and the invariant that the wake-up frame is emitted outside the state machine and never fed into onPumpWrite. Swift errors replace exceptions; catch a typed SakeError, not a blanket catch."
+      },
+      {
+        "capability": "SerialWorker: single-thread serialization discipline",
+        "ios_approach": "One serial DispatchQueue ('medtronic-sake', .userInitiated) passed as the delegate queue to BOTH CBPeripheralManager and CBCentralManager, so every Core Bluetooth callback already arrives serialized on it \u2014 a structural improvement over Android's binder-thread hop. Share the same queue instance across the connection manager, handshake driver and client transport so the reader's lock-free per-exchange state stays valid. Do not use a Swift actor here: actors give no FIFO ordering guarantee, and the reader relies on submission-order delivery. Blocking this queue is forbidden (see the transport redesign entry)."
+      },
+      {
+        "capability": "MTU policy and 20-byte outbound PDU framing (PduFramer)",
+        "ios_approach": "iOS negotiates ATT MTU automatically and exposes no requestMtu on either role, which matches the driver's 'never request MTU' policy exactly. Keep MAX_PDU_SIZE = 20 for all outbound notifications and reads (safe under any negotiated MTU); CBCentral.maximumUpdateValueLength is observational only, the analogue of onMtuChanged. Port fragment/reassemble verbatim including the empty-payload-yields-one-empty-chunk rule. One additive iOS requirement: updateValue(_:for:onSubscribedCentrals:) returns false when the transmit queue is full \u2014 queue the pending frame and resume from peripheralManagerIsReady(toUpdateSubscribers:). Android had no equivalent backpressure callback."
+      },
+      {
+        "capability": "Read-only enforcement in the transport (defense in depth)",
+        "ios_approach": "Port WRITABLE_CONTROL_POINTS = { RACP 0x2A52, CGM SOCP 0x2AAC, IDD SRCP vendor 0x105 } as a Swift Set<CBUUID> checked in the single write entry point, refusing anything else with a WARN and a silent return. Strengthen it for free in Swift: make the write API take a WritableControlPoint enum with three cases rather than a bare CBUUID, so a non-control-point write is a compile error, and keep the runtime allow-list as the second layer. Keep the plugin-level rule that no control capability is declared and that only GET/report-class opcodes are constructed anywhere."
+      },
+      {
+        "capability": "Shared RACP characteristic service-scoping",
+        "ios_approach": "Structurally easier and must still keep the throw-rather-than-guess rule. Core Bluetooth discovery is service-scoped by construction (discoverCharacteristics(_:for:)) and every CBCharacteristic carries a weak .service back-reference, so build the same index of bare UUID -> [(CBService, CBCharacteristic)] plus racpServiceUuids from the discovered tree. Preserve all three resolution rules: single candidate wins and updates lastResolvedServiceUuid only if its service exposes RACP; multiple candidates prefer lastResolvedServiceUuid, then a live subscription; otherwise throw. Preserve the rule that a Battery or DIS read cannot move the scoping context."
+      },
+      {
+        "capability": "NotificationReassembler and the exact-multiple ambiguity",
+        "ios_approach": "Pure logic. Port the rule set exactly: full 20-byte fragments accumulate, a short fragment terminates, an empty PDU is ignored, MAX_FRAME_SIZE = 512 resets and throws. Keep hasPartialFrame/fragmentCount/flush/reset. Keep the documented exact-multiple ambiguity and the rule that flushed bytes are indistinguishable from truncation so callers must validate. Use Data with explicit count-based indexing, never index arithmetic on a slice (Data slices carry a non-zero startIndex and this is the single most common Kotlin-to-Swift parser porting bug)."
+      },
+      {
+        "capability": "MedtronicSessionReader: the six control-point exchange patterns",
+        "ios_approach": "Pure logic over the transport protocol. Port reportLastRecord ([0x01,0x06], terminator [0x06,0x00,0x01,0x01]), socpGet (with LE E2E-CRC), srcpGet (no E2E-CRC), decryptedRead, reportRecords (MAX_RECORDS_PER_REPORT 50_000, caller-supplied isSuccess and validateRecoveredFrame with a rejecting default), and controlPointQuery. Keep the idempotent `finished` flag per exchange, unsubscribing both characteristics on finish, the deliberate absence of any timer inside the framework, and the rule that a decrypt/MAC/length failure becomes a Result failure rather than escaping the delivery queue. Keep all three CGM/IDD flush-recovery outcomes exactly as specified."
+      },
+      {
+        "capability": "CgmReader: sensor glucose read path and safety gating",
+        "ios_approach": "Pure logic. Keep the ordering: read CGM Feature 0x2AA8 per pump (never hard-code 780G), reportLastRecord over 0x2AA7 + RACP scoped to the CGM service, parse, reject non-finite SFLOAT sentinel, round to Int, then reject outside SafetyLimits 20...500 \u2014 reject, never clamp. In Swift the sentinel check must come strictly before the rounding conversion because Int(Double.nan) traps at runtime rather than throwing; guard on .isFinite first and use Int(exactly:) on the rounded value. Timestamp stays Date() at read time. Carry the open TODO that sensor-status annunciation is still not gating SG."
+      },
+      {
+        "capability": "CGM trend-arrow mapping",
+        "ios_approach": "Pure logic, direct port: nil or non-finite -> unknown; |rate| < 1.0 -> flat; >= 3.0 -> double; >= 2.0 -> single; else fortyFive, signed by direction. Keep the note that history-extracted CGM readings always carry .unknown because the SG history record has no rate field. Port the threshold table as named constants with a unit test per bucket boundary."
+      },
+      {
+        "capability": "CGM Measurement record parser (SIG GSS 3.43) and CGM Feature parser",
+        "ios_approach": "Pure logic. Measurement: 6-byte mandatory prefix, size field validated against the whole record before CRC stripping, flag bits 0x01/0x02/0x20/0x40/0x80 consumed in wire order status/calTemp/warning/trend/quality, each bounds-checked, trailing bytes an error. Feature: exactly 6 bytes, read the trailing 2-byte CRC field first and validate only when it is not the 0xFFFF sentinel, then take e2eCrcEnabled from feature bit (1 << 12). Preserve the documented divergence from OpenMinimed's cgm_features.py. Preserve the mg/dL-only decision and add no mmol/L conversion. Every bounds check must be an explicit guard returning a thrown error, because Swift array/Data out-of-range subscripting traps uncatchably."
+      },
+      {
+        "capability": "MedtronicCodec numeric decoding primitives",
+        "ios_approach": "Pure logic with three Swift-specific hardenings. (1) decodeMedFloat16 keeps the reserved-mantissa sentinel mapping (0x07FE -> +inf, 0x07FF/0x0800/0x0801 -> nan, 0x0802 -> -inf) \u2014 this divergence from upstream is safety-critical and must survive. (2) signExtend's bits==32 short-circuit is unnecessary in Swift (Swift's shift operators are 'smart' and over-shift to 0 rather than masking the count) but keep an explicit bits==32 branch plus its test so the behavior is pinned. (3) All accumulation arithmetic must use explicitly widened types or the &+/&* operators: Swift traps on integer overflow by default, so a garbled pump byte that Kotlin tolerated would crash the app. e2eCrc is CRC-16/CCITT-FALSE, straight port."
+      },
+      {
+        "capability": "IDD Features parsing and per-model capability tiering",
+        "ios_approach": "Pure logic. 8-byte mandatory prefix, bit 0 = E2E supported, bit 23 = feature extension folded in at shift 24 while the 0x80 continue bit is set, promised-but-missing byte throws. Keep the deliberate absence of upstream's hard 0xFFFF/0x00 assertion. MedtronicPumpModel.fromFeatureFlags ports verbatim (flags==0 -> unknown; HCL bit 1<<28 clear -> 680G; HCL + smart-settings 1<<29 -> 780G; HCL alone -> 770G), including the rationale that DIS model is an MMT part number and must not be substring-matched. Keep the TODO that the feature-bit-to-model boundary is unconfirmed against real hardware."
+      },
+      {
+        "capability": "IDD Status / IOB / active-basal parsing and validation bounds",
+        "ios_approach": "Pure logic. Port stripIddE2e, the exactly-9-byte status body, the 0x03F3/0x03FC IOB exchange and the 0x0365/0x036A basal exchange with their flag-driven optional blocks, and every raw enum code table (TherapyControlState, OperationalState, SensorMessageState 0x00..0x0E, BasalDeliveryContext) mapping unrecognized values to UNKNOWN(-1) rather than throwing. All three safety bounds stay reject-not-clamp: reservoir finite and 0...300 IU, IOB finite and 0...100 IU, basal finite, >= 0, and (rate*1000).rounded() <= maxBasalRateMilliunits (15_000). Guard .isFinite before any Double-to-Int conversion. Keep isAutomated = (context == AP_CONTROLLER) with the WARN-but-accept behavior on a non-SmartGuard tier."
+      },
+      {
+        "capability": "Battery and Device Information readers (unencrypted SIG reads)",
+        "ios_approach": "Plain CBPeripheral.readValue(for:) with no SAKE decryption, awaited via a continuation. Battery: single byte, empty rejected, valid range 1...100 with 0 explicitly rejected as spurious, isCharging hard-coded false. DeviceInfo: read the pump's own DIS characteristics by characteristic UUID (0x2A24/0x2A25/0x2A27/0x2A26/0x2A28/0x2A23) rather than by service UUID, decode UTF-8 trimming only trailing NULs, render the 8-byte System ID as lower-case hex. These remain the only two reads that need no live SAKE session, though the client link must still be up."
+      },
+      {
+        "capability": "HistoryReader: IDD RACP record fetch",
+        "ios_approach": "Pure logic. Port every opcode and operator constant verbatim (0x33/0x5A/0x66/0x0F/0x69/0xF0/0x06 and the three request byte sequences), the two terminators, and readRecordCount's 0x66/0x0F + 2-byte LE parse. Keep all four failure rules: no-records-after-streamed-frames fails the read; any undecodable frame fails the whole page (checked before dedup); a flush-recovered final record must pass isStructurallyCompleteRecordFrame; no-records-found on an empty page is a successful empty list that ends the paging walk. Keep using the IDD RACP, never CGM RACP and never HAT."
+      },
+      {
+        "capability": "History record framing, event types, timestamp resolution and domain extraction",
+        "ios_approach": "Pure logic; the largest single body of portable code. Port the 8-byte header, the full event-type ID table, every body layout (bolus P1/P2 with their two different flag layouts, basal-rate-changed, auto-basal micro-bolus, SG measurement, BG reading kg/L * 1e5, both annunciation forms), and the reference-time walk. NGP reference time stays naive local wall-clock: anchor with DateComponents + Calendar.current in TimeZone.current, never as UTC. Records before any reference time are dropped, not mis-timestamped. Annunciation timestamps use the separate absolute 2000-01-01T00:00:00Z epoch. parseRecordBody's narrow catch (only MedtronicReadError and a typed argument error, degrading to Unparsed) becomes a typed Swift catch; isStructurallyCompleteRecordFrame re-runs without the fallback."
+      },
+      {
+        "capability": "Domain extraction safety filters and the SmartGuard exclusion",
+        "ios_approach": "Pure logic. Keep SG_SENTINELS {0x0301, 0x0303, 0x030D} dropped, out-of-range CGM dropped not clamped, boluses taken only from BOLUS_DELIVERED_P1 with total = fast + extended and dropped when non-finite, negative, > maxBolusDoseMilliunits (25_000 mU) or > MAX_BOLUS_UNITS (25 U), and the correction/meal split that yields 0/0 when neither or both reasons are set. Keep the positional isAutomated heuristic (immediately-following P2 activation == COMMANDED) and its documented failure mode. Critically: keep AUTO_BASAL_DELIVERY 0xF001 excluded from bolus extraction \u2014 do not invent an attribution during the port \u2014 and keep the user-facing caveat text."
+      },
+      {
+        "capability": "Capability delegates: glucose source, insulin source with bolus cursor, pump status",
+        "ios_approach": "Direct port. observeReadings becomes an AsyncStream driven by the same 60_000 ms loop (superseded in practice by the polling orchestrator). getBolusHistory keeps its whole read-fetch-advance under one FIFO async lock so the in-memory cursor stays atomic, keeps the first-call bootstrap that seeds past all existing history and returns empty, keeps 'empty page leaves the cursor', and keeps the explicit note that this cursor is best-effort and the orchestrator's durable raw-history sync is the self-healing path. Pump status proxies battery/reservoir/settings/hardware/history and re-exposes the three pure extract helpers."
+      },
+      {
+        "capability": "Device-info mapping onto the shared (Tandem-shaped) domain models",
+        "ios_approach": "Pure logic. toPumpSettings stays lossless (firmware/serial/model as strings). toPumpHardwareInfo stays the documented lossy adaptation: numericId = the longest digit run in the string, 0 when there are none, truncated to the trailing 18 digits to avoid Int64 overflow. In Swift use Int64(exactly:) or a checked initializer rather than relying on truncation semantics. Keep partNumber/mspSwVer/configABits/configBBits/pcbaSn at 0 and pumpFeatures deliberately empty so no identity string is smuggled into the backend's pump_features map."
+      },
+      {
+        "capability": "Static SAKE key-database posture",
+        "ios_approach": "The posture statement carries over unchanged: these are shared protocol constants present in every 700-series pump, published upstream under GPL-3.0, not session secrets and not credentials. Embed them as a Swift constant table (or a resource in the SPM target) with the same README-level documentation so any future Swift secret scanner finding is triaged as a known published artifact. Keep the key database injectable so tests can substitute synthetic CUSTOM_* databases, and keep KEYDB_PUMP_EXTRACTED as the production default."
+      },
+      {
+        "capability": "User-facing pairing procedure documentation",
+        "ios_approach": "The on-pump half of the flow is unchanged: unbind from MiniMed Mobile, open the pump's Bluetooth pairing menu, select 'Mobile 000001'. Rewrite three phone-side statements for iOS: the app must be open and in the foreground during first pairing (background iOS advertising is not discoverable by the pump); unpairing requires both an in-app 'Forget pump' and a manual Settings > Bluetooth > Forget This Device; and 'This phone can't act as a Bluetooth accessory' is replaced by Bluetooth-off / permission-denied / Simulator wording. Keep the read-only statement, the BETA label, the read-what-list, and the SmartGuard micro-bolus caveat verbatim."
+      }
+    ],
+    "needs_redesign": [
+      {
+        "capability": "Inverted BLE topology: phone as peripheral, and the second GATT-client connection back to the pump",
+        "why": "CBPeripheralManager can advertise and host a GATT server, so the peripheral half is supported. The break is the handoff: Android captures the pump's BluetoothDevice directly from the GATT-server callback and calls connectGatt on it. Core Bluetooth gives you only a CBCentral, which exposes nothing but an opaque identifier and maximumUpdateValueLength and cannot be converted into a CBPeripheral. There is no documented API to obtain a CBPeripheral for the peer that just connected to your peripheral manager, and the map's own constraint forbids a fresh scan/advertise cycle.",
+        "options": [
+          "Call CBCentralManager.retrieveConnectedPeripherals(withServices: [CGM 0x181F, IDD vendor 0x100]) after SAKE completes and connect() the returned CBPeripheral \u2014 documented API, returns peers already connected at the system level, which the pump is because it connected to us.",
+          "Call retrievePeripherals(withIdentifiers: [central.identifier]) \u2014 widely observed to work because iOS derives both CBCentral.identifier and CBPeripheral.identifier from the peer's resolved identity, but Apple does not document or guarantee this equivalence.",
+          "Scan as a central for the pump and connect a second, independent link \u2014 only viable if the pump advertises at all, which is unverified and unlikely given it operates as a central.",
+          "Abandon the client link and pull everything over the SAKE characteristic \u2014 not possible; CGM/IDD/Battery/DIS data lives only on the pump's own GATT server."
+        ],
+        "recommendation": "Implement option 1 as primary with option 2 as automatic fallback, behind a single MedtronicPumpLinkResolver seam with a distinct fault code when both fail. This is the highest-risk unknown in the entire port and must be the first thing validated on real hardware; every parser and reader below it is worthless if the client link cannot be established."
+      },
+      {
+        "capability": "Advertising contract (what the pump scans for)",
+        "why": "CBPeripheralManager.startAdvertising honors exactly two keys: CBAdvertisementDataLocalNameKey and CBAdvertisementDataServiceUUIDsKey. Manufacturer-specific data (company ID 0x01F9 with the 0x00||name||0x00 payload), TX power inclusion, connectable flag, advertising timeout, and the LOW_LATENCY-vs-BALANCED mode distinction between reconnect and first-pair are all unavailable. iOS also always advertises the GAP local name, inverting Android's deliberate setIncludeDeviceName(false).",
+        "options": [
+          "Advertise localName = 'Mobile 000001' plus the appropriate service UUID (SIG 0xFE82 first-pair / 0xFE81 reconnect) and rely on the pump matching the GAP name against Regex('Mobile .{0,7}') \u2014 supported by the strong inference that Medtronic's own MiniMed Mobile for iOS pairs with these pumps and is subject to the identical Apple restriction.",
+          "Advertise both service UUIDs simultaneously and drop the first-pair/reconnect distinction, since iOS gives no interval control to make the distinction meaningful anyway.",
+          "Keep a manufacturerData() function in the Swift port as dead-but-documented code so the omission is explicit rather than accidental."
+        ],
+        "recommendation": "Advertise localName + the mode-appropriate service UUID; keep advertisingModeFor(paired, forceFirstPair) selecting only the service UUID and delete the tx-power/timeout/mode knobs with a comment naming the Apple restriction. Retain the 31-byte reasoning as a doc note only \u2014 iOS enforces the budget itself and will silently truncate a long local name."
+      },
+      {
+        "capability": "GATT-client transport: serialization, blocking operations and timeouts (AndroidMedtronicGattLink)",
+        "why": "The Android transport takes a ReentrantLock and blocks the calling thread until the matching GATT callback fires. On iOS that pattern is fatal: Core Bluetooth delivers all callbacks on the delegate queue, so blocking that queue deadlocks the entire BLE stack, and the driver deliberately shares one serial queue across the peripheral manager, the handshake driver and the client link.",
+        "options": [
+          "Rewrite every read/write/subscribe/unsubscribe as async throws using withCheckedThrowingContinuation, with a FIFO operation queue enforcing one-in-flight, and a Task.sleep race for the 10_000 ms operation timeout and 30_000 ms subscription timeout.",
+          "Keep a synchronous facade backed by a second dispatch queue and semaphores \u2014 preserves the Android shape but reintroduces the deadlock risk and burns a thread.",
+          "Model the link as a Swift actor \u2014 rejected: actors give no FIFO ordering guarantee, and the reader relies on submission-order delivery."
+        ],
+        "recommendation": "Go fully async/await with an explicit FIFO gate. Preserve every safety property literally: connect lazily on first use (never requestMtu, which iOS forbids anyway), publish the peripheral and service index only after discovery succeeds, reject any callback whose CBPeripheral is not the current one so a late completion cannot satisfy a later operation's slot, and keep the synthetic -1 LOCAL_TIMEOUT / -2 LOCAL_REJECTED statuses and the CBATTError-to-name mapping for WARN logs. The API 33 write-overload branch and the literal CCCD payloads disappear \u2014 setNotifyValue(_:for:) replaces both."
+      },
+      {
+        "capability": "Dangling-subscription watchdog and cancellation cleanup",
+        "why": "The Android design exists to keep a coroutine cancellation from leaving a subscription live and desyncing the SAKE sequence counter, and it carefully defers blocking CCCD disables off kotlinx's global timeout thread. Swift's cancellation model, the absence of a global timeout thread, and setNotifyValue's async nature all change the shape, but the underlying hazard is identical and the guarantee must be preserved exactly.",
+        "options": [
+          "Wrap each exchange in withTaskCancellationHandler, dropping notification handlers synchronously in the cancellation handler and enqueuing the setNotifyValue(false) calls onto the driver queue as a detached Task.",
+          "Rely on structured concurrency alone and disable notifications in a defer inside the exchange \u2014 simpler, but a cancelled task's defer runs at the next suspension point, which may be after the next exchange has already started.",
+          "Keep an explicit watchdog Task armed for 30_000 ms per subscription, mirroring SubscriptionWatchdog."
+        ],
+        "recommendation": "Do all three: cancellation handler drops handlers immediately (the no-dangling-notification guarantee), disables are deferred onto the driver queue, and a 30_000 ms watchdog Task backstops a subscription whose exchange never completes. Keep both identity guards verbatim \u2014 skip the disable if the peripheral was replaced by a reconnect, and skip it if the same resolved characteristic has been re-subscribed by a newer exchange."
+      },
+      {
+        "capability": "MedtronicReadGateway: single-flight, timeouts and history paging",
+        "why": "kotlinx.coroutines.Mutex is documented FIFO-fair, and the gateway depends on that fairness so a long history backfill cannot starve a 15-second CGM keep-alive read. Swift has no fair async mutex: actors make no ordering guarantee and can reorder awaiting continuations. withTimeout and runInterruptible also have no direct Swift equivalents.",
+        "options": [
+          "Implement an explicit FIFO async semaphore (a queue of continuations drained in insertion order) and use two instances for readMutex and historyMutex.",
+          "Use an actor with an internal ticket queue \u2014 same thing with more ceremony.",
+          "Use DispatchSemaphore on a dedicated queue \u2014 reintroduces blocking, rejected."
+        ],
+        "recommendation": "Build a small FIFOAsyncLock type and unit-test its ordering. Everything else ports as-is: resolve link and session BEFORE queueing so 'not connected' fails fast, wrap each read in a 30_000 ms timeout race producing a typed failure, keep the 200-record HISTORY_BATCH_SIZE window walk driven by the requested window and never by page content, keep empty-page-ends-the-walk, keep failed-page-fails-the-whole-call, keep the 50_000 total cap, keep releasing readMutex between pages, and keep the WARN-logs-carry-only-op-and-error-type rule (glucose, IOB, basal and reservoir values are PHI and Sentry ingests WARN)."
+      },
+      {
+        "capability": "Background execution, state preservation and restoration, and the absence of a foreground service",
+        "why": "iOS has no foreground service. An app with UIBackgroundModes bluetooth-central and bluetooth-peripheral is still suspended between BLE events and woken for roughly 10 seconds per event; Timer and DispatchQueue.asyncAfter do not fire while suspended, so the orchestrator's 15-second poll (which doubles as the keep-alive against the pump's ~30 s idle drop) cannot run on a timer in the background. State restoration relaunches the app but hands back only restored peripherals/services/advertisement data \u2014 it cannot resume arbitrary work, and the in-memory SAKE session (including its sequence counters) is unrecoverable across termination.",
+        "options": [
+          "Declare both bluetooth-central and bluetooth-peripheral, set CBCentralManagerOptionRestoreIdentifierKey and CBPeripheralManagerOptionRestoreIdentifierKey, and drive polling from BLE events (didUnsubscribeFrom, didDisconnectPeripheral, notification arrival) rather than a wall clock.",
+          "Add a Live Activity as the honest replacement for Android's ongoing foreground-service notification, giving the user a persistent connection-state surface and the app a user-visible reason to be running.",
+          "Use BGAppRefreshTask as a supplementary wake \u2014 opportunistic, roughly 30 s of runtime, no guaranteed cadence, cannot substitute for a 15 s loop.",
+          "Foreground-only Medtronic operation with a local notification when the link drops \u2014 the fallback if event-driven wakes prove insufficient on hardware."
+        ],
+        "recommendation": "Event-driven background operation with both background modes and restoration on both managers, plus a Live Activity for connection state. Hard rule for the port: NEVER persist SAKE session cipher state \u2014 on restoration always re-run the handshake, which the existing design already supports since a pump resubscribing to the SAKE characteristic restarts it. Restoration handlers must rebuild the state machine explicitly and reassign every delegate."
+      },
+      {
+        "capability": "Pairing persistence, auto-reconnect and identity",
+        "why": "There is no MAC address on iOS. The stored 'address' becomes CBCentral.identifier / CBPeripheral.identifier, an opaque UUID that is stable per app installation and per peer bond but is NOT stable across app reinstall or after the user forgets the device in Settings. Android's savePairing(address, localName) and getPairedAddress semantics therefore change durability characteristics, and the reconnect path must survive an identifier that no longer resolves.",
+        "options": [
+          "Persist the peer UUID plus the advertised local name in the Keychain with kSecAttrAccessibleAfterFirstUnlock (required so a background BLE wake after reboot can read it) and treat a non-resolving identifier as 'paired but not yet seen' rather than unpaired.",
+          "Persist only the advertised local name and treat any pump that completes SAKE as the paired pump \u2014 simpler and arguably more correct given the pump binds to exactly one phone, but loses the ability to distinguish a different pump.",
+          "Store the pump's DIS serial number (read once after the first successful session) as the durable identity and use the CBCentral UUID only as a session-scoped handle."
+        ],
+        "recommendation": "Keychain-persist {peer UUID, advertised local name, pump DIS serial} with the serial as the durable identity and the UUID as a cache. Keep isPaired gating reconnectIfPaired, keep disconnect() preserving pairing, keep the SAKE-has-no-pairing-code note that the credential 'code' slot holds the advertised identity string, and keep the never-log-identifiers-above-DEBUG rule (it now applies to the peer UUID, not a MAC)."
+      },
+      {
+        "capability": "Driver registration, DI wiring and lifecycle ownership (plugin -> compile-time module)",
+        "why": "iOS forbids dynamic code loading, so the runtime PluginRegistry / PluginFactory / Hilt @Binds @IntoSet discovery mechanism has no iOS analogue. This is already a decided architectural change; the redesign work is preserving the capability surface and lifecycle contract on the other side of it.",
+        "options": [
+          "A MedtronicDriver Swift package (SPM target) conforming to a PumpDriver protocol, listed in a static let allDrivers array in the app's composition root.",
+          "A protocol + a compile-time registry generated from a build plugin \u2014 unnecessary ceremony for a fixed, small driver set.",
+          "Fold the driver into the app target \u2014 rejected: loses the module boundary that keeps the read-only surface reviewable."
+        ],
+        "recommendation": "An SPM target MedtronicDriver depending on a PumpDriverAPI target (the port of :pump-driver-api: SafetyLimits, ConnectionState, CgmReading/CgmTrend, IoBReading, BasalReading, BolusEvent, BatteryStatus, ReservoirReading, PumpSettings, PumpHardwareInfo, HistoryLogRecord, PairingProfile/PairingStyle/PairingFault, PluginSettingsDescriptor). Preserve everything user-visible: id 'com.glycemicgpt.medtronic', the three capabilities GLUCOSE_SOURCE / INSULIN_SOURCE / PUMP_STATUS and nothing else, PairingProfile(ADVERTISE_AND_WAIT, 'Mobile 000001'), the fault stream published separately from the state stream, connect(address:config:) ignoring address and honoring forceFirstPair, and the single 'single_peer_note' Connection-section InfoText rendered in SwiftUI. Hilt's singleton graph becomes one composition root that owns the shared serial queue, the peripheral manager, the central manager, the connection manager, the link and the gateway, and keeps the gated linkProvider that returns nil unless state == CONNECTED."
+      },
+      {
+        "capability": "JavaSake handshake and SeqCrypt \u2014 cryptographic reimplementation in Swift",
+        "why": "Classified as impossible to consume as a dependency (see below); what needs designing is the replacement. Apple ships no AES-CMAC: CryptoKit has HMAC and Poly1305 but no CMAC, and CommonCrypto exposes no public CMAC either. The SAKE server-role state machine (stages 0->1->3->5->6), Session, SeqCrypt with its per-direction sequence counters, KeyDatabase and DeviceType all need Swift equivalents.",
+        "options": [
+          "Implement RFC 4493 AES-CMAC (~60 lines) over CommonCrypto's CCCrypt AES-ECB single-block primitive, plus AES-CTR via CCCryptorCreateWithMode, and hand-port the SAKE state machine from OpenMinimed's GPL-3.0 sources.",
+          "Depend on CryptoSwift (MIT, SPM) for CMAC \u2014 adds a third-party crypto dependency with weaker review posture and no advisory-pinning story comparable to the bcprov 1.84 pin.",
+          "Vendor swift-crypto and add CMAC there \u2014 swift-crypto tracks BoringSSL's exposed surface and does not expose CMAC."
+        ],
+        "recommendation": "Option 1: a self-contained MedtronicSAKE SPM target with no third-party crypto dependency, AES primitives from CommonCrypto only, and every file citing its upstream OpenMinimed source file exactly as the Kotlin port does. Preserve the phone-as-SAKE-server / pump-as-SAKE-client role assignment, HANDSHAKE_COMPLETE_STAGE = 6, MESSAGE_SIZE = 20, newWakeUpFrame() allocating fresh zeros each call, the serverCrypt-encrypts-outbound / clientCrypt-decrypts-inbound direction mapping with its CipherDirectionConfirmationTest, the throw-before-stage-6 guard, and the not-thread-safe / one-queue-only contract. The bcprov 1.84 pin and the consumer ProGuard keep rules have no iOS analogue and simply disappear."
+      },
+      {
+        "capability": "Semgrep Kotlin/Java security gate and the AesEcb exclusion",
+        "why": "Semgrep parses Swift but ships no registry ruleset comparable to p/kotlin or p/java, so the Kotlin/Java coverage does not transfer at all. Meanwhile the Swift port will contain intentional AES-ECB (as the CMAC block primitive) that any crypto-misuse rule will flag, reproducing the original exclusion problem in a new toolchain.",
+        "options": [
+          "Keep Semgrep 1.169.0 pinned and keep p/secrets (language-agnostic, still fully applicable), replace p/kotlin and p/java with a repo-authored Swift ruleset, and add gitleaks or trufflehog as a second secrets layer.",
+          "Add SwiftLint with custom rules plus swift-format for style, and Periphery for dead code \u2014 style/hygiene, explicitly not a SAST substitute.",
+          "Add MobSF as an IPA/source-level mobile SAST gate \u2014 the closest real analogue to an APK SAST gate, and the documented revisit trigger (any therapeutic write surface) should point here.",
+          "Add Swift 6 strict concurrency (-strict-concurrency=complete) with warnings-as-errors \u2014 no Android analogue, and it mechanically catches the exact data-race class this driver's serial-queue discipline exists to prevent."
+        ],
+        "recommendation": "Satisfy the requirement in substance: (a) Semgrep pinned, p/secrets retained, plus a repo-authored Swift rule pack whose highest-value rules are subsystem-specific \u2014 no BLE write outside the WritableControlPoint allow-list, no Double-to-Int conversion without a preceding isFinite guard, no unchecked Data subscripting in ble/read, no health value or peer identifier in a log call at warning level or above; (b) gitleaks; (c) Swift 6 strict concurrency as a hard gate; (d) MobSF wired but advisory until a write surface exists; (e) fail on HIGH/ERROR only, WARNING/INFO printed, crashed scanner fails closed \u2014 identical gate policy. Document the intentional AES-ECB in an ADR and suppress it with an annotated inline directive rather than a path exclusion, since the Swift CMAC is authored in-tree and will be patched rather than re-vendored."
+      },
+      {
+        "capability": "tools/medtronic-ble-spike offline de-risk harness and the Simulator test strategy",
+        "why": "Core Bluetooth does not exist in the iOS Simulator (CBManagerState is always .unsupported), and the lead developer has no iPhone. The JVM spike proved two gating unknowns offline; the Swift port needs the equivalent, and iOS adds two new unknowns the JVM spike never covered (the client-link handoff and iOS-shaped advertising).",
+        "options": [
+          "Port the SAKE spike to a macOS/Simulator XCTest target replaying OpenMinimed's captured 780G pairing trace through a deterministic queued RNG, asserting stage-by-stage byte parity and SeqCrypt round-trip plus tamper rejection \u2014 runs everywhere, no hardware.",
+          "Introduce a MedtronicTransport protocol seam and a MedtronicSimulatedTransport that replays recorded pump responses, so the state machine, session reader, gateway, parsers and extractors are all exercisable in the Simulator.",
+          "Build a small companion peripheral-probe app (or use a second Mac with a BLE dongle) to stand in for the pump's central role during Daniel's hardware sessions.",
+          "Rely solely on hardware validation \u2014 rejected: nobody on the team owns a MiniMed 700-series pump."
+        ],
+        "recommendation": "Do 1 and 2 as hard prerequisites before any hardware session \u2014 they cover the SAKE handshake, all parsers, all safety gates, the reassembler, the paging walk and the state machine, which is the large majority of the subsystem. The Android peripheral-probe README's known-negative note (emulator has no radio) becomes the iOS Simulator's equivalent and must be stated as loudly. Accept that advertising, the client-link handoff, bonding behavior and background reconnect are hardware-only."
+      }
+    ],
+    "impossible": [
+      {
+        "capability": "BLE advertisement manufacturer-specific data (company ID 0x01F9, payload 0x00 || ASCII(localName) || 0x00)",
+        "why": "CBPeripheralManager.startAdvertising supports exactly two advertisement keys \u2014 CBAdvertisementDataLocalNameKey and CBAdvertisementDataServiceUUIDsKey. Apple provides no API to emit manufacturer-specific data, service data, or any other AD type from the peripheral role, on any iOS version, with or without an entitlement.",
+        "closest_alternative": "Carry the identity in CBAdvertisementDataLocalNameKey ('Mobile 000001') alongside the mode-appropriate service UUID and rely on the pump's Regex('Mobile .{0,7}') name match. The strong supporting evidence is that Medtronic's own MiniMed Mobile for iOS pairs with these same pumps under the identical Apple restriction, which means the pump's discovery filter cannot require manufacturer data. This must nonetheless be treated as unproven until hardware-validated."
+      },
+      {
+        "capability": "Advertising mode, TX power, timeout and connectable-flag control (ADVERTISE_MODE_LOW_LATENCY vs BALANCED, ADVERTISE_TX_POWER_MEDIUM, timeout=0, setIncludeTxPowerLevel)",
+        "why": "Core Bluetooth exposes no advertising interval, PHY, TX power, duty cycle, timeout or connectability parameters. iOS chooses the advertising interval itself and varies it with app state, device state and radio contention. There is no entitlement or private-adjacent API for this.",
+        "closest_alternative": "Reduce advertisingModeFor(paired, forceFirstPair) to selecting only the advertised service UUID (SIG 0xFE82 first-pair vs 0xFE81 reconnect) and delete the interval/power knobs. The RECONNECT rationale (paired pumps scan infrequently and miss long advertising intervals) becomes an unmitigable risk on iOS rather than a tunable, and must be recorded as such."
+      },
+      {
+        "capability": "Discoverability by the pump while the app is backgrounded",
+        "why": "When an iOS app advertises from the background, Core Bluetooth ignores CBAdvertisementDataLocalNameKey entirely and moves all service UUIDs into a proprietary 'overflow' area that only iOS devices explicitly scanning for those exact UUIDs can decode. A Medtronic pump scanning for a name matching 'Mobile .{0,7}' or for service 0xFE82 therefore cannot discover a backgrounded iPhone. This is documented Apple behavior and cannot be configured or entitled around.",
+        "closest_alternative": "First-time pairing must require the app to be open and in the foreground, stated explicitly in the pairing doc and enforced in the UI (start advertising only from the visible pairing screen). For reconnection after a bond exists, the connectable advertisement is still emitted in the background and a central that reconnects by stored peer identity rather than by name will still find it \u2014 which is what Medtronic's own iOS app must rely on \u2014 but this is unverified for this pump and cannot be assumed. Provide a time-sensitive local notification prompting the user to open the app when the link has been down beyond a threshold."
+      },
+      {
+        "capability": "Programmatic bond removal on unpair (BluetoothDevice.removeBond() via reflection)",
+        "why": "iOS exposes no public or private-adjacent API to remove a Bluetooth bond. Bonds are system-owned and can only be cleared by the user in Settings > Bluetooth > (i) > Forget This Device, or by erasing the device. There is no entitlement that grants this.",
+        "closest_alternative": "unpair() clears the app-side Keychain pairing record, tears down advertising and the session, sets autoReconnect=false, and then presents an explicit two-step instruction to the user to forget 'Mobile 000001' (or the pump entry) in iOS Settings, ideally with a deep link to App-Prefs or at minimum a screenshot. The pairing doc and the failure-message table must both be updated, because a stale bond that the app believes is cleared is a real support-load hazard."
+      },
+      {
+        "capability": "Consuming org.openminimed:javasake:0.2.0 (and org.bouncycastle:bcprov-jdk18on:1.84) as a binary dependency",
+        "why": "There is no JVM on iOS and no supported way to load or execute Java bytecode; iOS additionally forbids dynamic code loading, which is the same rule that turned the plugin architecture into compile-time modules. Neither the SAKE artifact nor BouncyCastle can be bridged, wrapped, or transpiled into a shipping iOS build.",
+        "closest_alternative": "A clean-room Swift reimplementation of the SAKE state machine, Session, SeqCrypt, KeyDatabase and DeviceType, with AES-CMAC implemented per RFC 4493 over CommonCrypto's AES-ECB primitive and AES-CTR via CCCryptorCreateWithMode. GPL-3.0 permits this outright and the iOS project is GPL-3.0, so copyleft propagation remains a non-issue; each Swift file must cite its upstream OpenMinimed source file exactly as the Kotlin port does, and palmarci's attribution must carry into the iOS THIRD_PARTY_LICENSES equivalent. Acceptance is byte-parity against OpenMinimed's captured 780G pairing trace, replayed in XCTest with a deterministic RNG \u2014 the same gate the JVM spike used."
+      },
+      {
+        "capability": "Hosting the Medtronic driver on Apple Watch (watchOS as the pump's BLE peer)",
+        "why": "watchOS provides no bluetooth-peripheral background mode and no supported path for sustained BLE peripheral advertising; watchOS apps are aggressively suspended outside extended runtime sessions, which are user-initiated and time-boxed. Independently of the API surface, the pump binds to exactly one phone at a time, so a watch-hosted peer would displace the iPhone rather than supplement it.",
+        "closest_alternative": "The iPhone remains the sole pump peer. The Watch app receives sensor glucose, IOB, active basal, reservoir, battery and connection state over WatchConnectivity from the phone, with the backend as a secondary source when the phone is unreachable, and surfaces them in complications and the Smart Stack. Note that watchOS has no custom watch faces, so the Android watch-face path has no analogue and complications plus a Smart Stack widget are the ceiling."
+      }
+    ],
+    "ios_requirements": [
+      "A user must be able to pair a MiniMed 680G/770G/780G by opening a pairing screen in the app, seeing the phone become discoverable as 'Mobile 000001', selecting that name on the pump, and watching the app move through waiting -> connecting -> connected, without entering any code, creating a Medtronic account, or using a browser.",
+      "The pairing screen must state, before the user starts, that the pump must first be removed from MiniMed Mobile or any other phone, and that the app must stay open and in the foreground for the whole first-time pairing.",
+      "The system must surface each distinct pairing failure with its own message and a Try Again action: no pump has connected yet (60 s first-pair window elapsed), Bluetooth is off or permission denied, could not start advertising, the secure handshake timed out (30 s), and the pump rejected the secure handshake.",
+      "A terminal handshake rejection must latch: the app must stop advertising, must not auto-reconnect, and must require the user to explicitly retry pairing.",
+      "Once paired, the app must reconnect to the pump on its own whenever the app is running, and must tell the user when a reconnect has not succeeded for a sustained period rather than silently showing stale data.",
+      "The app must be able to receive and serve pump-initiated Bluetooth events while backgrounded, including being relaunched into the background by the system after termination, and must re-establish a fresh secure session on every such relaunch without requiring the user to re-pair.",
+      "The system must never persist secure-session cipher state across app termination; a restored connection must always begin a new handshake.",
+      "A user must be able to unpair the pump from within the app, and the app must then instruct the user to also forget the device in iOS Settings, because the app cannot remove the Bluetooth bond itself.",
+      "The app must read, from the pump only: sensor glucose with a trend arrow, insulin on board, active basal rate, delivered bolus history, reservoir volume, pump battery percentage, and pump model/serial/firmware identity.",
+      "The app must never write any therapeutic value to the pump. This must be enforced at three independent layers: a transport allow-list permitting writes only to RACP 0x2A52, CGM SOCP 0x2AAC and IDD SRCP 0x105; construction of GET/report-class opcodes only; and a driver that declares no control capability.",
+      "The app must reject rather than clamp any out-of-range physiological value: sensor glucose outside 20\u2013500 mg/dL, reservoir outside 0\u2013300 IU, IOB outside 0\u2013100 IU, basal above 15 U/h, bolus above 25 U, battery outside 1\u2013100%.",
+      "The app must reject any value decoded from a reserved IEEE-11073 no-value sentinel and must never present it as a reading or as a trend arrow.",
+      "A malformed, truncated, or hostile pump response must produce a reported read failure, never an application crash and never a fabricated reading.",
+      "The app must never advance a history cursor past a record the pump actually sent: an undecodable frame must fail its page, a failed page must fail the whole history call, the paging walk must be driven by the requested sequence window rather than by page content, and a recovered final record must pass a structural-completeness check before acceptance.",
+      "The app must serialize all pump exchanges so that only one is in flight at a time, and must guarantee that a long history backfill cannot starve the recurring glucose read.",
+      "A cancelled or timed-out exchange must leave no live notification subscription behind, so the next exchange starts from a clean session state.",
+      "Glucose must be handled in mg/dL end to end; no mmol/L conversion may be introduced without a verified sample from a mmol/L-display pump.",
+      "History timestamps must be resolved from the pump's naive local reference time interpreted in the phone's current time zone; records with no resolvable reference time must be dropped rather than shown with a guessed time.",
+      "SmartGuard auto-basal micro-boluses must remain excluded from bolus totals, and the app must state this limitation to the user.",
+      "Pump pairing identity must persist in the Keychain with an accessibility class that permits reading after first unlock, so a background reconnect works while the device is locked.",
+      "No log line at warning level or above may contain a health value, a raw pump payload, or a peer device identifier, because warning-level logs are forwarded to error reporting.",
+      "The full driver below the Bluetooth transport \u2014 state machine, handshake, session reader, gateway, all parsers, all extractors and all safety gates \u2014 must be exercisable in the iOS Simulator against a simulated transport, and the secure-handshake implementation must be verified in CI against a captured real-pump pairing trace with no hardware present.",
+      "A maintainer must be able to fork the repository, supply their own Apple Developer credentials as repository secrets, and get a signed build delivered to their own TestFlight from GitHub Actions, with no project-published binary and no App Store submission.",
+      "The build must ship with UIBackgroundModes bluetooth-central and bluetooth-peripheral, NSBluetoothAlwaysUsageDescription, and Core Bluetooth restore identifiers on both the central and peripheral managers.",
+      "CI must gate on: a pinned secrets scan, a repo-authored Swift static-analysis rule set covering the driver's read-only allow-list and its numeric-safety and log-redaction invariants, Swift 6 strict concurrency with warnings as errors, a committed Package.resolved treated as the lockfile, and a dependency advisory scan \u2014 failing on high-severity findings only and failing closed if a scanner crashes.",
+      "The Apple Watch must display sensor glucose, IOB, active basal, reservoir, battery and pump connection state sourced from the phone or the backend, and must never attempt to connect to the pump itself.",
+      "The connection and pairing state must be visible to the user without opening the app, via a Live Activity while a session is active and via a time-sensitive notification when the pump link has been lost long enough to matter."
+    ],
+    "risks": [
+      {
+        "risk": "There is no documented way to obtain a CBPeripheral for the device that just connected to your CBPeripheralManager. If neither retrieveConnectedPeripherals(withServices:) nor retrievePeripherals(withIdentifiers: [central.identifier]) yields a usable handle to the pump, the entire read layer is unreachable and the driver cannot exist on iOS even though the SAKE handshake completes.",
+        "severity": "critical",
+        "mitigation": "Make this the first hardware experiment, ahead of any read-layer work. Build a minimal probe app that stands up the SAKE service, waits for a real 780G to connect and subscribe, then tries both retrieval paths and logs the outcome. Isolate the resolution behind a MedtronicPumpLinkResolver protocol so the rest of the driver is unaffected by which path wins. If both fail, the honest outcome is that Medtronic-on-iOS is blocked, and that must be known before the parser layer is built."
+      },
+      {
+        "risk": "iOS cannot emit the manufacturer-specific advertisement payload the pump's discovery filter may require. If the 700-series matches on manufacturer data rather than the GAP local name, no iPhone can ever pair.",
+        "severity": "critical",
+        "mitigation": "The existence of Medtronic's own MiniMed Mobile for iOS, subject to the identical Apple restriction, is strong evidence the pump matches on the GAP name and/or service UUID. Confirm on hardware in the same probe session as the link-handoff test. Do not build further pairing UX until confirmed."
+      },
+      {
+        "risk": "Nobody on the team owns a MiniMed 700-series pump. The Android driver already ships as BETA and unverified on hardware, and the iOS port adds four new unverified surfaces on top: advertising shape, bonding/IO-capability behavior, the client-link handoff, and background reconnect. Every safety-critical behavior below the transport is provable offline, but nothing at the transport is.",
+        "severity": "critical",
+        "mitigation": "Ship the offline SAKE parity harness and the simulated-transport test suite as hard prerequisites so the provable majority is genuinely proved. Gate the iOS Medtronic driver behind an explicit BETA/unverified flag with the same README language the Android repo uses. Prioritize recruiting a 780G tester; this is a product decision, not an engineering one."
+      },
+      {
+        "risk": "iOS cannot declare a NoInputNoOutput IO capability. The pump requests MITM with legacy pairing; an iPhone presenting DisplayYesNo or KeyboardDisplay may negotiate a passkey or numeric-comparison association model instead of Just Works, producing a system pairing prompt the Android path never showed \u2014 or a pairing failure.",
+        "severity": "high",
+        "mitigation": "Do not mark any local characteristic as requiring encryption (the SAKE characteristic uses plain write permission today), which avoids initiating pairing from our side. Test whether a bond forms at all on real hardware. If a system prompt appears, document it in the pairing procedure as an expected step rather than treating it as a fault."
+      },
+      {
+        "risk": "Swift traps rather than throws on the three failure modes this driver's parsers depend on: array/Data out-of-range subscripting, integer overflow, and Double-to-Int conversion of NaN or infinity. Every path where Kotlin threw a catchable exception and degraded gracefully becomes an uncatchable process crash. A crash in a diabetes-monitoring app while the user is relying on it is materially worse than the rejected read the Android code produces.",
+        "severity": "high",
+        "mitigation": "Mandate explicit guard-based bounds checks returning typed errors in every parser, explicit widening or &-operators for all accumulation arithmetic, and an isFinite guard before every Double-to-Int conversion. Enforce all three with repo-authored static-analysis rules over the ble/read and ble/messages targets. Add fuzz/property tests feeding random and truncated byte arrays into every parse entry point and asserting a thrown error rather than a crash."
+      },
+      {
+        "risk": "Data slices in Swift carry a non-zero startIndex. An index-based parser ported literally from Kotlin's zero-based ByteArray will silently read the wrong offsets after the first slicing operation, producing plausible-looking but wrong glucose, IOB and bolus values rather than failing.",
+        "severity": "high",
+        "mitigation": "Convert every incoming payload to [UInt8] at the transport boundary, or index exclusively via offsets relative to startIndex. Add a test that feeds each parser a payload embedded in a larger Data slice and asserts identical output to the zero-based case."
+      },
+      {
+        "risk": "The pump drops idle connections at roughly 30 s and the driver depends on a 15 s poll as its keep-alive. iOS suspends the app between BLE events and gives roughly 10 s of runtime per wake; timers do not fire while suspended. A backgrounded iPhone may therefore drop the link and \u2014 because background advertising is not discoverable by name \u2014 fail to get it back.",
+        "severity": "high",
+        "mitigation": "Drive background operation from BLE events (disconnect, unsubscribe, notification arrival) rather than a wall clock, and design for the disconnect itself to be the wake source. Add a Live Activity so the app has a user-visible reason to be alive. Measure real background survival on Daniel's hardware over multi-hour sessions before claiming parity with Android's foreground service. Fall back to a time-sensitive notification prompting the user to open the app."
+      },
+      {
+        "risk": "Swift actors do not guarantee FIFO ordering of awaiting continuations, whereas kotlinx.coroutines.Mutex is documented fair. A naive actor-based port of readMutex silently loses the property that keeps a 15 s glucose keep-alive from being starved by a multi-page history backfill \u2014 which in turn causes the pump's 30 s idle timeout to fire.",
+        "severity": "high",
+        "mitigation": "Implement an explicit FIFO async lock with an ordered continuation queue and unit-test its ordering under contention. Ban bare actors for the gateway's single-flight and history mutexes in the code-review checklist."
+      },
+      {
+        "risk": "The SAKE session's per-direction sequence counters desync permanently if a late or duplicate notification is decrypted after an exchange has finished. Swift's cancellation semantics differ enough from kotlinx's that a literal port of the three guards (per-exchange finished flag, subscription watchdog, single-flight lock) may leave a gap \u2014 particularly because setNotifyValue(false) is asynchronous and a cancelled task's defer runs at an unpredictable point.",
+        "severity": "high",
+        "mitigation": "Drop notification handlers synchronously inside withTaskCancellationHandler before deferring any disable, keep the 30 s subscription watchdog as an independent backstop, and keep both identity guards (peripheral replaced by reconnect, characteristic re-subscribed by a newer exchange). Add a test that cancels an exchange mid-stream and asserts the next exchange decrypts correctly."
+      },
+      {
+        "risk": "Semgrep's p/kotlin and p/java coverage does not transfer to Swift, so a literal tool-name port of the security gate would leave the iOS driver with materially less static analysis than the Android one, on the same safety-critical code.",
+        "severity": "medium",
+        "mitigation": "Satisfy the requirement in substance: retain the language-agnostic p/secrets pack, add gitleaks, author a Swift rule set targeting this subsystem's actual invariants (write allow-list, isFinite-before-conversion, unchecked Data subscripting, PHI in warning-level logs), add Swift 6 strict concurrency as a hard gate, and wire MobSF as the advisory IPA-level analogue with the same documented revisit trigger. Keep the identical gate policy: fail on high/error only, fail closed on scanner crash."
+      },
+      {
+        "risk": "TestFlight builds expire 90 days after upload, and internal testing requires each tester to be an App Store Connect user on the builder's own account. A user who builds once and forgets will silently lose their pump connection when the build expires.",
+        "severity": "medium",
+        "mitigation": "Ship a scheduled GitHub Actions workflow in the fork template that rebuilds and re-uploads on a cadence comfortably inside 90 days, and document the expiry prominently in the fork-and-build guide. Note that internal-only distribution avoids Beta App Review entirely, so the rebuild is unattended."
+      },
+      {
+        "risk": "CBCentral.identifier / CBPeripheral.identifier are not stable across app reinstall or after the user forgets the device in iOS Settings. A pairing record keyed on that UUID will appear valid while pointing at nothing, producing a paired-but-never-reconnects state that looks identical to a pump out of range.",
+        "severity": "medium",
+        "mitigation": "Key durable identity on the pump's DIS serial number, read once after the first successful session, and treat the peer UUID as a cache. Distinguish 'paired, identifier not resolving' from 'paired, pump not in range' in the fault enum so the UI can offer re-pair rather than an indefinite wait."
+      },
+      {
+        "risk": "CBPeripheralManager rejects an attempt to add a CCCD (0x2902) as a CBMutableDescriptor and raises an exception. A literal port of the Android GATT-server construction crashes at startup.",
+        "severity": "medium",
+        "mitigation": "Delete all CCCD construction and the ungated descriptor-read workaround from the port; rely on didSubscribeTo / didUnsubscribeFrom. Cover this with a Simulator-runnable test that builds the local service tree (service construction does not require a powered radio) and asserts no descriptor is added to the SAKE characteristic."
+      },
+      {
+        "risk": "The reverse-engineering document the Kotlin source cites by section throughout (Sec. 3 topology, 4-5 SAKE, 6 MTU, 7 single-peer, 8 GATT map, 9 E2E-CRC, 11 threading) is not in the Android repository. The iOS port would inherit citations pointing at nothing, and any protocol question that arises during hardware validation has no authoritative reference to consult.",
+        "severity": "medium",
+        "mitigation": "Reconstruct the document from the Kotlin in-source comments as part of the port (they are complete enough to do so) and commit it to the iOS repo, so the Swift files cite something that exists. Do this before hardware validation, not after."
+      }
+    ],
+    "questions_for_pm": [
+      "Is Medtronic 700-series support a blocking parity requirement for the iOS release, or an explicitly at-risk device? Two iOS-only unknowns \u2014 whether the pump will discover an iPhone that cannot advertise manufacturer-specific data, and whether Core Bluetooth can be made to open a client link back to the pump that just connected to us \u2014 can only be settled against a real 780G, and nobody on the team owns one (Daniel has a Tandem t:slim X2). If Medtronic must ship at parity, the project needs to fund or recruit a 780G tester before the driver architecture is committed; if it can ship as at-risk BETA behind a flag, the offline-provable majority can be built and validated in the Simulator now and the transport left unproven, matching the Android repo's existing posture."
+    ]
+  }
+}

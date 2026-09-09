@@ -1,0 +1,957 @@
+{
+  "key": "release-and-signing",
+  "label": "Release, promotion, signing, and dependency management",
+  "map": {
+    "subsystem": "Release, promotion, signing, and dependency management (GlycemicGPT android-unofficial)",
+    "capabilities": [
+      {
+        "name": "Promotion pipeline topology (develop -> main)",
+        "behavior": "Two long-lived branches. All contributor PRs target `develop` (squash-merged); `main` is release-only. A maintainer promotes with `gh pr create --base main --head develop --title \"chore: promote develop to main\"`, merged as a real merge commit (not squash) to preserve ancestry. That single push to `main` fans out to three workflows keyed off `github.event.head_commit.message`: release.yml (version + signed APK), changelog-pr.yml (CHANGELOG PR), sync-main-to-develop.yml (cherry-pick back). Loop avoidance is entirely message-string based: changelog fires on `promote develop to main` and NOT on `[Changelog]`/`chore: release`; sync fires ONLY on `chore: release` or `[Changelog] Update CHANGELOG.md`; so the promotion commit never re-triggers sync and the bot commits never re-trigger the changelog. Documented status: built, unit-proven in parts, never exercised end-to-end live.",
+        "user_visible": false,
+        "key_files": [
+          "docs/dev/release-and-promotion.md",
+          "CONTRIBUTING.md"
+        ]
+      },
+      {
+        "name": "release.yml job graph and gating",
+        "behavior": "Triggers: push to `main`, plus workflow_dispatch. Concurrency `release-${github.ref}`, cancel-in-progress false. Top-level `permissions: contents: read` \u2014 every write uses a scoped GitHub App token; read-only checkouts set `persist-credentials: false`. Jobs: (1) release-please; (2) auto-merge-release, `if: needs.release-please.outputs.pr != ''`; (3) detect-deployable-changes, `if release_created != 'true' && pr == '' && head_commit.message contains 'promote develop to main'`; (4) fallback-release, same condition AND `has_deployable_changes == 'true'`; (5) release-android-apk, `if: always() && !cancelled() && !contains(needs.*.result,'failure') && (release-please.release_created=='true' || fallback-release.release_created=='true')`. Jobs 1,2,4,5 declare `environment: release-gated`, which holds the only copies of the RELEASE/MERGE app keys and pauses each run for a required-reviewer approval.",
+        "user_visible": false,
+        "key_files": [
+          ".github/workflows/release.yml"
+        ]
+      },
+      {
+        "name": "release-please configuration and version scheme",
+        "behavior": "release-please-action v4.4.1 (SHA 5c625bfb5d1ff62eadeeb3772007f7f66fdcf071) with `release-please-config.json` + `.release-please-manifest.json`. Config: bootstrap-sha `53bd47b72639ccf7fc132a7a1e33265e0d744042`; single package `.`; release-type `simple`; package-name `glycemicgpt-android-unofficial`; `bump-minor-pre-major: true`; draft false; prerelease false; `include-component-in-tag: false`; `include-v-in-tag: true` (tags are `vX.Y.Z`); PR title pattern `chore: release ${version}`; extra-files = app/, wear-device/, watchface/ `build.gradle.kts`. Manifest currently `{\".\": \"0.14.0\"}`. Each module carries `val appVersionName = \"0.14.0\" // x-release-please-version`; versionCode is derived in Gradle as `major*1_000_000 + minor*10_000 + patch`. Conventional-commit visibility: feat/fix/perf/docs/refactor/ci visible in CHANGELOG; chore/test hidden. release-type `simple` also makes release-please the owner of CHANGELOG.md.",
+        "user_visible": false,
+        "key_files": [
+          "release-please-config.json",
+          ".release-please-manifest.json",
+          "app/build.gradle.kts",
+          "wear-device/build.gradle.kts",
+          "watchface/build.gradle.kts"
+        ]
+      },
+      {
+        "name": "Release PR auto-merge",
+        "behavior": "When release-please returns a non-empty `pr` output, the auto-merge-release job mints a `glycemicgpt-merge` App token (MERGE_APP_ID / MERGE_APP_PRIVATE_KEY, resolvable only inside `release-gated`), extracts the first integer from the PR output with `grep -oE '[0-9]+' | head -1`, and runs `gh pr merge <n> --squash --admin`. No content validation on this PR (unlike the changelog and sync merges) \u2014 the trust anchor is that release-please authored it and the environment approval gate fired. If no numeric PR id can be parsed it prints \"No PR number found\" and exits successfully.",
+        "user_visible": false,
+        "key_files": [
+          ".github/workflows/release.yml"
+        ]
+      },
+      {
+        "name": "Deployable-change detection for the fallback release",
+        "behavior": "Runs only for a promotion merge that produced neither a release nor a release PR. Checks out with `fetch-depth: 2`, diffs `git diff --name-only <sha>^1 <sha>` (merge commit vs first parent = main before merge), and greps the changed paths against `^(app/|wear-device/|watchface/|plugins/|gradle/|gradlew|settings\\.gradle\\.kts|settings-gradle\\.lockfile|build\\.gradle\\.kts|gradle\\.properties)`. Any match sets `has_deployable_changes=true`. Deliberate decision: doc-only promotions (README, GOVERNANCE, CLAUDE.md, docs/) must NOT cut a versioned signed release, so they produce no output and the fallback job is skipped.",
+        "user_visible": false,
+        "key_files": [
+          ".github/workflows/release.yml"
+        ]
+      },
+      {
+        "name": "Fallback patch release",
+        "behavior": "Covers a promotion whose commits are all chore/ci/docs/test (release-please skips) but which changed deployable code. Reads CURRENT from `git show <github.sha>:.release-please-manifest.json | jq -r '.[\".\"]'` \u2014 read from the immutable triggering SHA so a rerun cannot compute a different version after the first run already bumped main. Splits on '.', increments PATCH, VERSION=M.m.p+1, TAG=vVERSION. If the tag already exists it sets `already_exists=true` and skips the bump. Otherwise it jq-rewrites the manifest, `sed`-rewrites `val appVersionName = \"CURRENT\"` -> VERSION in the three module build.gradle.kts, and greps each file to verify the rewrite (hard fail otherwise). Git identity is `glycemicgpt-release[bot] <glycemicgpt-release[bot]@users.noreply.github.com>`.",
+        "user_visible": false,
+        "key_files": [
+          ".github/workflows/release.yml"
+        ],
+        "edge_cases": [
+          "Idempotent rerun: if nothing is staged (`git diff --cached --quiet`) it skips the commit rather than aborting, so tag/release steps can still finish a run that died after the push.",
+          "`git pull --rebase origin main` before pushing; on conflict it aborts the rebase and fails the job.",
+          "`git push --atomic origin main refs/tags/$TAG` \u2014 branch and lightweight tag land together or not at all; `--follow-tags` would not push a lightweight tag and letting `gh release create` mint the tag would anchor it to whatever main HEAD is.",
+          "Rerun path: if the tag exists but no GitHub Release does (a run died between push and release), the job creates the Release from the existing tag with `--verify-tag`, then reports release_created=true."
+        ]
+      },
+      {
+        "name": "Release APK build and asset naming",
+        "behavior": "Checks out the release tag with `persist-credentials: false`, JDK 17 (temurin), gradle/actions/setup-gradle v6.2.0, loads release signing from 1Password, then: `./gradlew :app:assembleRelease` (required, fails the job), `:wear-device:assembleRelease` and `:watchface:assembleRelease` both with `continue-on-error: true`. Renames by `find`+`head -1`: `GlycemicGPT-${VERSION}-release.apk` (phone, missing = hard error), `GlycemicGPT-Wear-${VERSION}-release.apk` (missing = warning only here), `GlycemicGPT-WatchFace-Digital-${VERSION}-release.apk` from `watchface/build/outputs/apk/digitalFull/release`, `GlycemicGPT-WatchFace-Analog-${VERSION}-release.apk` from `analogMechanical/release`. Uploads all with `gh release upload $TAG GlycemicGPT-*-release.apk --clobber` using a fresh glycemicgpt-release token, and also as workflow artifact `release-apk`, retention 90 days. `if: always()` step rm's the materialized keystore.",
+        "user_visible": true,
+        "key_files": [
+          ".github/workflows/release.yml"
+        ],
+        "edge_cases": [
+          "Wear build failure is tolerated at build time (so its own step reports the failure) but is fatal at the cert-verification step, per parity-gate global rule 4.",
+          "VERSION in the asset filename is always MAJOR.MINOR.PATCH \u2014 the in-app updater's anchored regex depends on it."
+        ]
+      },
+      {
+        "name": "Release signing-certificate assertion",
+        "behavior": "Hardcoded `RELEASE_SIGNER_SHA256=55f0d0cdabf20b398ad30a0ce3e998e3192666e5c15e6d378b86e1c8de342990` in the job env. Resolves apksigner from the highest `$ANDROID_HOME/build-tools/*` by `sort -V | tail -1`, falling back to `apksigner` on PATH. For phone AND wear (both required; missing file = hard error) it runs `apksigner verify --print-certs`, greps `SHA-256 digest`, extracts `[0-9a-fA-F]{64}`, lowercases, takes the first, and fails the job on mismatch or empty. Reason this exists: both release buildTypes silently fall back to the DEBUG signing config when `RELEASE_KEYSTORE_FILE` is unset, so without this assertion a debug-signed 'release' would reach users. WatchFace APKs are deliberately excluded \u2014 they are unsigned/debug-signed by long-standing pre-split behavior and users consume the committed in-app WFF assets instead.",
+        "user_visible": true,
+        "key_files": [
+          ".github/workflows/release.yml",
+          "app/build.gradle.kts",
+          "wear-device/build.gradle.kts",
+          "watchface/build.gradle.kts"
+        ],
+        "edge_cases": [
+          "`|| true` on the digest pipeline is intentional so an unmatched grep under `set -euo pipefail` doesn't bypass the friendlier ::error:: message; apksigner's own stderr still reaches the log.",
+          "APK filenames are routed through `env:` (PHONE_APK/WEAR_APK) rather than interpolated into the shell source, to avoid template injection."
+        ]
+      },
+      {
+        "name": "Gradle signingConfigs and the debug-fallback",
+        "behavior": "All three modules read signing entirely from environment variables \u2014 no keystore path or password is in the repo. debug config is only overridden when `DEBUG_KEYSTORE_FILE` is non-blank; then `DEBUG_KEYSTORE_PASSWORD`/`DEBUG_KEY_ALIAS`/`DEBUG_KEY_PASSWORD` are `requireNotNull` with explicit messages. Local dev with no env falls back to `~/.android/debug.keystore`. `release` config is populated from `RELEASE_KEYSTORE_FILE`/`_PASSWORD`, `RELEASE_KEY_ALIAS`/`RELEASE_KEY_PASSWORD`. In app and wear-device the release buildType chooses `signingConfigs.getByName(\"release\")` if `RELEASE_KEYSTORE_FILE != null`, else `\"debug\"` \u2014 the silent fallback. watchface's release buildType unconditionally uses the debug config (documented: a dedicated release keystore comes when production distribution is set up; Watch Face Push does not enforce Play Store signing) and sets `vcsInfo { include = false }`.",
+        "user_visible": true,
+        "key_files": [
+          "app/build.gradle.kts",
+          "wear-device/build.gradle.kts",
+          "watchface/build.gradle.kts"
+        ]
+      },
+      {
+        "name": "op-load-signing-secrets composite action",
+        "behavior": "Input `keystore` must be exactly `release` or `debug` (validated, else ::error). Requires `OP_SERVICE_ACCOUNT_TOKEN` in the calling job env; fail-closed with a pointer to docs/dev/signing-and-secrets.md if unset. Installs the 1Password CLI (1password/install-cli-action v4.0.0, SHA a5215d3a7f75c1629216c465ea9ab3ab399c4b71), then uses 1password/load-secrets-action v4.0.1 (SHA 3a12b0ab99d9cd590a3e9b5a90ea017210ed9556, `export-env: true`) to resolve the three text fields for the chosen identity into masked env vars. Materialize step: `umask 077`, `trap 'rm -f $dest' ERR`, `rm -f $dest`, `op read op://github/android-signing/<release.jks|debug.keystore> --out-file $RUNNER_TEMP/<name> --force`, `chmod 600`. Emits output `keystore-path` and writes `RELEASE_KEYSTORE_FILE`/`DEBUG_KEYSTORE_FILE` to `$GITHUB_ENV` (inline `# zizmor: ignore[github-env]`).",
+        "user_visible": false,
+        "key_files": [
+          ".github/actions/op-load-signing-secrets/action.yml",
+          "docs/dev/signing-and-secrets.md"
+        ],
+        "edge_cases": [
+          "The action deliberately does NOT redeclare OP_SERVICE_ACCOUNT_TOKEN: composite actions cannot read `secrets`, and redeclaring from an empty context would clobber the inherited value.",
+          "`--force` prevents a hang on the overwrite prompt on persistent/self-hosted runners.",
+          "Composite actions cannot register a post-job step, so callers must add their own `if: always()` rm of keystore-path."
+        ]
+      },
+      {
+        "name": "1Password secret model",
+        "behavior": "Single source of truth: vault `github`, item `android-signing`; every reference is `op://github/android-signing/<name>`. File attachments (`release.jks`, `debug.keystore`) must be read with the op CLI \u2014 load-secrets-action cannot resolve attachments. Text fields: RELEASE_KEYSTORE_PASSWORD, RELEASE_KEY_ALIAS, RELEASE_KEY_PASSWORD, DEBUG_KEYSTORE_PASSWORD, DEBUG_KEY_ALIAS, DEBUG_KEY_PASSWORD \u2014 names already match the Gradle env-var names, exported 1:1. Non-sensitive `canary` field = \"ok\". The ONLY signing-related GitHub secret is `ANDROID_ACTIONS_SERVICE_ACCOUNT`, a read-only service-account token scoped to that vault, mapped by callers to `OP_SERVICE_ACCOUNT_TOKEN`. Stated guarantee: a leaked token can only read `android-signing`; rotation is a one-line GitHub-secret change with no keystore re-issuance. `*_KEYSTORE_FILE` is the only name the action synthesizes and is not itself secret.",
+        "user_visible": false,
+        "key_files": [
+          "docs/dev/signing-and-secrets.md",
+          ".github/actions/op-load-signing-secrets/action.yml"
+        ]
+      },
+      {
+        "name": "Signing plumbing smoke tests",
+        "behavior": "Two `workflow_dispatch`-only workflows, both `permissions: contents: read`. secrets-plumbing-check.yml installs only the op CLI and resolves ONLY `op://github/android-signing/canary`, asserting non-empty without echoing it; prints `1Password plumbing OK`. Run after token rotation. signing-action-smoke.yml runs the real composite action with `keystore: debug` and asserts three things: `DEBUG_KEYSTORE_FILE` was exported, the `keystore-path` output equals it, and the file exists and is non-empty (`-s`); prints only paths, never bytes. Both end with an `if: always()` keystore rm. Documented constraint: GitHub only exposes the Run-workflow control (and `gh workflow run`) once a workflow_dispatch workflow reaches the default branch `main`, so neither is dispatchable while it lives only on `develop`.",
+        "user_visible": false,
+        "key_files": [
+          ".github/workflows/secrets-plumbing-check.yml",
+          ".github/workflows/signing-action-smoke.yml"
+        ]
+      },
+      {
+        "name": "GitHub App identity model",
+        "behavior": "Four Apps, all minted per-job with actions/create-github-app-token v3.2.0 (SHA bcd2ba49218906704ab6c1aa796996da409d3eb1); the ambient GITHUB_TOKEN is never used for a write. `glycemicgpt-release` (RELEASE_APP_ID / RELEASE_APP_PRIVATE_KEY) \u2014 release-please, fallback version-bump push/tag/release, APK asset upload, changelog branch+PR. `glycemicgpt-merge` (MERGE_APP_ID / MERGE_APP_PRIVATE_KEY) \u2014 admin-merges the release PR, the changelog PR, and the sync PR. `glycemicgpt-ci` (CI_APP_ID / CI_APP_PRIVATE_KEY) \u2014 publishes dev-latest, labels PRs (best-effort, `continue-on-error`, falls back to GITHUB_TOKEN). `glycemicgpt-renovate` (RENOVATE_APP_ID / RENOVATE_APP_PRIVATE_KEY, `permission-contents: write` only) \u2014 pushes regenerated lockfiles. RELEASE and MERGE keys exist only as `release-gated` environment secrets, so every job that mints them pauses for required-reviewer approval.",
+        "user_visible": false,
+        "key_files": [
+          ".github/workflows/release.yml",
+          ".github/workflows/changelog-pr.yml",
+          ".github/workflows/sync-main-to-develop.yml",
+          ".github/workflows/dev-pre-release.yml",
+          ".github/workflows/regen-gradle-lockfiles.yml"
+        ]
+      },
+      {
+        "name": "Changelog cutoff-marker windowing",
+        "behavior": "changelog-pr.yml runs on push to main / workflow_dispatch, `permissions: {}`, concurrency group `changelog-pr` (serialized, not cancelled \u2014 two same-day promotions would otherwise race the force-with-lease push on `changelog/<DATE>`). Job condition: (workflow_dispatch OR head_commit.message contains 'promote develop to main') AND NOT contains '[Changelog]' AND NOT contains 'chore: release'. Lower bound SINCE comes from `<!-- changelog-cutoff:<ISO8601> -->` in CHANGELOG.md, validated against `^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[Z+]` (hard fail otherwise, anti-injection). Fallbacks in order: last `## YYYY-MM-DD` or release-please `## [x.y.z](...) (YYYY-MM-DD)` header + 1 day at 00:00:00Z; else `2025-01-01T00:00:00Z`. Upper bound UNTIL = `github.event.head_commit.timestamp`, or `git log -1 --format=%cI origin/main` for dispatch; normalized to UTC; TODAY = its date part.",
+        "user_visible": false,
+        "key_files": [
+          ".github/workflows/changelog-pr.yml"
+        ]
+      },
+      {
+        "name": "Merged-PR collection via GraphQL",
+        "behavior": "Paginated GraphQL `search(type: ISSUE, first: 100, after: $cursor)` with query `repo:<owner/repo> is:pr is:merged base:develop merged:$SINCE..$UNTIL`, accumulating nodes (number, title, url, mergedAt, author.login, first 20 labels) until `pageInfo.hasNextPage` is false. Empty result -> `has_changes=false`, clean exit. Inclusion predicate `should_include`: a PR is kept if it carries any `keepLabels` entry (`dependencies`) OR carries none of `excludeLabels` (`automated`, `autorelease: tagged`, `autorelease: pending`, `invalid`). If everything filters out, `has_changes=false`.",
+        "user_visible": false,
+        "key_files": [
+          ".github/workflows/changelog-pr.yml",
+          ".github/changelog-pr-config.json"
+        ]
+      },
+      {
+        "name": "Changelog scope/sub-category taxonomy",
+        "behavior": "Two-dimensional jq categorization driven by `.github/changelog-pr-config.json`. Scopes in order (first label match wins; scope order also orders sections): Mobile \ud83d\udcf1 [mobile, component: mobile], Wear OS \u231a [wear], Watch Face \ud83c\udfa8 [watchface], Plugins \ud83d\udd0c [plugin, plugins], Security \ud83d\udd12 [security], CI & Build \ud83c\udfd7\ufe0f [ci, build, chore], Documentation \ud83d\udcda [docs, documentation], Dependencies \ud83d\udce6 [dependencies], Uncategorized \u2753 [needs triage]. First six have `hasSubCategories: true`. Sub-categories by ascending priority: Breaking Changes \ud83d\udca5 [breaking-change] p0, New Features \u2728 [feature, enhancement] p1, Bug Fixes \ud83d\udc1b [bugfix, bug] p2, Performance \u26a1 [performance] p3, Refactor \ud83d\udd27 [refactor] p4, default Other Changes \ud83d\udcdd p99. Rendering: `## <TODAY>`, `### <emoji> <Scope>`, optional `#### <emoji> <SubCat>`, entries `- <title> [@login](https://github.com/login) ([#n](url))`, then a fresh `<!-- changelog-cutoff:<NOW> -->`.",
+        "user_visible": true,
+        "key_files": [
+          ".github/changelog-pr-config.json",
+          ".github/workflows/changelog-pr.yml"
+        ],
+        "edge_cases": [
+          "Unmatched scope falls back to the config's Uncategorized entry, or a hardcoded {name:\"Uncategorized\", emoji:\"\u2753\", hasSubCategories:false}.",
+          "Missing author.login renders as `ghost`.",
+          "Scopes not present in the config sort to index 999 (last)."
+        ]
+      },
+      {
+        "name": "Changelog branch, commit, and PR",
+        "behavior": "Branch `changelog/<TODAY>`. Git identity `glycemicgpt-release[bot]`. Fetches any existing remote branch first (checkout only fetched main) so `--force-with-lease` has a remote-tracking basis, then `git checkout -B <branch> origin/main` (always re-based on main). CHANGELOG.md update: if the file starts with a `# ` header, the new section is inserted after line 1 and the rest appended; if no `# ` header, prepended; if the file is absent, a `# Changelog` header is created. Commit `git commit -s -m \"[Changelog] Update CHANGELOG.md for <TODAY>\"` (DCO sign-off required), push with `--force-with-lease`. PR title is exactly `[Changelog] Update CHANGELOG.md`, base main. The PR number is parsed from `gh pr create`'s URL output (`grep -oE '[0-9]+$'`) rather than a follow-up `gh pr list`, which could race GitHub's eventual consistency and silently skip the merge job.",
+        "user_visible": false,
+        "key_files": [
+          ".github/workflows/changelog-pr.yml"
+        ]
+      },
+      {
+        "name": "Changelog PR validation and admin-merge",
+        "behavior": "merge-changelog job, `environment: release-gated`, `permissions: {}`, runs only when `has_changes == 'true' && pr_number != ''`. Mints the glycemicgpt-merge token, then re-reads the PR (`gh pr view --json author,title,files`) and enforces three guards before an `--admin` bypass: author must be `glycemicgpt-release[bot]` or `app/glycemicgpt-release` (gh and REST report different forms); title must equal `[Changelog] Update CHANGELOG.md` exactly; the changed-file list must contain nothing other than `CHANGELOG.md` (checked with `grep -v '^CHANGELOG\\.md$'`). Any violation is a hard ::error exit 1. On pass: `gh pr review --approve` then `gh pr merge --rebase --admin` (rebase, not squash \u2014 squash is used for the release and sync PRs).",
+        "user_visible": false,
+        "key_files": [
+          ".github/workflows/changelog-pr.yml"
+        ]
+      },
+      {
+        "name": "Sync-back trigger and need-detection",
+        "behavior": "sync-main-to-develop.yml runs on push to main, `permissions: {}`, concurrency `sync-main-to-develop` (serialized), `environment: release-gated`. Job condition: head_commit.message contains `chore: release` OR `[Changelog] Update CHANGELOG.md` \u2014 feature commits from the promotion merge never match, so there is no loop. Checks out `develop` with the merge-bot token and `fetch-depth: 0`; identity `glycemicgpt-merge[bot]`. Need check: compare `.[\".\"]` of `.release-please-manifest.json` on origin/main vs origin/develop. If they differ and the trigger is a `[Changelog]` commit, it skips (`needed=false`) so the version-bump sync lands first \u2014 an explicit ordering constraint. If versions match, it compares sha256 of CHANGELOG.md on both branches and skips if equal. It also skips if an open PR already exists on head `sync/main-to-develop-<7-char sha>`.",
+        "user_visible": false,
+        "key_files": [
+          ".github/workflows/sync-main-to-develop.yml"
+        ]
+      },
+      {
+        "name": "Sync-back cherry-pick and conflict allowlist",
+        "behavior": "Branch `sync/main-to-develop-<sha[0:7]>` off origin/develop. PR title: `chore: sync release <X.Y.Z> from main to develop` when `grep -oP 'chore: release \\K[0-9.]+'` matches, else `chore: sync changelog update from main to develop`. Runs `git cherry-pick <sha> --no-commit`. On conflict, only five files are force-resolved to main's version (`git show <sha>:<f> > <f>; git add <f>`): `.release-please-manifest.json`, `app/build.gradle.kts`, `wear-device/build.gradle.kts`, `watchface/build.gradle.kts`, `CHANGELOG.md`. If a listed file is absent from the source commit it falls back to `git checkout --theirs`. Any file still unresolved -> ::warning, `unresolved=true`, `git cherry-pick --abort`, nothing pushed, manual sync required. Stated rationale: only these files have an unambiguous 'main always wins' rule; CHANGELOG.md is in the list because release-please (release-type simple) owns it and would otherwise stall every version sync.",
+        "user_visible": false,
+        "key_files": [
+          ".github/workflows/sync-main-to-develop.yml",
+          "docs/dev/release-and-promotion.md"
+        ]
+      },
+      {
+        "name": "Sync PR creation and admin-merge validation",
+        "behavior": "Commits with `git commit -s` (DCO), pushes the sync branch, and opens a PR against `develop` whose body records the source commit and notes whether conflicts were auto-resolved. Before `gh pr merge --squash --admin` it re-validates: author must be `glycemicgpt-merge[bot]` or `app/glycemicgpt-merge`; every changed file must match `^(\\.release-please-manifest\\.json|app/build\\.gradle\\.kts|wear-device/build\\.gradle\\.kts|watchface/build\\.gradle\\.kts|CHANGELOG\\.md|\\.release-please-changelog\\.md)$`. Note the merge allowlist has six entries (it additionally tolerates `.release-please-changelog.md`) while the conflict resolver handles five \u2014 the sixth file does not exist in this repo. Any unexpected path is a hard failure; the guard is explicitly described as defense-in-depth because the PR was built in the same run from a trusted main commit.",
+        "user_visible": false,
+        "key_files": [
+          ".github/workflows/sync-main-to-develop.yml"
+        ]
+      },
+      {
+        "name": "dev-latest pre-release channel",
+        "behavior": "dev-pre-release.yml runs on push to `develop` restricted to paths app/**, wear-device/**, watchface/**, plugins/**, gradle/**, gradlew, gradlew.bat, settings.gradle.kts, settings-gradle.lockfile, build.gradle.kts, gradle.properties, and its own workflow file. Concurrency `dev-pre-release` (serialized). `permissions: contents: read`. Loads DEBUG signing from 1Password (fail-closed: an unset service-account token fails before any build, so a dev APK is never published unsigned \u2014 there is no base64 keystore and no unsigned fallback). Builds `./gradlew assembleDebug -PdevBuildNumber=<N>`. Extracts VERSION by grepping `val appVersionName` from app/build.gradle.kts and rejects anything not matching `^[0-9]+\\.[0-9]+\\.[0-9]+$`. Produces `dist/GlycemicGPT-<VERSION>-dev.<RUN>-debug.apk` and `dist/GlycemicGPT-Wear-<VERSION>-dev.<RUN>-debug.apk`; fails if dist/ ends up empty.",
+        "user_visible": true,
+        "key_files": [
+          ".github/workflows/dev-pre-release.yml"
+        ]
+      },
+      {
+        "name": "DEV_RUN_NUMBER_OFFSET = 500 (permanent, do-not-remove)",
+        "behavior": "The published dev build number is `GITHUB_RUN_NUMBER + 500`. It is embedded twice: into `BuildConfig.DEV_BUILD_NUMBER` via `-PdevBuildNumber`, and into the release asset filename that `AppUpdateChecker.parseDevRunNumber` reads back. Reason: after the repo split this repo's run counter restarted near 0 while the monorepo-built cohort already had dev.145 installed; the updater's strictly-greater comparison would report 'up to date' forever and strand every migrated dev user. Explicit decision recorded in the workflow: the offset is PERMANENT. Because every published number is native+500, the native counter can never catch up (at native 146 the published number is 646); deleting the offset would publish 146 to devices holding 646 and strand them permanently. Retiring it requires a staged migration that keeps every new number above the highest ever emitted.",
+        "user_visible": true,
+        "key_files": [
+          ".github/workflows/dev-pre-release.yml",
+          "app/build.gradle.kts",
+          "wear-device/build.gradle.kts"
+        ]
+      },
+      {
+        "name": "dev-latest publish (delete-and-recreate)",
+        "behavior": "Mints a glycemicgpt-ci App token, then in one step runs `gh release delete dev-latest --yes --cleanup-tag 2>/dev/null || true` immediately followed by `gh release create dev-latest --title \"<VERSION>-dev.<RUN>\" --prerelease --target develop dist/*.apk`. Both commands are in the same step explicitly to minimize the window where no dev-latest exists. Release notes embed VERSION-dev.RUN, the 7-char commit SHA, branch develop, and a pointer to the latest stable release. Final `if: always()` step removes the materialized keystore. During the delete/create window the in-app dev updater's GitHub call returns 404, which the client maps to the message 'No dev release available yet.' rather than an error state.",
+        "user_visible": true,
+        "key_files": [
+          ".github/workflows/dev-pre-release.yml"
+        ],
+        "edge_cases": [
+          "`--cleanup-tag` deletes the dev-latest tag too, so the tag is recreated pointing at the newest develop head each run.",
+          "A failed create after a successful delete leaves the dev channel with no release until the next push."
+        ]
+      },
+      {
+        "name": "In-app phone update channel client",
+        "behavior": "`AppUpdateChecker` selects endpoint by `BuildConfig.UPDATE_CHANNEL` (`\"dev\"` for the debug buildType, `\"stable\"` for release): dev -> `https://api.github.com/repos/lumose-health/android-unofficial/releases/tags/dev-latest`, stable -> `.../releases/latest`. OkHttp connectTimeout 15s, readTimeout 60s. HTTP 403 -> 'Rate limit exceeded. Try again later.'; 404 on dev -> 'No dev release available yet.'. Asset selection is anchored and fails closed: stable `^GlycemicGPT-(\\d+\\.\\d+\\.\\d+)-release\\.apk$` with the captured version required to equal `tagName` minus 'v'; dev `^GlycemicGPT-(\\d+\\.\\d+\\.\\d+)-dev\\.\\d+-debug\\.apk$`; `matches.singleOrNull()` so ambiguity returns null ('No APK found in release'). Comparison: dev uses `parseDevRunNumber(name) > BuildConfig.DEV_BUILD_NUMBER` (regex `-dev\\.(\\d+)-`, 0 on no match); stable uses `parseVersionCode(version) > currentVersionCode` with the same major*1_000_000 + minor*10_000 + patch formula.",
+        "user_visible": true,
+        "key_files": [
+          "app/src/main/java/com/glycemicgpt/mobile/data/update/AppUpdateChecker.kt"
+        ],
+        "edge_cases": [
+          "A stale asset from another release (e.g. GlycemicGPT-1.2.2-release.apk attached to v1.2.3) is rejected by the expectedVersion check.",
+          "Anchoring exists because Wear and WatchFace APKs share the phone applicationId and signing key \u2014 picking one would install it in place OVER the phone app."
+        ]
+      },
+      {
+        "name": "APK download hardening",
+        "behavior": "Before any download: `isHttpsUrl` requires a hierarchical `https://` URI with a non-empty host (rejects opaque `https:payload`), enforced in code rather than relying on network_security_config because the base config permits cleartext for the LAN opt-in; `isAllowedDownloadHost` allows only `github.com` and `objects.githubusercontent.com` plus their subdomains (`host == allowed || host.endsWith(\".\"+allowed)`). Filename is sanitized (strip after `?` and `#`, replace `[^a-zA-Z0-9._-]` with `_`, empty -> `update.apk`). Old APKs in `cacheDir/apk_updates` are deleted first. After download, if `expectedSize > 0` and the file length differs, the file is deleted and an error returned. Install uses FileProvider authority `<packageName>.fileprovider` with ACTION_VIEW, mime `application/vnd.android.package-archive`, FLAG_GRANT_READ_URI_PERMISSION + FLAG_ACTIVITY_NEW_TASK.",
+        "user_visible": true,
+        "key_files": [
+          "app/src/main/java/com/glycemicgpt/mobile/data/update/AppUpdateChecker.kt"
+        ]
+      },
+      {
+        "name": "Wear APK update client",
+        "behavior": "`WearAppUpdateChecker` polls the same two GitHub endpoints, choosing suffix `-debug.apk` for dev and `-release.apk` for stable, and selects the first asset with prefix `GlycemicGPT-Wear-` and that suffix (`firstOrNull`, not the anchored/single-match discipline the phone selector uses). Dev compares `AppUpdateChecker.parseDevRunNumber(name) > watchDevBuildNumber`; stable compares `AppUpdateChecker.parseVersionCode(tag minus 'v') > watchVersionCode`. Cache subdir `wear_apk_updates`. `MAX_DOWNLOAD_SIZE_BYTES = 100L * 1024 * 1024` (100 MB) guards disk exhaustion. CancellationException is rethrown rather than swallowed; other exceptions become `UpdateCheckResult.Error`. Same 403/404 message mapping as the phone checker.",
+        "user_visible": true,
+        "key_files": [
+          "app/src/main/java/com/glycemicgpt/mobile/data/update/WearAppUpdateChecker.kt"
+        ]
+      },
+      {
+        "name": "Gradle dependency locking",
+        "behavior": "Root build.gradle.kts applies `dependencyLocking { lockAllConfigurations() }` to allprojects, so every module commits a `gradle.lockfile` (app, wear-device, watchface, plugins/pump-driver-api, plugins/shipped/{tandem,medtronic}, tools/medtronic-ble-spike) plus a root `settings-gradle.lockfile`. Two configuration families are excluded via `resolutionStrategy.deactivateDependencyLocking()`: names starting `_internal-unified-test-platform` (AGP's bundled instrumented-test host tooling \u2014 pinned by AGP, never shipped, only movable by an AGP bump, so locking would put AGP's supply chain on the CVE gate with unfixable findings) and names ending `DependenciesMetadata` (Kotlin compile-metadata views, not real classpaths). Custom task `resolveAndLockAll` requires `--write-locks`, resolves only `incoming.resolutionResult.root` per resolvable configuration, and rethrows any resolution failure that is not in the excluded set. Regenerate manually with `./gradlew resolveAndLockAll --write-locks`.",
+        "user_visible": false,
+        "key_files": [
+          "build.gradle.kts",
+          "settings-gradle.lockfile",
+          "osv-scanner.toml"
+        ]
+      },
+      {
+        "name": "Lockfile regeneration for Renovate PRs",
+        "behavior": "regen-gradle-lockfiles.yml exists because Renovate's container has no Android SDK. Trigger: pull_request opened/synchronize on paths gradle/libs.versions.toml, gradle/wrapper/gradle-wrapper.properties, `**/build.gradle.kts`. Concurrency per PR number, cancel-in-progress true. Guards (all three): author == `glycemicgpt-renovate[bot]`, head repo == this repo (no forks), head ref starts with `renovate/`. Two-job privilege split. `regenerate` (timeout 15 min, no credential ever, `cache-read-only: true` so PR build scripts cannot poison the shared cache) checks out the head ref, records the exact SHA, runs `./gradlew resolveAndLockAll --write-locks --console=plain`, counts `git status --porcelain -- '*gradle.lockfile'`, and uploads `settings-gradle.lockfile` + `**/gradle.lockfile` as artifact `gradle-lockfiles` (`if-no-files-found: error`, retention 1 day).",
+        "user_visible": false,
+        "key_files": [
+          ".github/workflows/regen-gradle-lockfiles.yml"
+        ],
+        "edge_cases": [
+          "tools/medtronic-ble-spike is intentionally not regenerated (outside Renovate's ignorePaths scope).",
+          "The push retriggers the workflow once via `synchronize`; the second run produces no diff and exits.",
+          "Documented as an UNPROVEN PATH \u2014 Renovate is not yet installed, so it has never fired."
+        ]
+      },
+      {
+        "name": "Privileged lockfile push job",
+        "behavior": "`push` job (timeout 5 min) runs only when `changed != '0'`. It checks out the EXACT SHA the lockfiles were built from with `persist-credentials: false`, downloads the artifact over the tree, then mints a glycemicgpt-renovate token scoped `permission-contents: write` (without which it would inherit every installation permission). Sets `git config core.hooksPath /dev/null` (so no PR-authored hook runs), identity `glycemicgpt-renovate[bot]`, `git add -- '*gradle.lockfile'`, exits with a ::notice if nothing is staged, else commits `chore(deps): refresh gradle lockfiles` with `--signoff` and pushes `HEAD:<head ref>` via `https://x-access-token:$TOKEN@github.com/<repo>.git`. The non-force push to a pinned SHA means that if Renovate advanced the branch meanwhile, the push is rejected as non-fast-forward rather than committing lockfiles that no longer match the build files. This job never executes PR code.",
+        "user_visible": false,
+        "key_files": [
+          ".github/workflows/regen-gradle-lockfiles.yml"
+        ]
+      },
+      {
+        "name": "Renovate global policy",
+        "behavior": "renovate.json5 extends config:recommended, :dependencyDashboard, :semanticCommits, helpers:pinGitHubActionDigests. `baseBranchPatterns: [\"develop\"]` (main is promotion-only). GUARD: top-level `automerge: false` \u2014 platformAutomerge defaults true, so any rule setting automerge:true would enqueue native auto-merge at PR creation and bypass the workflow file allowlist. automergeStrategy squash; branchPrefix `renovate/`; semanticCommitType `chore`, scope `deps`. DCO: `gitAuthor: \"glycemicgpt-renovate[bot] <272302492+glycemicgpt-renovate[bot]@users.noreply.github.com>\"` and `commitBody: \"Signed-off-by: {{{gitAuthor}}}\"` (triple braces so `<email>` is not HTML-escaped). prHourlyLimit 3, prConcurrentLimit 6. `minimumReleaseAge: \"7 days\"` + `internalChecksFilter: \"strict\"` \u2014 the PR is not even opened until the soak passes. `lockFileMaintenance` disabled. labels `[dependencies]`. `ignorePaths: [\"tools/**\"]`. `ignoreDeps: [\"int:DEV_BUILD_NUMBER\"]` (false positive from a buildConfigField). timezone America/Chicago, schedule 'after 9am and before 5pm every weekday'.",
+        "user_visible": false,
+        "key_files": [
+          "renovate.json5",
+          "docs/dev/dependency-updates.md"
+        ]
+      },
+      {
+        "name": "Renovate tiers and never-auto-merge set",
+        "behavior": "Tier B (the only rule adding `automerge`): matchManagers gradle, matchDepTypes [dependencies], matchUpdateTypes [patch, minor], all-negative matchPackageNames excluding by VENDOR GLOB `org.bouncycastle:*`, `net.zetetic:*`, `androidx.security:*`, `org.openminimed:*` (so a future sibling artifact like bcpkix or security-crypto-ktx cannot slip through) plus `com.google.dagger:hilt-android(-compiler)`, `com.github.jeziellago:compose-markdown`, `androidx.wear.watchface:watchface-push`, `...validator-push-android`, and the six plugin ids. Tier D rules are placed AFTER Tier B so `labels` last-wins, and none adds `automerge`: build-toolchain (gradle plugins, plugin ids, Dagger-Hilt libs, gradle-wrapper), all majors, crypto/cipher (patch/minor and major variants), JitPack markdown, wear watchface prerelease alphas, and all GitHub Actions bumps incl. digest re-pins. Grouping rules that can hold an auto-eligible package are all scoped [patch,minor] and exclude manual coordinates by name.",
+        "user_visible": false,
+        "key_files": [
+          "renovate.json5",
+          "docs/dev/dependency-updates.md"
+        ],
+        "edge_cases": [
+          "Deliberate safe-fail: if Gradle does not tag catalog libraries with the `dependencies` depType, Tier B matches nothing and EVERYTHING falls to manual review.",
+          "Renovate 43 rejects mixing a bare `*` with other patterns, hence the all-negative form.",
+          "`androidx.hilt:hilt-navigation-compose` is capped at `allowedVersions: \"[,1.2.0]\"` \u2014 Gradle constraint syntax, because a SemVer `<=1.2.0` matches nothing under Renovate's gradle versioning and would let lint-breaking 1.3.0 through.",
+          "CVE paths (`osvVulnerabilityAlerts: true`, `vulnerabilityAlerts` with labels [security, dependencies]) bypass the soak and the rate limits, but arrive labeled `security`, which the auto-merge guards treat as manual-only."
+        ]
+      },
+      {
+        "name": "Renovate label-relay and its missing workflow",
+        "behavior": "Documented design: Renovate never merges; it labels, and `auto-merge-renovate.yml` relays a safe subset to GitHub native auto-merge with `gh pr merge --auto --squash`, and runs `gh pr merge --disable-auto` when a PR loses eligibility (native auto-merge is otherwise sticky and a label change alone never cancels it). Guards (all required): author == glycemicgpt-renovate[bot]; base branch develop, never main; `automerge` label present; and NONE of `security`, `needs-review`, `major`, `build-toolchain`, `security-sensitive`, `prerelease`, `ci-actions`. IMPORTANT DIVERGENCE: `.github/workflows/auto-merge-renovate.yml` does not exist in this repository, although both docs/dev/dependency-updates.md and zizmor.yml's `dangerous-triggers` allowlist name it. The relay is therefore absent here; only the File Scope check and the Renovate config side of the design are present.",
+        "user_visible": false,
+        "key_files": [
+          "docs/dev/dependency-updates.md",
+          "zizmor.yml",
+          ".github/workflows/renovate-file-scope.yml"
+        ]
+      },
+      {
+        "name": "Renovate File Scope required check",
+        "behavior": "pull_request_target on branches [main, develop], types opened/synchronize/reopened/labeled/unlabeled; `permissions: pull-requests: read`; per-PR concurrency, cancel-in-progress true; timeout 5 min. No checkout and no PR code \u2014 it reads the PR file list via `gh api --paginate repos/<repo>/pulls/<n>/files`. No-op PASS unless author == glycemicgpt-renovate[bot] AND the `automerge` label is present. Then each changed file must (a) not be under `tools/*` (rejected first, before the generic Gradle patterns, because no gate builds it), (b) match ALLOWLIST_RE `^((.*/)?build\\.gradle\\.kts|(.*/)?gradle\\.lockfile|gradle/libs\\.versions\\.toml|settings\\.gradle\\.kts|settings-gradle\\.lockfile)$`, and (c) match GATE_RE, the union of the Android Gate and Dependency Scan Gate paths-filters. A file that is allowlisted but outside gate coverage would auto-merge unbuilt and unscanned, so it fails too. Any violation exits 1 with instructions to remove the label.",
+        "user_visible": false,
+        "key_files": [
+          ".github/workflows/renovate-file-scope.yml",
+          "docs/dev/dependency-updates.md"
+        ],
+        "edge_cases": [
+          "pull_request_target is deliberate so the gate evaluates its own trusted base-branch logic, not a version the PR could have edited.",
+          "Security Scan Gate has no paths-filter, so it contributes nothing to GATE_RE and cannot close the coverage gap."
+        ]
+      },
+      {
+        "name": "Renovate config validator",
+        "behavior": "renovate-config-validator.yml runs on PRs to main/develop that touch `renovate.json5` or the workflow itself, plus workflow_dispatch. `permissions: contents: read`, timeout 5 min, per-ref concurrency with cancel-in-progress. Node major pinned to `'24'` (Renovate 43 requires Node >= 24.11). Runs `npx --yes --package \"renovate@43.260.2\" renovate-config-validator --strict` with NO file argument \u2014 deliberate, so the validator auto-discovers renovate.json5 at the repo root and validates it as REPO config (the exact path the Renovate app resolves) rather than the superset 'global config' check an explicit file path triggers. `--strict` fails on deprecations and required schema migrations, not just hard errors; RENOVATE_VERSION is pinned so the schema is reproducible.",
+        "user_visible": false,
+        "key_files": [
+          ".github/workflows/renovate-config-validator.yml"
+        ]
+      },
+      {
+        "name": "Auto-labeling (feeds changelog + Renovate policy)",
+        "behavior": "auto-label.yml runs on pull_request_target (main, develop; opened/synchronize/reopened/edited), job permissions `contents: read` + `pull-requests: write`. Mints a glycemicgpt-ci token best-effort (`continue-on-error`, falls back to `secrets.GITHUB_TOKEN`, which has write scope under pull_request_target). Installs `minimatch@10.0.3` pinned exactly with `--no-save --no-package-lock --no-fund --no-audit --ignore-scripts`. Path labels from `.github/autolabeler-config.json`: mobile=app/**, wear=wear-device/**, watchface=watchface/**, plugin=plugins/**, ci=.github/**, docs=docs/**+**/*.md excluding CHANGELOG.md, dependencies=gradle/libs.versions.toml+**/gradle.lockfile+settings-gradle.lockfile+renovate.json5, security=.github/workflows/*security*.yml+SECURITY.md+osv-scanner.toml. Title labels from `^(\\w+)(\\(.+\\))?!?:` mapped feat->feature, fix->bugfix, docs->documentation, style, refactor, perf->performance, test->tests, build, ci, chore, revert. Adds `breaking-change` on `!:` in the title or a `(^|\\n)\\s*BREAKING[ -]CHANGE:` body footer. Empty label set -> `needs triage`.",
+        "user_visible": false,
+        "key_files": [
+          ".github/workflows/auto-label.yml",
+          ".github/autolabeler-config.json"
+        ],
+        "edge_cases": [
+          "listFiles is paginated at per_page 100 \u2014 unpaginated it would label from only the first 30 files and mis-categorize the changelog.",
+          "The `(^|\\n)\\s*` anchor prevents 'non-breaking change' from matching.",
+          "Label add failures are caught and logged, not fatal."
+        ]
+      },
+      {
+        "name": "commit-msg git hook",
+        "behavior": "`.githooks/commit-msg`, installed with `cp .githooks/commit-msg .git/hooks/commit-msg && chmod +x` or `git config core.hooksPath .githooks`. Git runs only one commit-msg hook, so both policies live in one file. Job 1 strips AI attribution: deletes `Co-Authored-By:` lines matching the alternation `[Cc]laude|[Aa]nthropic|[Cc]opilot|[Cc]hat[Gg][Pp][Tt]|[Oo]pen[Aa][Ii]|[Cc]ursor|[Ww]indsurf|[Cc]odeium|[Cc]ode[Ww]hisperer|[Aa]mazon\\.[Qq]|[Gg]emini|[Jj]et[Bb]rains\\.[Aa][Ii]|[Tt]abnine|[Ss]ourcegraph|[Cc]ody|[Dd]evin|[Aa]ider|[Cc]odex|\\[bot\\]|noreply@`, then deletes any `Authored-By:`/`Generated-By:`/`AI-Generated-By:` trailer, then collapses trailing blank lines with `perl -0777 -pi -e 's/\\n{2,}\\z/\\n/'` (character classes and perl chosen for macOS/Linux portability). Job 2 warns (non-blocking) when `^Signed-off-by: .+ <.+@.+>$` is absent, pointing at `git commit -s` / `--amend -s --no-edit`. Always exits 0.",
+        "user_visible": false,
+        "key_files": [
+          ".githooks/commit-msg",
+          "CONTRIBUTING.md"
+        ]
+      },
+      {
+        "name": "DCO enforcement",
+        "behavior": "`.github/dco.yml` configures the DCO GitHub App: `require.members: true` (no exemption tier \u2014 maintainers and the project lead sign off like anyone else) and `allowRemediationCommits.individual: true` (one `chore: DCO remediation` commit can fix a whole branch's history instead of rewriting every commit). Server-side, it blocks any PR containing an unsigned commit regardless of whether the local hook is installed. Consequences across the pipeline: every bot commit is signed too \u2014 the changelog commit and the sync commit use `git commit -s`, the lockfile regen commit uses `--signoff`, and Renovate's own bump commit is signed via `gitAuthor` + `commitBody` in renovate.json5. The regen `--signoff` covers only its own commit, never Renovate's. Explicitly DCO, not a CLA: it grants no relicensing rights.",
+        "user_visible": false,
+        "key_files": [
+          ".github/dco.yml",
+          "CONTRIBUTING.md",
+          "renovate.json5"
+        ]
+      },
+      {
+        "name": "CODEOWNERS routing for release automation",
+        "behavior": "Single owner `@jlengelbrecht` for `*` and, explicitly re-stated (later rules win), for: /.github/CODEOWNERS, GOVERNANCE.md, CONTRIBUTING.md, LICENSE, CODE_OF_CONDUCT.md, SECURITY.md, /.github/dco.yml, ALL of /.github/workflows/ (plus release.yml named again), renovate.json5, release-please-config.json, .release-please-manifest.json, .github/changelog-pr-config.json, .github/autolabeler-config.json, zizmor.yml, gradle/libs.versions.toml, and the three safety-critical plugin trees (/plugins/pump-driver-api/, /plugins/shipped/tandem/, /plugins/shipped/medtronic/). Stated reasons: workflow files run with repo secrets and bypass-actor write access; a careless edit to the promotion config can mis-version a release, corrupt the changelog, or silently widen the workflow-security allowlist. Bot PRs from release-please and the sync workflow reach these paths via bypass actors, but required status checks still gate the merge.",
+        "user_visible": false,
+        "key_files": [
+          ".github/CODEOWNERS"
+        ]
+      },
+      {
+        "name": "License policy gate on redistributed dependencies",
+        "behavior": "Root build.gradle.kts configures cash/licensee once for all subprojects (`unusedAction(UnusedAction.IGNORE)`, since one policy serves three modules with different graphs). Allowed SPDX: Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, ICU, SAX-PD, SAX-PD-2.0. Allowed by URL: the GPL-3.0 text (this project's own licence) and `http://opensource.org/licenses/BSD-2-Clause` (commonmark 0.13.0 predates SPDX in its POM). EPL-1.0 is deliberately ABSENT: the FSF considers it incompatible with GPLv3 for a combined distributed work and this app is GPL-3.0-only; the one EPL artifact that reached the graph (an XPath 2.0 processor transitive of the alpha wear watchface validator) is excluded at that dependency in wear-device/build.gradle.kts, with WatchFaceValidatorTest proving the validator still works. Per-version `allowDependency` entries (Play services 18.x, TwelveMonkeys 3.9.4, java-cup 10k, sqlcipher 4.13.0, bcprov-jdk18on 1.84, three JitPack artifacts) each carry a `because` reason; a version bump re-raises the judgement.",
+        "user_visible": false,
+        "key_files": [
+          "build.gradle.kts",
+          "docs/THIRD_PARTY_LICENSES.md"
+        ]
+      },
+      {
+        "name": "Dependency CVE scanning",
+        "behavior": "dependency-scan.yml uses dorny/paths-filter v4.0.2 with filter `deps`: `**/build.gradle.kts`, `gradle/libs.versions.toml`, `**/gradle.lockfile`, `settings-gradle.lockfile`, `osv-scanner.toml`, and its own workflow file. Scans when the filter hits, or on schedule/workflow_dispatch. Installs `github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.3.3` from source on the runner's Go toolchain (no third-party action to pin). Runs `osv-scanner scan --lockfile=gradle.lockfile:settings-gradle.lockfile --recursive --no-ignore --config=osv-scanner.toml .` \u2014 the parse-as hint is needed because the root lockfile has a non-standard basename, and `--no-ignore` stops `--recursive` honoring .gitignore so a lockfile can never be silently dropped while the gate stays green. osv-scanner.toml ships with NO active [[IgnoredVulns]]; first-scan triage over ~1,175 resolved packages found nothing. Suppressions require a written reason and an `ignoreUntil` forcing re-evaluation; quarterly review.",
+        "user_visible": false,
+        "key_files": [
+          ".github/workflows/dependency-scan.yml",
+          "osv-scanner.toml"
+        ]
+      },
+      {
+        "name": "Workflow hygiene gates guarding the pipeline",
+        "behavior": "workflow-lint.yml (push+PR on main/develop, timeout 5 min) installs SHA-256-verified pinned binaries rather than actions: shellcheck 0.10.0 (sha256 6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87) and actionlint 1.7.7 (sha256 023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757); runs `actionlint -oneline -shellcheck=...`, a guard requiring every third-party `uses:` to pin a full 40-hex SHA (local `./` and docker refs exempt), and a composite-action guard against `${{ secrets.* }}` inside an action definition (which silently resolves to empty). workflow-security.yml installs `zizmor==1.5.2` + `pyyaml==6.0.2` and runs `zizmor --config zizmor.yml --min-severity=medium` over workflows AND composite actions \u2014 any Medium-or-higher finding not allowlisted fails. Policy: add a scoped zizmor.yml entry with a rationale; never lower the threshold. A companion guard fails any pull_request_target workflow that checks out PR head code.",
+        "user_visible": false,
+        "key_files": [
+          ".github/workflows/workflow-lint.yml",
+          ".github/workflows/workflow-security.yml",
+          "zizmor.yml"
+        ],
+        "edge_cases": [
+          "zizmor.yml `dangerous-triggers` whole-file ignores: auto-merge-renovate.yml (absent from the repo), renovate-file-scope.yml, auto-label.yml, attribution-check.yml.",
+          "`artipacked` is line-scoped to exactly three credential-persisting checkouts that must push: changelog-pr.yml:49, sync-main-to-develop.yml:43, release.yml:154.",
+          "The op-load-signing-secrets `github-env` finding is suppressed inline at the step, not in zizmor.yml, so it survives line shifts."
+        ]
+      },
+      {
+        "name": "Local developer tooling (scripts/mobile-dev.sh)",
+        "behavior": "Bash helper, `set -euo pipefail`. Resolves adb from `$ANDROID_HOME/platform-tools/adb` then PATH (hard error if neither) and emulator from `$ANDROID_HOME/emulator/emulator` then PATH. AVD name `test_device`. Artifact paths: `app/build/outputs/apk/debug/app-debug.apk`, `wear-device/build/outputs/apk/debug/wear-device-debug.apk`. Commands: devices; build (`./gradlew assembleDebug`); emulator start (`-no-audio -gpu auto`, backgrounded+disowned) / stop (`adb emu kill`) / install; phone install|logcat|ble-raw; watch install|logcat. Device selection: emulator = first serial matching `^emulator-`; phone = first non-emulator serial; watch = `$WATCH_SERIAL` if set, else first IP-shaped serial (WiFi-paired, e.g. 10.x.x.x:5555). phone logcat filters BleConnectionManager, TandemBleDriver, PumpPollingOrchestrator, JpakeAuthenticator, TandemAuthenticator at :D with `*:S`; ble-raw greps `BLE_RAW`; watch logcat filters the wear services and complication data sources.",
+        "user_visible": false,
+        "key_files": [
+          "scripts/mobile-dev.sh",
+          "shell.nix"
+        ]
+      },
+      {
+        "name": "Build-time toolchain and flags relevant to release artifacts",
+        "behavior": "Gradle wrapper 8.12 (`gradle-8.12-bin.zip`), AGP 8.7.3, Kotlin 2.1.0, KSP 2.1.0-1.0.29, Hilt 2.53.1, licensee 1.14.1, compose-bom 2024.12.01. Java 17 source/target and jvmTarget across CI and Gradle. app: namespace/applicationId `com.glycemicgpt.mobile`, compileSdk 35, minSdk 30, targetSdk 35. debug buildType: `applicationIdSuffix \".debug\"`, `versionNameSuffix \"-debug\"`, `UPDATE_CHANNEL=\"dev\"`, `DEV_BUILD_NUMBER` from `-PdevBuildNumber` (default 0). release buildType: minify + shrinkResources on, `UPDATE_CHANNEL=\"stable\"`, `DEV_BUILD_NUMBER=0`. `MEDTRONIC_DRIVER_ENABLED` defaults true and is only disabled by env `MEDTRONIC_DRIVER_ENABLED=false` (kill switch: plugin becomes invisible/inert \u2014 not selectable, no pairing, no polling). Watch-face asset SHA-256s are computed at build time from committed APK assets into BuildConfig for a runtime tamper check.",
+        "user_visible": true,
+        "key_files": [
+          "gradle/wrapper/gradle-wrapper.properties",
+          "gradle/libs.versions.toml",
+          "app/build.gradle.kts"
+        ]
+      },
+      {
+        "name": "Sentry DSN exclusion from published artifacts",
+        "behavior": "Debug buildType reads a Sentry DSN from env `SENTRY_DSN` (blank treated as absent) or `-PsentryDsn`, defaulting to empty so Sentry stays disabled. Hard guard: if the DSN is non-empty AND `System.getenv(\"CI\") == \"true\"`, the build throws a GradleException \u2014 because the debug APK is published as the downloadable `dev-latest` asset and a baked-in DSN is client-extractable. Release buildType hardcodes `SENTRY_DSN=\"\"` and `SENTRY_ENVIRONMENT=\"production\"`; debug defaults the environment to `\"development\"`. Values are emitted through a `toJavaStringLiteral` helper escaping backslash and quote so an unusual value cannot break the generated Java literal.",
+        "user_visible": false,
+        "key_files": [
+          "app/build.gradle.kts"
+        ]
+      }
+    ],
+    "safety_critical": [
+      "Release signing certificate assertion (release.yml): both app and wear-device release buildTypes SILENTLY fall back to the debug signing config when RELEASE_KEYSTORE_FILE is unset. The only thing preventing a debug-signed 'release' APK reaching patients is the post-build apksigner check against RELEASE_SIGNER_SHA256=55f0d0cdabf20b398ad30a0ce3e998e3192666e5c15e6d378b86e1c8de342990. A debug-signed release cannot be installed as an upgrade over a properly signed install, and worse, a debug-key APK is trivially forgeable by a third party \u2014 anyone can build and sign an impostor update. Any Swift/iOS port must keep an equivalent hard fail rather than a warning.",
+      "versionCode derivation `major*1_000_000 + minor*10_000 + patch` is used identically in all three Gradle modules AND in AppUpdateChecker.parseVersionCode. It collides silently when patch > 9999 or minor > 99. A collision makes `remoteVersionCode > currentVersionCode` false and the app reports 'up to date' forever \u2014 patients would never receive a safety fix.",
+      "DEV_RUN_NUMBER_OFFSET=500 is load-bearing and permanent. The updater uses a strictly-greater comparison on the run number parsed out of the asset filename; removing or lowering the offset publishes numbers below what devices already hold and permanently strands dev-channel users on a stale build (no further updates, including safety fixes).",
+      "Phone APK asset selection is anchored (`^GlycemicGPT-(\\d+\\.\\d+\\.\\d+)-release\\.apk$` / `-dev\\.\\d+-debug\\.apk$`) and uses singleOrNull. Wear and WatchFace APKs share the phone's applicationId and signing key; if the selector matched one, Android would install it IN PLACE OVER the phone app, replacing the CGM/pump app with a watch binary. The stable channel additionally requires the embedded version to equal the release tag, so a stale asset cannot be installed under a version the user was told about.",
+      "APK download path is a code-execution path: https-only enforced in code (not just network_security_config, which permits cleartext for the LAN opt-in), host allowlist {github.com, objects.githubusercontent.com} incl. subdomains, filename sanitization, and an exact expected-size check that deletes a mismatched file. The wear checker caps downloads at 100 MB (100*1024*1024).",
+      "Renovate never-auto-merge set covers crypto/at-rest by VENDOR GLOB (org.bouncycastle:*, net.zetetic:* [SQLCipher], androidx.security:*, org.openminimed:* [Medtronic Sake crypto]) so a future sibling artifact cannot slip past. Doc reason: a silent behavior change here can weaken encryption of patient data without failing a build. Nothing in CI inspects dependency bytecode \u2014 the 7-day minimumReleaseAge soak is the primary supply-chain defense.",
+      "CODEOWNERS routes /plugins/pump-driver-api/, /plugins/shipped/tandem/, /plugins/shipped/medtronic/ to the project lead as 'safety-critical BLE parsing and SafetyLimits enforcement'. Any dependency or toolchain change reaching those trees must not auto-merge.",
+      "The label-relay's documented residual risk: auto-merge eligibility is decided from the PR's CURRENT label set, so anyone with GitHub Triage or higher could strip needs-review/security-sensitive from a crypto bump and add `automerge`. Accepted and contained only operationally (restrict Triage to trusted maintainers). A provenance-based tier derivation is explicitly deferred.",
+      "WatchFace release APKs are debug-signed (watchface release buildType unconditionally uses signingConfigs.getByName(\"debug\")) and are deliberately excluded from the cert assertion. They are published as GitHub release assets. The stated mitigation is that users consume the committed in-app WFF assets, whose SHA-256 is compiled into BuildConfig and checked at runtime by WatchFacePusher.",
+      "Debug/`dev-latest` builds are signed with a real shared debug keystore from 1Password and are publicly downloadable. The fail-closed design (composite action aborts before any build if OP_SERVICE_ACCOUNT_TOKEN is unset) is what prevents an unsigned or locally-keyed dev APK from being published.",
+      "The CI Sentry-DSN guard (GradleException when SENTRY_DSN is set and CI=true) prevents an extractable telemetry credential from shipping in the downloadable debug APK of a medical app.",
+      "Licensee EPL-1.0 exclusion is a legal-compliance safety gate: this app is GPL-3.0-only and a new EPL dependency fails the build rather than shipping in a GPL binary."
+    ],
+    "external_dependencies": [
+      "googleapis/release-please-action v4.4.1 (SHA 5c625bfb5d1ff62eadeeb3772007f7f66fdcf071)",
+      "actions/create-github-app-token v3.2.0 (SHA bcd2ba49218906704ab6c1aa796996da409d3eb1)",
+      "actions/checkout v7.0.0 (SHA 9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0)",
+      "actions/setup-java v5.5.0 (SHA 0f481fcb613427c0f801b606911222b5b6f3083a), temurin JDK 17",
+      "gradle/actions/setup-gradle v6.2.0 (SHA 3f131e8634966bd73d06cc69884922b02e6faf92)",
+      "actions/upload-artifact v7.0.1 (SHA 043fb46d1a93c77aae656e7c1c64a875d1fc6a0a); actions/download-artifact v7.0.0 (SHA 37930b1c2abaa49bbe596cd826c3c89aef350131)",
+      "1password/install-cli-action v4.0.0 (SHA a5215d3a7f75c1629216c465ea9ab3ab399c4b71); 1password/load-secrets-action v4.0.1 (SHA 3a12b0ab99d9cd590a3e9b5a90ea017210ed9556)",
+      "actions/github-script v7 (SHA f28e40c7f34bde8b3046d885e986cb6290c5673b); actions/setup-node v5.0.0 (SHA a0853c24544627f65ddf259abe73b1d18a591444)",
+      "dorny/paths-filter v4.0.2 (SHA 7b450fff21473bca461d4b92ce414b9d0420d706)",
+      "1Password: vault `github`, item `android-signing` (release.jks, debug.keystore attachments; six text fields; canary)",
+      "GitHub Apps: glycemicgpt-release, glycemicgpt-merge, glycemicgpt-ci, glycemicgpt-renovate; environment `release-gated`",
+      "DCO GitHub App (.github/dco.yml); Renovate GitHub App (not yet installed); CodeRabbit (.coderabbit.yaml)",
+      "Pinned CLI tools: renovate 43.260.2 (Node 24), osv-scanner v2.3.3, zizmor 1.5.2 + pyyaml 6.0.2, actionlint 1.7.7, shellcheck 0.10.0, minimatch 10.0.3",
+      "Gradle 8.12, AGP 8.7.3, Kotlin 2.1.0, KSP 2.1.0-1.0.29, Hilt 2.53.1, licensee 1.14.1",
+      "GitHub REST/GraphQL API consumed at runtime by the in-app updaters (api.github.com/repos/lumose-health/android-unofficial)"
+    ],
+    "permissions_and_platform_apis": [
+      "GitHub Actions permissions: release.yml and dev-pre-release.yml declare `contents: read` at workflow level; changelog-pr.yml and sync-main-to-develop.yml declare `permissions: {}`; renovate-file-scope.yml declares `pull-requests: read`; auto-label.yml job declares `contents: read` + `pull-requests: write`; the regen push job scopes its App token to `permission-contents: write` only.",
+      "Android: FileProvider authority `<packageName>.fileprovider` for handing the downloaded APK to the package installer; Intent.ACTION_VIEW with mime application/vnd.android.package-archive plus FLAG_GRANT_READ_URI_PERMISSION and FLAG_ACTIVITY_NEW_TASK; the user must have the install-unknown-apps permission for the app. iOS has no equivalent \u2014 self-update by APK download is Android-only.",
+      "Android app identity: applicationId com.glycemicgpt.mobile (debug suffix .debug); compileSdk/targetSdk 35, minSdk 30.",
+      "APK signing (apksigner, v1/v2/v3 signature schemes) is the trust anchor for both the release channel and the sideloaded update path; there is no Play Store distribution.",
+      "Filesystem: keystores materialized to $RUNNER_TEMP at mode 0600 (umask 077); downloaded APKs land in the app's cacheDir subdirs apk_updates / wear_apk_updates and old ones are deleted before each download.",
+      "Branch protection assumptions (documented go-live steps, not enforced in-repo): glycemicgpt-merge registered as a pull-request-only bypass actor on develop that must NOT be able to bypass required status checks; 'Renovate File Scope' registered as a required check; Dependency graph + Dependabot alerts enabled; Triage/label management restricted to trusted maintainers."
+    ],
+    "notes": "COVERAGE: complete for the requested scope. Every file listed in the brief was read in full, plus the files they depend on (.github/actions/op-load-signing-secrets/action.yml, .github/changelog-pr-config.json, .github/autolabeler-config.json, .github/dco.yml, .github/CODEOWNERS, zizmor.yml, osv-scanner.toml, root/app/wear/watchface build.gradle.kts, the two in-app updaters, workflow-lint.yml, workflow-security.yml, dependency-scan.yml, secrets-plumbing-check.yml, signing-action-smoke.yml, CONTRIBUTING.md). Depth is uniform; nothing was truncated for budget.\n\nDIVERGENCES BETWEEN DOCS AND CODE \u2014 load-bearing for a port:\n1. `.github/workflows/auto-merge-renovate.yml` DOES NOT EXIST in this repository, yet docs/dev/dependency-updates.md describes it as the label-relay that actually enables auto-merge, and zizmor.yml allowlists it by name. As shipped, Renovate PRs get labels and the File Scope check, but nothing relays them to native auto-merge. A port should treat the relay as a design intent, not existing behavior.\n2. `docs/dev/parity-gate-runbook.md` is referenced three times (release.yml's RELEASE_SIGNER_SHA256 provenance, the wear-build gate-blocking rule 4, and dev-pre-release.yml's P1.1 offset rationale) but is not present in this repo. The certificate fingerprint therefore has no in-repo provenance record.\n3. The sync-back admin-merge allowlist includes `.release-please-changelog.md`, which the conflict resolver does not handle and which does not exist here.\n4. CONTRIBUTING.md calls Workflow Lint \"zizmor ... (advisory while it beds in)\"; in fact Workflow Lint is actionlint/shellcheck/SHA-pin and zizmor lives in a separate Workflow Security gate that hard-fails on Medium+.\n\nEXPLICIT STATUS DISCLAIMERS IN THE SOURCE: the promotion pipeline is \"built, validated in parts, not yet exercised end-to-end\" (first promotion is a maintainer-validated run); Renovate is \"built, not yet live\" and dormant until an 8-item go-live checklist is completed; regen-gradle-lockfiles.yml is labelled an \"UNPROVEN PATH\".\n\nPORTING NOTE (factual, not iOS editorializing): a large fraction of this subsystem is repository/CI machinery that is platform-independent (release-please, changelog taxonomy, sync-back, Renovate policy, DCO, hooks) and would carry over largely unchanged. The genuinely Android-coupled parts are: APK signing + the apksigner fingerprint assertion, Gradle dependency locking and lockfile regeneration, the versionCode formula, and the in-app APK self-updater with its dev-latest channel and the +500 run-number offset."
+  },
+  "port": {
+    "subsystem": "Release, promotion, signing, and dependency management \u2014 iOS/watchOS port (GlycemicGPT ios-unofficial)",
+    "ports_cleanly": [
+      {
+        "capability": "Promotion pipeline topology (develop -> main)",
+        "ios_approach": "Platform-independent. Keep both long-lived branches, squash-merge contributor PRs to develop, promote with a real merge commit to main via `gh pr create --base main --head develop --title \"chore: promote develop to main\"`. Keep the three message-string trigger predicates verbatim ('promote develop to main' / 'chore: release' / '[Changelog] Update CHANGELOG.md') so the loop-avoidance invariant is unchanged. One new fork-facing addition: forks need a documented 'sync upstream' path (scheduled workflow or `gh repo sync`) since each user's fork is now the build origin."
+      },
+      {
+        "capability": "release.yml job graph and gating",
+        "ios_approach": "Same five-job graph, same `if:` predicates, same `concurrency: release-${{ github.ref }}` with cancel-in-progress false, same top-level `permissions: contents: read` with per-job scoped App tokens and `persist-credentials: false` on read-only checkouts. Only the final build job changes runner class (ubuntu-latest -> macos-26) and body. Keep `environment: release-gated` on the token-minting jobs; a solo maintainer can self-approve unless 'Prevent self-review' is enabled. Upstream release.yml no longer produces installable binaries, so the gate protects tagging/changelog integrity rather than signing material."
+      },
+      {
+        "capability": "release-please configuration and version scheme (semver, tags, conventional commits, CHANGELOG ownership)",
+        "ios_approach": "release-please-action v4 config carries over unchanged: release-type `simple`, `include-v-in-tag: true`, `bump-minor-pre-major: true`, `pull-request-title-pattern: chore: release ${version}`, manifest `{\".\": \"0.14.0\"}`, same feat/fix/perf/docs/refactor/ci visible + chore/test hidden sections. The only edit is `extra-files`: replace the three `build.gradle.kts` entries with one `Config/Version.xcconfig` carrying `MARKETING_VERSION = 0.14.0 // x-release-please-version`, consumed by the iOS app, watchOS app, and every extension target. Apple requires the embedded watch app's CFBundleShortVersionString to equal the host app's, so single-source is mandatory, not just tidy."
+      },
+      {
+        "capability": "Release PR auto-merge",
+        "ios_approach": "Unchanged. Mint the glycemicgpt-merge App token inside `release-gated`, parse the PR number with `grep -oE '[0-9]+' | head -1`, `gh pr merge <n> --squash --admin`, exit 0 with 'No PR number found' when unparseable. Trust anchor (release-please authored it + environment approval fired) is identical."
+      },
+      {
+        "capability": "Deployable-change detection for the fallback release",
+        "ios_approach": "Same `fetch-depth: 2` + `git diff --name-only <sha>^1 <sha>` merge-vs-first-parent diff. Swap the path regex to `^(App/|Sources/|WatchApp/|Widgets/|Tests/|Package\\.swift|Package\\.resolved|Config/|.*\\.xcconfig|.*\\.xcodeproj/|project\\.yml|fastlane/|Gemfile\\.lock)`. The deliberate rule survives: a doc-only promotion (README, GOVERNANCE, CLAUDE.md, docs/) must not cut a versioned release."
+      },
+      {
+        "capability": "Fallback patch release",
+        "ios_approach": "Unchanged in shape and in every edge case. Read CURRENT from `git show <github.sha>:.release-please-manifest.json` (immutable triggering SHA, so reruns cannot recompute), split/increment patch, tag `vX.Y.Z`, skip when the tag exists, jq-rewrite the manifest, `sed`-rewrite `MARKETING_VERSION = CURRENT` in one xcconfig instead of three gradle files, grep-verify or hard-fail, `git pull --rebase` then `git push --atomic origin main refs/tags/$TAG`, and the create-Release-from-existing-tag `--verify-tag` rerun path. Bot identity stays `glycemicgpt-release[bot]`."
+      },
+      {
+        "capability": "Signing plumbing smoke tests (secrets-plumbing-check.yml, signing-action-smoke.yml)",
+        "ios_approach": "Same purpose, same workflow_dispatch-only + `permissions: contents: read` shape, retooled. Becomes a single `Validate Secrets` workflow (the Loop Browser Build analogue) run in the *user's fork*: assert TEAMID / FASTLANE_ISSUER_ID / FASTLANE_KEY_ID / FASTLANE_KEY / MATCH_PASSWORD / GH_PAT are all present and non-empty, authenticate the App Store Connect API key with a read-only call (list apps for the team), and confirm the private match repo clones and decrypts \u2014 printing only pass/fail and identifiers, never key bytes. Keep the same 'run this after a credential rotation' guidance. Upstream keeps an equivalent canary-only job if it holds any 1Password material for the lead's own validation fork."
+      },
+      {
+        "capability": "GitHub App identity model (release / merge / ci / renovate)",
+        "ios_approach": "Ports unchanged for the upstream repository: four Apps, all minted per-job with actions/create-github-app-token, ambient GITHUB_TOKEN never used for a write, RELEASE/MERGE private keys held only as `release-gated` environment secrets. Per-fork build workflows use no App at all \u2014 they use the forking user's own App Store Connect key plus the default GITHUB_TOKEN, which keeps upstream out of every user's trust boundary."
+      },
+      {
+        "capability": "Changelog cutoff-marker windowing",
+        "ios_approach": "Fully platform-independent; port byte-for-byte. Keep `<!-- changelog-cutoff:<ISO8601> -->`, the `^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[Z+]` anti-injection validation with hard fail, the release-please-header and `2025-01-01T00:00:00Z` fallbacks, UNTIL from `head_commit.timestamp` (or `git log -1 --format=%cI origin/main` on dispatch), UTC normalization, and `concurrency: changelog-pr` serialized rather than cancelled."
+      },
+      {
+        "capability": "Merged-PR collection via GraphQL",
+        "ios_approach": "Unchanged. Paginated `search(type: ISSUE, first: 100, after: $cursor)` on `repo:<owner/repo> is:pr is:merged base:develop merged:$SINCE..$UNTIL`, same node fields, same `should_include` predicate (keepLabels `dependencies` wins; otherwise excluded by `automated`/`autorelease: tagged`/`autorelease: pending`/`invalid`), same `has_changes=false` clean exits."
+      },
+      {
+        "capability": "Changelog scope/sub-category taxonomy",
+        "ios_approach": "Config-driven; only the scope names and their label sets change. Suggested: iPhone \ud83d\udcf1 [ios, component: ios], Apple Watch \u231a [watch, watchos], Widgets & Complications \ud83c\udfa8 [widgets, complications], Pump Drivers \ud83d\udd0c [driver, drivers], Security \ud83d\udd12, CI & Build \ud83c\udfd7\ufe0f, Documentation \ud83d\udcda, Dependencies \ud83d\udce6, Uncategorized \u2753. Sub-category priorities (breaking 0, feature 1, bugfix 2, performance 3, refactor 4, other 99), the render shape (`## <TODAY>` / `### emoji Scope` / `#### emoji SubCat` / `- title [@login](\u2026) ([#n](url))`), the `ghost` author fallback, the index-999 unknown-scope sort, and the trailing fresh cutoff marker all carry over verbatim."
+      },
+      {
+        "capability": "Changelog branch, commit, and PR",
+        "ios_approach": "Unchanged. `changelog/<TODAY>` branch, fetch-existing-remote-branch before `git checkout -B <branch> origin/main`, header-aware CHANGELOG.md insertion (after line 1 when a `# ` header exists, prepend when not, create `# Changelog` when absent), `git commit -s` DCO sign-off, `--force-with-lease` push, exact PR title `[Changelog] Update CHANGELOG.md`, and PR-number parse from the `gh pr create` URL (`grep -oE '[0-9]+$'`) rather than a race-prone follow-up `gh pr list`."
+      },
+      {
+        "capability": "Changelog PR validation and admin-merge",
+        "ios_approach": "Unchanged. `environment: release-gated`, `permissions: {}`, gate on `has_changes && pr_number != ''`, then re-read with `gh pr view --json author,title,files` and enforce all three guards before `--admin`: author in {glycemicgpt-release[bot], app/glycemicgpt-release}, title exactly `[Changelog] Update CHANGELOG.md`, and `grep -v '^CHANGELOG\\.md$'` empty. Merge strategy stays `--rebase` (release and sync PRs stay `--squash`)."
+      },
+      {
+        "capability": "Sync-back trigger and need-detection",
+        "ios_approach": "Unchanged. Push-to-main trigger, `permissions: {}`, serialized `sync-main-to-develop` concurrency, `environment: release-gated`, condition on 'chore: release' OR '[Changelog] Update CHANGELOG.md' so promotion feature commits never loop. Same manifest-version comparison between origin/main and origin/develop, the same explicit ordering rule (a `[Changelog]` trigger with differing versions skips so the version-bump sync lands first), the same CHANGELOG.md sha256 equality skip, and the same open-PR-already-exists skip on `sync/main-to-develop-<7-char sha>`."
+      },
+      {
+        "capability": "Sync-back cherry-pick and conflict allowlist",
+        "ios_approach": "Same design, shorter file list. `git cherry-pick <sha> --no-commit` onto `sync/main-to-develop-<sha[0:7]>`; on conflict force-resolve to main's version only for `.release-please-manifest.json`, `Config/Version.xcconfig`, and `CHANGELOG.md` (three files replacing five), with the same `git checkout --theirs` fallback when a listed file is absent from the source commit. Anything still unresolved -> ::warning, `unresolved=true`, `git cherry-pick --abort`, nothing pushed, manual sync. Same rationale: only these files have an unambiguous 'main always wins' rule."
+      },
+      {
+        "capability": "Sync PR creation and admin-merge validation",
+        "ios_approach": "Unchanged. `git commit -s`, push, PR against develop with the source commit and conflict-resolution note in the body, then re-validate before `gh pr merge --squash --admin`: author in {glycemicgpt-merge[bot], app/glycemicgpt-merge} and every changed file matching `^(\\.release-please-manifest\\.json|Config/Version\\.xcconfig|CHANGELOG\\.md)$`. Drop the phantom `.release-please-changelog.md` sixth entry that the Android allowlist tolerates but nothing produces."
+      },
+      {
+        "capability": "Lockfile regeneration for bot dependency PRs",
+        "ios_approach": "Same two-job privilege split, new tool. `regenerate` runs on macos-26 (not ubuntu) because Renovate's container has no Xcode, checks out the PR head with no credentials, records the exact SHA, runs `xcodebuild -resolvePackageDependencies` (or `swift package resolve`), counts `git status --porcelain -- 'Package.resolved' '**/Package.resolved'`, and uploads the artifact with `if-no-files-found: error`, retention 1 day. Same guards: author == the renovate bot, head repo == this repo (no forks), head ref prefixed `renovate/`, per-PR concurrency with cancel-in-progress. Raise the 15-minute timeout \u2014 a cold SPM resolve on a macOS runner is slower than a Gradle resolve. This job is *more* load-bearing on iOS: Renovate's swift manager edits Package.swift and does not touch Package.resolved at all."
+      },
+      {
+        "capability": "Privileged lockfile push job",
+        "ios_approach": "Ports verbatim and remains the security-critical half. Runs only when `changed != '0'`, checks out the exact SHA the lockfile was built from with `persist-credentials: false`, downloads the artifact over the tree, mints a renovate App token scoped `permission-contents: write` only, sets `git config core.hooksPath /dev/null` so no PR-authored hook runs, commits `chore(deps): refresh Package.resolved` with `--signoff`, and does a non-force push to the pinned head ref so a branch that advanced meanwhile is rejected as non-fast-forward. This job still never executes PR code."
+      },
+      {
+        "capability": "Renovate global policy",
+        "ios_approach": "renovate.json5 carries over almost unchanged: `config:recommended`, `:dependencyDashboard`, `:semanticCommits`, `helpers:pinGitHubActionDigests`, `baseBranchPatterns: [\"develop\"]`, the load-bearing top-level `automerge: false` guard against platformAutomerge, `automergeStrategy: squash`, `branchPrefix: renovate/`, semanticCommitType chore / scope deps, the DCO `gitAuthor` + triple-brace `commitBody`, prHourlyLimit 3 / prConcurrentLimit 6, `minimumReleaseAge: \"7 days\"` with `internalChecksFilter: \"strict\"`, lockFileMaintenance disabled, `labels: [dependencies]`, `vulnerabilityAlerts` bypassing the soak with security+dependencies labels, timezone America/Chicago. Manager set changes: `swift` (Package.swift), `github-actions`, `bundler` (fastlane Gemfile), `homebrew`/`mise`, plus a `customManagers` regex entry for `.xcode-version`."
+      },
+      {
+        "capability": "Renovate label-relay to native auto-merge (auto-merge-renovate.yml)",
+        "ios_approach": "The design ports unchanged \u2014 but note it does not exist in the Android repo (docs and zizmor.yml name a file that is absent), so the iOS repo must actually author it rather than port it. Same guards, all required: author == the renovate bot; base branch develop, never main; `automerge` label present; and none of security / needs-review / major / build-toolchain / security-sensitive / prerelease / ci-actions. Same `gh pr merge --auto --squash` on eligibility and `gh pr merge --disable-auto` on loss of eligibility, because native auto-merge is sticky and a label removal alone never cancels it."
+      },
+      {
+        "capability": "Renovate File Scope required check",
+        "ios_approach": "Ports 1:1 with new regexes. Keep `pull_request_target` (deliberate: the gate must evaluate trusted base-branch logic, not a version the PR could edit), `permissions: pull-requests: read`, no checkout, file list via `gh api --paginate .../pulls/<n>/files`, no-op PASS unless the author is the renovate bot AND the `automerge` label is present. ALLOWLIST_RE becomes `^(Package\\.swift|Package\\.resolved|(.*/)?Package\\.resolved|Gemfile|Gemfile\\.lock|\\.github/workflows/[^/]+\\.yml|Brewfile|mise\\.toml|\\.xcode-version)$`; GATE_RE stays the union of the iOS Gate and Dependency Scan Gate paths-filters, so an allowlisted-but-ungated file still fails. Same 'remove the label' error text."
+      },
+      {
+        "capability": "Renovate config validator",
+        "ios_approach": "Unchanged. PR-triggered on renovate.json5 or the workflow itself plus workflow_dispatch, `permissions: contents: read`, 5-minute timeout, per-ref concurrency with cancel-in-progress, Node major pinned to the version the pinned Renovate requires, and `npx --yes --package \"renovate@<pinned>\" renovate-config-validator --strict` with NO file argument so the validator auto-discovers renovate.json5 as *repo* config rather than triggering the global-config superset check."
+      },
+      {
+        "capability": "Auto-labeling (feeds changelog + dependency policy)",
+        "ios_approach": "Ports unchanged: pull_request_target on main/develop, job `contents: read` + `pull-requests: write`, best-effort ci App token with `continue-on-error` falling back to GITHUB_TOKEN, minimatch pinned exactly with `--no-save --no-package-lock --ignore-scripts`, paginated `listFiles` at per_page 100, conventional-commit title mapping, the `(^|\\n)\\s*BREAKING[ -]CHANGE:` body anchor plus `!:` in the title, and `needs triage` on an empty label set. Only the path globs change: ios=App/**+Sources/**, watch=WatchApp/**, widgets=Widgets/**, driver=Sources/PumpDrivers/**, ci=.github/**, docs=docs/**+**/*.md minus CHANGELOG.md, dependencies=Package.swift+Package.resolved+Gemfile.lock+renovate.json5, security=.github/workflows/*security*.yml+SECURITY.md."
+      },
+      {
+        "capability": "commit-msg git hook and AI-attribution stripping",
+        "ios_approach": "Ports byte-for-byte; the hook already uses portable POSIX character classes and `perl -0777 -pi -e` precisely for macOS/Linux parity, and the iOS repo's contributors are on macOS. Same single-file design (git runs only one commit-msg hook), same two jobs (strip Co-Authored-By / Authored-By / Generated-By / AI-Generated-By trailers matching the model-vendor alternation, then warn non-blocking on a missing `Signed-off-by:`), same always-exit-0. Install identically via `git config core.hooksPath .githooks`. attribution-check.yml is the server-side companion and ports unchanged."
+      },
+      {
+        "capability": "DCO enforcement",
+        "ios_approach": "Unchanged: `.github/dco.yml` with `require.members: true` (no maintainer exemption tier) and `allowRemediationCommits.individual: true`. Every bot commit stays signed \u2014 the changelog commit and sync commit use `git commit -s`, the lockfile-regen commit uses `--signoff`, and Renovate signs its own via gitAuthor + commitBody. Still DCO, not a CLA: it grants no relicensing rights, which matters because GPL-3.0-only is load-bearing for the whole distribution model."
+      },
+      {
+        "capability": "CODEOWNERS routing for release automation",
+        "ios_approach": "Ports unchanged in structure with new paths. `*` plus later-wins explicit rules for /.github/CODEOWNERS, GOVERNANCE.md, CONTRIBUTING.md, LICENSE, CODE_OF_CONDUCT.md, SECURITY.md, /.github/dco.yml, all of /.github/workflows/ (release.yml named again), /fastlane/, Config/*.xcconfig, *.entitlements, project.yml or the .xcodeproj, Package.swift, Package.resolved, renovate.json5, release-please-config.json, .release-please-manifest.json, .github/changelog-pr-config.json, .github/autolabeler-config.json, zizmor.yml, and the safety-critical driver trees /Sources/PumpDriverAPI/, /Sources/PumpDrivers/Tandem/, /Sources/PumpDrivers/Medtronic/. Add /fastlane/ and the entitlements files \u2014 on iOS those are the signing-policy surface the keystore config used to be."
+      },
+      {
+        "capability": "Workflow hygiene gates (workflow-lint.yml, workflow-security.yml)",
+        "ios_approach": "Fully language-agnostic; port 1:1 and keep the SHA-256-verified pinned-binary install pattern rather than third-party actions. actionlint 1.7.7 + shellcheck 0.10.0 with `actionlint -oneline -shellcheck=...`, the guard requiring a full 40-hex SHA on every third-party `uses:`, the composite-action guard against `${{ secrets.* }}` inside an action definition, zizmor with `--config zizmor.yml --min-severity=medium` over workflows and composite actions, and the guard failing any pull_request_target workflow that checks out PR head code. Re-scope the `artipacked` line-level ignores to the new line numbers and drop the `auto-merge-renovate.yml` whole-file entry unless that workflow is actually authored. This gate becomes the single most valuable one in the repo: fork build workflows execute with each user's Apple signing credentials in scope."
+      },
+      {
+        "capability": "Telemetry-credential exclusion from distributed builds (Sentry DSN guard)",
+        "ios_approach": "Ports directly and gains force. Keep the DSN empty by default, sourced only from the building user's own secret, and keep the hard build failure when a DSN is non-empty while `CI == true`. Mechanism swaps from `buildConfigField` to an xcconfig-driven Info.plist key read with `Bundle.main.object(forInfoDictionaryKey:)`, or a `-D` compilation condition. Keep an equivalent of `toJavaStringLiteral` escaping for the xcconfig/plist path. Rationale strengthens: an upstream-owned DSN baked into a build that users install would route patients' crash and breadcrumb data to the project."
+      }
+    ],
+    "needs_redesign": [
+      {
+        "capability": "Release artifact build and asset naming (four APKs -> one signed .ipa per user)",
+        "why": "There is no project-published binary. Each user builds and signs into their own Apple Developer account and their own TestFlight, so upstream CI cannot produce an installable artifact at all. The watchOS app ships embedded inside the iOS .ipa and is installed/updated by the system with it, so the phone/wear/two-watchface asset matrix collapses to a single archive. All the find+head-1 renaming, the `GlycemicGPT-<VERSION>-release.apk` naming contract, and `gh release upload --clobber` disappear from the release path.",
+        "options": [
+          "Upstream release job tags and writes release notes only; the fork's build workflow does `xcodebuild archive` + `-exportOptionsPlist method=app-store-connect` + fastlane `pilot`/`deliver` upload to the builder's own TestFlight.",
+          "Upstream additionally publishes unsigned iOS Simulator and watchOS Simulator .app bundles (`-sdk iphonesimulator`/`watchsimulator`) as release assets and CI artifacts, installable via `xcrun simctl install`.",
+          "Upstream publishes a source tarball only and forks are entirely responsible for artifacts."
+        ],
+        "recommendation": "Do both of the first two. Upstream release.yml tags, writes notes, and publishes Simulator .app bundles for iOS + watchOS with 90-day retention \u2014 that is the only artifact the lead (no iPhone, no Watch) can actually run, and it is unsigned so it needs no credentials. The user-facing artifact is produced solely by the fork's `build.yml` and lands in the user's own TestFlight. Keep the invariant that a doc-only promotion produces no build."
+      },
+      {
+        "capability": "Release signing-certificate assertion (hardcoded RELEASE_SIGNER_SHA256)",
+        "why": "The equality form is impossible on iOS: every user signs with their own Apple Distribution certificate, so there is no project-wide fingerprint to compare against. But the hazard it guards is real and has an exact analogue \u2014 `xcodebuild` can silently archive with an automatically-selected Development identity, producing an artifact that is not distribution-signed. The check must become a property assertion, not a constant comparison, and it must stay a hard fail.",
+        "options": [
+          "Assert on the archive/.ipa before upload: `codesign -dv --verbose=4` shows an 'Apple Distribution' identity; `security cms -D -i embedded.mobileprovision` shows `get-task-allow == false`, `TeamIdentifier` equal to the configured DEVELOPMENT_TEAM, and an ExpirationDate in the future.",
+          "Rely solely on App Store Connect rejecting non-distribution builds at upload time.",
+          "Pin the user's own cert fingerprint into their fork's repository variables on first setup and compare against that."
+        ],
+        "recommendation": "Option 1, as a mandatory pre-upload step that exits non-zero (never warns), mirroring rule 4's 'wear build failure is fatal at the cert step'. `get-task-allow == false` is the precise iOS equivalent of 'this is not a debug-signed build'. Do not depend on ASC rejection alone \u2014 it produces a late, opaque failure and burns the user's build number. Record the check's provenance in-repo, which the Android side never did (`docs/dev/parity-gate-runbook.md` is referenced three times and does not exist)."
+      },
+      {
+        "capability": "Gradle signingConfigs and the silent debug-signing fallback",
+        "why": "No keystores, no aliases, no store passwords. iOS signing is a certificate + provisioning profile pair issued by the builder's own Apple Developer account and selected by Xcode build settings. The Android failure mode (release buildType silently falling back to `signingConfigs.getByName(\"debug\")` when RELEASE_KEYSTORE_FILE is unset) reappears in a different shape as Xcode automatic signing quietly picking a Development identity or a wildcard profile.",
+        "options": [
+          "fastlane match with an encrypted private 'Match-Secrets' GitHub repo per user, `MATCH_PASSWORD` as a fork secret, manual signing in the archive step (the Loop/LoopWorkspace model).",
+          "Xcode automatic signing with `xcodebuild -allowProvisioningUpdates` plus an App Store Connect API key.",
+          "Manual per-user certificate export/import documented step by step."
+        ],
+        "recommendation": "fastlane match, with signing settings pinned in a committed xcconfig (CODE_SIGN_STYLE = Manual, PROVISIONING_PROFILE_SPECIFIER from the match profile name, DEVELOPMENT_TEAM = $(TEAMID)). Automatic signing is exactly the ambiguity that produced the Android debug-fallback bug. Bundle identifiers, App Group ids, and keychain access groups must be templated on `$(DEVELOPMENT_TEAM)` because Apple's App ID namespace is globally unique across all developer accounts \u2014 two users cannot both own `com.glycemicgpt.mobile`."
+      },
+      {
+        "capability": "op-load-signing-secrets composite action",
+        "why": "Its job \u2014 materialize a shared project keystore into $RUNNER_TEMP at mode 0600 from a project-controlled 1Password vault \u2014 is structurally incompatible with fork-and-build. Upstream must hold zero signing material, because every user signs with their own credentials and upstream never produces a binary.",
+        "options": [
+          "Delete the action entirely; each fork stores its own six secrets as GitHub Actions secrets and fastlane match decrypts them at build time.",
+          "Keep a 1Password-backed path only for the lead's own validation fork, as an optional local convenience.",
+          "Provide a composite action that only *validates* secret presence and ASC authentication, holding nothing."
+        ],
+        "recommendation": "Delete it and replace with option 3's validate-only action, invoked by the Validate Secrets workflow and by the build workflow's preflight. Preserve two of its design properties: fail-closed before any build step when a required credential is missing (so a build can never proceed unsigned or wrongly signed), and an `if: always()` cleanup step in the caller that removes the decrypted keychain and profiles, since composite actions still cannot register post-job steps."
+      },
+      {
+        "capability": "1Password secret model (vault github / item android-signing)",
+        "why": "The single-source-of-truth secret item and the read-only `ANDROID_ACTIONS_SERVICE_ACCOUNT` token assume one signing identity owned by the project. On iOS the secret set is per-user and lives in that user's fork, and its contents are different in kind (an App Store Connect API .p8, an issuer UUID, a key id, a team id, a match passphrase, a PAT for the private match repo).",
+        "options": [
+          "Per-fork GitHub Actions secrets only, documented as a six-item checklist; upstream holds nothing.",
+          "Per-fork secrets plus an optional 1Password `op run` wrapper for local maintainer builds.",
+          "A project-run service that provisions on users' behalf."
+        ],
+        "recommendation": "Option 1, with option 2 as an optional local convenience. Option 3 is a non-starter: it would require the project to hold users' Apple credentials. Carry over three properties that made the Android model good: names that map 1:1 onto what the build actually consumes (no translation layer), a non-sensitive canary-equivalent so plumbing can be proven without touching a real key, and a written rotation story \u2014 here 'revoke the ASC key in App Store Connect and replace three fork secrets', with no certificate re-issuance."
+      },
+      {
+        "capability": "versionCode derivation (major*1_000_000 + minor*10_000 + patch) and its update-comparison use",
+        "why": "Safety-critical on Android: the packed integer collides silently at patch > 9999 or minor > 99 and would make the updater report 'up to date' forever. iOS has no packed version integer \u2014 it has CFBundleShortVersionString (marketing, X.Y.Z) and CFBundleVersion (build). App Store Connect enforces the real constraint: CFBundleVersion must be strictly greater than any previously uploaded build for that app record, per Apple ID. The Android formula should not be reproduced; reproducing it would import the collision bug for no benefit.",
+        "options": [
+          "CFBundleShortVersionString = MARKETING_VERSION from the xcconfig; CFBundleVersion = the GitHub Actions run number.",
+          "CFBundleShortVersionString = MARKETING_VERSION; CFBundleVersion = a monotonic UTC clock value (e.g. minutes since a fixed epoch).",
+          "Reproduce the packed integer in CFBundleVersion for symmetry with Android."
+        ],
+        "recommendation": "Option 2. A run-number-derived build number regresses whenever a user recreates their fork, resets the workflow, or archives locally in Xcode before archiving in CI \u2014 and App Store Connect then permanently rejects uploads for that marketing version. A clock-derived value is monotonic across all of those. Never reuse the Android packed formula. Document a manual override for the rare user who has already uploaded a higher number."
+      },
+      {
+        "capability": "DEV_RUN_NUMBER_OFFSET = 500 (permanent, do-not-remove)",
+        "why": "The offset exists because the Android in-app updater does a strictly-greater comparison on a run number parsed out of an asset filename, and a repo split reset the native counter below numbers already on devices. iOS has no in-app updater and no filename-embedded run number, so the +500 constant itself has nothing to attach to. But the underlying invariant \u2014 never emit a build number less than or equal to one already emitted for this app record \u2014 is *stronger* on iOS, because App Store Connect enforces it and rejects violations permanently.",
+        "options": [
+          "Drop the offset; use the clock-derived CFBundleVersion, which is monotonic by construction.",
+          "Carry a literal +500 offset forward for symmetry.",
+          "Keep a per-fork offset stored as a repository variable that a user can bump if they ever hit a rejection."
+        ],
+        "recommendation": "Option 1 plus option 3 as an escape hatch: a `BUILD_NUMBER_OFFSET` repository variable defaulting to 0, added to the clock-derived value. That preserves the Android decision's real content (a one-way ratchet with a documented, never-decreasing adjustment) without inheriting a magic constant that no longer means anything. Record it with the same do-not-remove framing: lowering it strands the user's ability to upload, exactly as lowering +500 stranded dev users."
+      },
+      {
+        "capability": "dev-latest pre-release channel",
+        "why": "The Android dev channel works by publishing a debug-signed APK that the app downloads and installs. iOS has no sideload path, so 'the dev channel' cannot be an upstream-published binary that users install. What survives is the *intent*: a way to run develop-branch code with a distinct identity and a distinct update cadence.",
+        "options": [
+          "Fork build workflow takes a branch input (main | develop); running it against develop produces a TestFlight build in the user's own account.",
+          "Separate bundle identifier suffix (.dev) and a separate App Store Connect record so stable and dev can be installed side by side.",
+          "Upstream publishes only Simulator .app artifacts for develop and there is no on-device dev channel."
+        ],
+        "recommendation": "Option 1 as the baseline, with option 3 for the maintainer workflow. Option 2 doubles every user's provisioning burden (a second App ID, second profile, second ASC record, second TestFlight) and should only be taken if side-by-side install is an actual product requirement. Preserve the fail-closed property from dev-pre-release.yml: if credentials are missing the build aborts before archiving, so an improperly signed build is never uploaded. The path filter that gates the dev build (App/, Sources/, WatchApp/, Widgets/, Package.*, Config/, fastlane/, the workflow itself) ports directly."
+      },
+      {
+        "capability": "dev-latest publish (delete-and-recreate)",
+        "why": "`gh release delete dev-latest --cleanup-tag || true` immediately followed by `gh release create` exists to minimize the window in which the in-app dev updater 404s. With no in-app updater, no client is polling that tag, so the tight-coupling requirement evaporates. What remains is a rolling pointer to the newest develop build for humans and for Simulator artifact download.",
+        "options": [
+          "Keep the rolling `dev-latest` pre-release, now carrying Simulator .app bundles and release notes instead of APKs.",
+          "Replace it with a plain workflow artifact on the develop CI run (90-day retention, no release object).",
+          "Keep both."
+        ],
+        "recommendation": "Option 1 for discoverability, keeping the same one-step delete-then-create so the window stays small and the tag always points at the newest develop head. Drop the 404-mapping requirement on the client side. The 'failed create after successful delete leaves the channel empty' edge case remains but is no longer user-visible as an error state."
+      },
+      {
+        "capability": "Gradle dependency locking (lockAllConfigurations, per-module gradle.lockfile, resolveAndLockAll)",
+        "why": "SwiftPM has a single `Package.resolved` per workspace, not per-module lockfiles, and it pins both an exact version and a git revision SHA \u2014 which is a stronger pin than Gradle's version-only lock. The Android carve-outs (`_internal-unified-test-platform*`, `*DependenciesMetadata`) exist for AGP-specific configuration families that have no SwiftPM analogue, and the custom `resolveAndLockAll` task has no equivalent.",
+        "options": [
+          "Commit `Package.resolved` at the workspace path and build with `-onlyUseVersionsFromResolvedFile` / `-disableAutomaticPackageResolution` so a stale lockfile fails the build loudly.",
+          "Commit `Package.resolved` and let SwiftPM silently re-resolve when the manifest and lockfile disagree.",
+          "Vendor dependencies as git submodules or checked-in source."
+        ],
+        "recommendation": "Option 1, and treat the enforcement flag as mandatory. This is the sharpest trap in the port: SwiftPM's default behavior when `Package.resolved` is stale is to quietly re-resolve and succeed, which silently defeats pinning and would let a dependency-scan gate pass against versions that were never scanned. Also commit `Gemfile.lock` for the fastlane toolchain and run everything through `bundle exec` \u2014 that is the second real lockfile in an iOS repo and it is routinely forgotten."
+      },
+      {
+        "capability": "Renovate tiers and the never-auto-merge set (crypto vendor globs)",
+        "why": "The Android never-auto-merge set is expressed as vendor globs over Maven coordinates: `org.bouncycastle:*`, `net.zetetic:*` (SQLCipher), `androidx.security:*`, `org.openminimed:*` (Medtronic Sake crypto). On iOS most of that graph stops being a dependency at all \u2014 CryptoKit and Security.framework replace BouncyCastle and androidx.security, Keychain plus Data Protection classes replace EncryptedSharedPreferences, and there is no published `org.openminimed` artifact, so Sake crypto becomes first-party Swift source. The protection therefore has to move from package rules to source review.",
+        "options": [
+          "Port the tier structure and rewrite the negated package list against whatever SPM crypto/DB packages actually remain (e.g. a SQLCipher or GRDB-with-SQLCipher package if chosen).",
+          "Rely on CODEOWNERS plus required review for the reimplemented crypto source paths, and keep Renovate manual-only for the small remaining set.",
+          "Both."
+        ],
+        "recommendation": "Option 3. Keep the exact tier shape \u2014 Tier B as the only rule adding `automerge`, expressed all-negative, restricted to patch/minor; Tier D rules placed after it so `labels` last-wins and none adds automerge; groups scoped to patch/minor with manual coordinates excluded by name. Then add CODEOWNERS entries and a required-review rule on /Sources/Crypto/, /Sources/Persistence/, and the driver trees, because the crypto that Renovate used to guard is now code the project writes. Preserve the deliberate safe-fail: if Renovate's swift manager does not report the depType the Tier B rule matches on, Tier B matches nothing and everything falls to manual review \u2014 verify this empirically before going live, since the swift manager's depTypes differ from gradle's."
+      },
+      {
+        "capability": "License policy gate on redistributed dependencies (cash/licensee)",
+        "why": "There is no maintained SwiftPM equivalent of the licensee Gradle plugin. The policy content still applies verbatim and matters more, not less: the app is GPL-3.0-only, the whole fork-and-build distribution model exists to keep that workable, and EPL-1.0 must stay deliberately absent from the allowlist because the FSF treats it as GPLv3-incompatible for a combined distributed work.",
+        "options": [
+          "LicensePlist (mono0926/LicensePlist) to enumerate resolved SPM packages and extract LICENSE files, plus a small repo-owned gate script enforcing the SPDX allowlist.",
+          "`swift package show-dependencies --format json` to enumerate, ScanCode Toolkit or the `reuse` tool to identify licenses, plus the same gate script.",
+          "FOSSA or a commercial SCA service.",
+          "No gate; manual review at dependency-add time."
+        ],
+        "recommendation": "Option 1 for enumeration plus a project-owned allowlist JSON and gate script, falling back to option 2's ScanCode where a package's license is not machine-readable. Carry the allowlist over unchanged (Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, ICU, SAX-PD, SAX-PD-2.0, plus URL-matched GPL-3.0 for the project's own text), keep EPL-1.0 out, and keep the per-version `allowDependency`-with-a-`because`-reason pattern so a version bump re-raises the judgement. Option 4 is not acceptable \u2014 this is a legal-compliance gate, not a hygiene gate."
+      },
+      {
+        "capability": "Dependency CVE scanning (osv-scanner over Gradle lockfiles)",
+        "why": "osv-scanner's Gradle lockfile parser and OSV.dev's Maven advisory coverage have no equal on the Swift side. OSV.dev does carry a Swift package ecosystem, but advisory volume for SwiftPM is a small fraction of Maven's, and `Package.resolved` parsing is not on par with the Gradle lockfile path. A one-for-one tool swap would produce a gate that is green because it sees nothing.",
+        "options": [
+          "GitHub Dependency graph + Dependabot alerts, which support Swift/SwiftPM, as the alerting spine, with Dependabot security updates enabled.",
+          "osv-scanner over `Package.resolved` and `Gemfile.lock` where it parses, keeping `--no-ignore` so a lockfile can never be silently dropped while the gate stays green, and failing closed on scanner error.",
+          "Both, plus a documented quarterly manual review of the (small) third-party package list.",
+          "A commercial SCA product with Swift support."
+        ],
+        "recommendation": "Option 3. Keep the Android gate's two best properties: fail closed when the scanner itself errors, and `--no-ignore` so `--recursive` cannot skip a lockfile behind .gitignore. Keep osv-scanner.toml's discipline \u2014 no active suppressions, and any suppression requires a written reason plus an `ignoreUntil` forcing re-evaluation. Explicitly record in the PRD that Swift SCA coverage is weaker than the Android baseline, and compensate by minimizing third-party packages (prefer Apple frameworks) and retaining the 7-day `minimumReleaseAge` soak as the primary supply-chain defense, exactly as documented on Android."
+      },
+      {
+        "capability": "Security Scan Gate (Semgrep p/kotlin + p/java + p/secrets over Kotlin/Java sources)",
+        "why": "Named explicitly because it is the most likely thing to be mis-ported. Semgrep's `p/kotlin` and `p/java` rulesets produce exactly zero findings on Swift \u2014 a naive port yields a gate that is permanently, meaninglessly green over the entire application. Semgrep does support Swift as a language, but the registry's Swift rule coverage is thin next to the Kotlin and Java packs. Only `p/secrets` is language-agnostic and ports directly.",
+        "options": [
+          "CodeQL with the `swift` language pack and the `security-extended` query suite, run on a macOS runner, as the SAST gate of record.",
+          "Semgrep with Swift rules plus project-authored rules (ban NSAllowsArbitraryLoads, ban kSecAttrAccessibleAlways / kSecAttrAccessibleAlwaysThisDeviceOnly, ban hardcoded keys and tokens, require HTTPS URL construction, ban `try!` around crypto and keychain calls, ban logging of glucose/identifier values).",
+          "SwiftLint with `--strict` plus custom rules \u2014 lint and correctness, not SAST.",
+          "gitleaks or TruffleHog for secrets, in addition to or instead of p/secrets.",
+          "MobSF static analysis over an unsigned archive."
+        ],
+        "recommendation": "CodeQL Swift `security-extended` as the blocking gate (option 1) \u2014 it is the only true dataflow SAST for Swift and is free for public repositories \u2014 plus project-authored Semgrep Swift rules (option 2) for the app-specific bans, plus gitleaks over the full history (option 4) alongside the existing org-wide GitGuardian. SwiftLint `--strict` replaces `lintDebug` in the build gate, not the security gate. Keep the Android gate policy verbatim: block on HIGH/ERROR only, surface WARNING non-blocking, surface unparseable files as a warning so silently-skipped findings leave a signal, and fail closed when the scanner exits with an internal error."
+      },
+      {
+        "capability": "Build gate: unit tests, lint, and instrumented/emulator tests (android.yml)",
+        "why": "The shape survives but the runner class and the coverage boundary change materially. Everything moves to macOS runners at roughly a 10x minute multiplier for private repos, the KVM/AVD machinery disappears, and \u2014 decisively \u2014 Core Bluetooth does not exist in the iOS Simulator, so no Simulator-run test can exercise any BLE code path. The Android instrumented lane could at least boot a device image.",
+        "options": [
+          "`xcodebuild test` against iOS Simulator and watchOS Simulator destinations for everything non-BLE; BLE covered by an in-process simulated pump driver plus manual hardware validation.",
+          "Factor pure-Swift protocol parsing, framing, and safety-limit logic into platform-agnostic SwiftPM targets tested with `swift test` on Linux runners (fast and free), keeping only UI and framework-bound tests on macOS.",
+          "Self-hosted macOS runner with a physical iPhone attached for BLE integration tests."
+        ],
+        "recommendation": "Options 1 and 2 together. Option 2 materially cuts macOS minutes and gives the lead a fast local loop; it also matches the compile-time-linked driver architecture, where a driver is a Swift module whose parsing layer has no Core Bluetooth dependency. Option 3 is not viable given the hardware distribution (lead has no iPhone; the hardware maintainer's devices are not CI infrastructure). The aggregate 'iOS Gate' required check keeps the same single-status design as 'Android Gate'. State plainly in the gate's own output that it does not cover BLE."
+      },
+      {
+        "capability": "Build-time toolchain and flags (Gradle wrapper, AGP, buildTypes, BuildConfig fields)",
+        "why": "Every mechanism changes even though every capability survives. Gradle wrapper + gradle-wrapper.properties + wrapper checksum verification becomes Xcode version selection, for which there is no checksum-verifiable equivalent \u2014 you trust the runner image. buildTypes become xcconfig-driven build configurations. BuildConfig fields become Info.plist keys via `$(VAR)` substitution or `SWIFT_ACTIVE_COMPILATION_CONDITIONS` flags.",
+        "options": [
+          "Committed `.xcode-version` plus `sudo xcode-select -s` in CI and `xcodes`/`mise` locally; Debug/Release xcconfigs; Info.plist substitution for string values and `-D` conditions for booleans.",
+          "Xcode's automatic 'latest stable' selection on the runner image, unpinned.",
+          "Bazel or Tuist for a hermetic build."
+        ],
+        "recommendation": "Option 1. Pin the Xcode version in-repo and assert at build start that the selected version matches, because an unpinned Xcode bump can silently change signing, entitlement defaults, and SwiftPM resolution. Map the flags directly: UPDATE_CHANNEL -> an Info.plist channel string; DEV_BUILD_NUMBER -> CFBundleVersion (no separate field needed); MEDTRONIC_DRIVER_ENABLED -> a compilation condition that removes the driver module from the binary and the UI, which is stronger than Android's runtime kill switch and matches the compile-time-linked driver decision; watch-face asset SHA-256 fields -> not applicable. Note the genuine loss: nothing in the iOS toolchain corresponds to Gradle wrapper checksum validation."
+      },
+      {
+        "capability": "Local developer tooling (scripts/mobile-dev.sh)",
+        "why": "Every command maps to a different binary and one command has no mapping at all. adb/emulator become `xcrun simctl` and `xcrun devicectl`; logcat tag filters become `log stream --predicate 'subsystem == \"\u2026\"'`; APK install becomes `simctl install` of a .app or TestFlight on device. The `ble-raw` lane, which greps BLE_RAW from logcat, cannot exist in the Simulator because Core Bluetooth is absent there.",
+        "options": [
+          "Rewrite as `scripts/ios-dev.sh` over simctl/devicectl/log, keeping the same verb structure (devices, build, sim start/stop/install, phone logcat, watch logcat).",
+          "Adopt fastlane lanes for the same operations.",
+          "Both: a thin shell wrapper that shells out to fastlane and simctl."
+        ],
+        "recommendation": "Option 1, keeping the same ergonomics and `set -euo pipefail` discipline, plus a paired-simulator helper (`simctl pair` an iPhone and an Apple Watch simulator, boot both, install both apps) since the lead validates the watch app exclusively in the Simulator. Replace the `ble-raw` lane with a `sim-driver` lane that drives the in-process simulated pump driver and streams its log subsystem, and label it in the script's own help text as not-real-BLE. Replace shell.nix with a Brewfile or mise.toml plus `.xcode-version` \u2014 nixpkgs cannot provision Xcode."
+      },
+      {
+        "capability": "Per-user identifier and entitlement provisioning (new; no Android analogue)",
+        "why": "Android needs no per-user registration: an applicationId is a string and a keystore is a local file. On iOS, App IDs are globally unique across every Apple Developer account, so two independent forkers cannot both own the same bundle identifier, and App Groups, keychain access groups, and every entitlement must be registered with Apple before a profile can be issued. Nothing in the Android repo prepares for this and it is the single largest new setup burden.",
+        "options": [
+          "A fastlane `add_identifiers` lane run once per user that creates the App IDs (host app, watch app, widget/complication extension, any app-group container) with $(TEAMID)-templated identifiers and enables the required capabilities.",
+          "Manual step-by-step registration in the Apple Developer portal, documented.",
+          "A single project-owned App ID prefix that users share."
+        ],
+        "recommendation": "Option 1, mirroring the Loop Browser Build model, with option 2 as fallback documentation. Option 3 is impossible \u2014 Apple does not permit it. Template every identifier on `$(DEVELOPMENT_TEAM)`. The lane must enable exactly the capabilities the app needs (App Groups, HealthKit if used, Background Modes for bluetooth-central, Time Sensitive Notifications) and must report clearly which capabilities Apple cannot auto-grant \u2014 notably `com.apple.developer.usernotifications.critical-alerts`, which requires a per-team application to Apple and is rarely approved for individuals. The build must never hard-depend on an entitlement a user cannot obtain."
+      },
+      {
+        "capability": "Build freshness and distribution lifecycle (new; replaces the in-app update channel)",
+        "why": "TestFlight builds expire 90 days after upload and stop launching. On Android the in-app updater kept users current; on iOS the user's own CI is the only thing that can. This is the honest functional replacement for the entire AppUpdateChecker/dev-latest mechanism and it has no Android counterpart, so it will be missed if it is not written down as a requirement.",
+        "options": [
+          "Scheduled workflow in each fork that rebuilds and re-uploads monthly, plus manual `workflow_dispatch`.",
+          "Rely on the user noticing the expiry and rebuilding manually.",
+          "In-app countdown and notification only, with no automation."
+        ],
+        "recommendation": "Option 1 plus option 3's in-app surfacing. Ship the scheduled rebuild workflow in the template so it exists in every fork by default, and have the app display its own build date, expiry date, and days remaining, with a local notification as expiry approaches. Additionally keep a passive upstream-version notice: the app knows the tag/SHA it was built from and can query the upstream GitHub Releases API to say 'a newer release exists \u2014 re-run your build workflow', deep-linking to TestFlight via `itms-beta://`. That notice must never download or execute code."
+      }
+    ],
+    "impossible": [
+      {
+        "capability": "In-app phone update channel client (AppUpdateChecker: download APK, hand to package installer, self-update)",
+        "why": "iOS has no user-invocable package installer and no sideload path for a normal Apple Developer Program account. There is no equivalent of `Intent.ACTION_VIEW` with `application/vnd.android.package-archive`, no FileProvider handoff to an installer, and no 'install unknown apps' permission. `itms-services://` over-the-air installation requires an Apple Developer *Enterprise* Program membership, which requires 100+ employees and whose terms forbid distribution outside the organization \u2014 not available to this project or to individual users. App Store review guideline 2.5.2 independently forbids an app downloading and executing code. Every downstream detail (the anchored `^GlycemicGPT-(\\d+\\.\\d+\\.\\d+)-release\\.apk$` selector, `matches.singleOrNull()`, the expectedVersion-equals-tag check, `parseDevRunNumber`, the 403/404 message mapping) has no target to attach to.",
+        "closest_alternative": "TestFlight is the update mechanism. Users enable TestFlight's automatic-update toggle and receive whatever their own CI uploads. The app keeps a read-only version *notifier*: it knows the tag and short SHA it was built from, queries the upstream GitHub Releases API for the newest release, and if that is newer shows a non-blocking notice with a deep link to TestFlight (`itms-beta://`). Preserve the two safety properties of the Android selector in the new context: the notice must state the exact version it is comparing against (no ambiguous match), and it must fail silent rather than fail wrong when the API is unreachable or rate-limited."
+      },
+      {
+        "capability": "APK download hardening (HTTPS enforcement in code, github.com/objects.githubusercontent.com host allowlist, filename sanitization, expected-size verification, cache-dir cleanup)",
+        "why": "This is defense-in-depth around a code-execution path that does not exist on iOS. With no downloadable installable artifact, there is no download to harden, no cacheDir/apk_updates or wear_apk_updates to purge, no filename to sanitize, and no size check to perform. The 100 MB `MAX_DOWNLOAD_SIZE_BYTES` cap likewise has nothing to cap. Retaining the code as-is would be dead code implying a protection that is not being exercised.",
+        "closest_alternative": "Apple's own signing and delivery chain is the replacement trust anchor: TestFlight serves only builds signed by the user's Apple Distribution certificate and validated by App Store Connect. Carry the *principles* to the surfaces that do exist on iOS \u2014 App Transport Security left at its secure default with any LAN/cleartext exception scoped by NSExceptionDomains to the specific self-hosted backend host rather than NSAllowsArbitraryLoads, an explicit in-code https-and-host check on backend and Nightscout-mediated endpoints, and a Semgrep/CodeQL rule that fails the build on any arbitrary-loads flag. Keep the CI gate that asserts ATS was not weakened."
+      },
+      {
+        "capability": "Wear APK update client (WearAppUpdateChecker: phone downloads a Wear APK and pushes it to the watch)",
+        "why": "watchOS gives no third-party mechanism to install or update an app on the watch. A watchOS app is embedded inside the iOS application bundle and is installed, updated, and removed by the system together with its host app; WatchConnectivity transfers files to the watch app's sandbox and can never install executable code. The Android design \u2014 a separate `GlycemicGPT-Wear-*.apk` asset selected by prefix and suffix, its own `wear_apk_updates` cache, its own run-number comparison against `watchDevBuildNumber` \u2014 has no addressable target. Note also that the Android bug this would import (`firstOrNull` instead of the phone selector's anchored `singleOrNull`) is moot.",
+        "closest_alternative": "Version lockstep by construction: the watchOS app's CFBundleShortVersionString must equal the host iOS app's, and both ship in one .ipa, so 'the watch is out of date relative to the phone' is structurally impossible after a successful TestFlight install. The app should still surface watch-app reachability and installed-version state via WCSession (`isWatchAppInstalled`, `isPaired`, `activationState`) so a user can see when the watch app has not finished installing, and tell them to open the Watch app on iPhone rather than offering an update action."
+      },
+      {
+        "capability": "Watch face artifact publication and its signing carve-out (GlycemicGPT-WatchFace-Digital/Analog APKs, WFF assets, WatchFacePusher, the deliberate exclusion of watch-face APKs from the certificate assertion)",
+        "why": "watchOS has no third-party watch face API. Apple ships no SDK for creating, installing, or pushing a custom watch face; faces are Apple's own and third parties cannot add to that set. Consequently there are no watch-face build products to name, sign, upload, or exclude from a certificate assertion, and the runtime tamper check that compares committed WFF asset SHA-256s baked into BuildConfig has nothing to verify. The entire watchface Gradle module, its `digitalFull`/`analogMechanical` flavors, its unconditional debug signingConfig, and its `vcsInfo { include = false }` all disappear.",
+        "closest_alternative": "WidgetKit complications in the accessory families (accessoryCircular, accessoryCorner, accessoryRectangular, accessoryInline) placed by the user on any built-in Apple watch face, plus a Smart Stack widget for glanceable data without a face slot. These are signed as part of the app bundle by the user's own Distribution certificate, so they are covered by the same signing assertion as everything else \u2014 which is strictly better than the Android carve-out, where the published watch-face APKs were debug-signed. Data refresh is governed by WidgetKit timeline reloads and watchOS budgets, not by a push mechanism."
+      }
+    ],
+    "ios_requirements": [
+      "A maintainer can promote develop to main with a single command, and that one push fans out to version bumping, changelog PR creation, and cherry-pick sync-back, with the same message-string trigger predicates preventing any loop.",
+      "The repository has exactly one version source of truth, bumped automatically from conventional commits, and the iOS app, watchOS app, and every extension always report the identical marketing version.",
+      "Every build uploaded to App Store Connect carries a build number strictly greater than any previously uploaded for that developer account, derived so that it cannot regress when a fork is recreated, a run counter resets, or a maintainer archives locally before archiving in CI.",
+      "A user can fork the repository, add a documented fixed set of secrets to their fork, and produce a build in their own TestFlight without editing any source file.",
+      "Bundle identifiers, App Group containers, and keychain access groups are derived from the building user's Apple Team ID so two independent users never collide in Apple's global App ID namespace.",
+      "A one-time setup workflow registers the App IDs the app needs with exactly the capabilities it uses, and reports which entitlements Apple must grant by application rather than automatically.",
+      "The build pipeline hard-fails, never warns, if the archive is not signed by an Apple Distribution identity for the configured team, if the embedded profile permits debugging, or if the profile is expired.",
+      "A user can validate their signing credentials in isolation \u2014 App Store Connect key authenticates, private certificate repository decrypts \u2014 without running a build and without any secret value appearing in logs.",
+      "A user can re-run their build on demand and on a recurring schedule so their installed build never lapses past Apple's 90-day TestFlight expiry.",
+      "The app shows the version and commit it was built from, its build date, and the number of days until that build expires, and tells the user how to refresh it.",
+      "The app can tell the user that a newer upstream release exists than the one it was built from and deep-link to TestFlight; it never downloads, stores, or executes code obtained at runtime.",
+      "A user can choose whether their build comes from the stable branch or the development branch, and the running app states which channel it came from.",
+      "Upstream CI publishes iOS Simulator and watchOS Simulator application bundles for every release and for the development channel, so a maintainer with no physical iPhone or Apple Watch can install and exercise the full app in a paired simulator.",
+      "Every direct and transitive Swift package dependency is pinned to an exact version and revision in a committed lockfile, and any build whose lockfile does not match its manifests fails loudly rather than silently re-resolving.",
+      "The Ruby release toolchain is pinned by a committed lockfile and every CI invocation runs through it.",
+      "A bot dependency pull request that changes package manifests has its lockfile regenerated automatically on an Apple toolchain and pushed back to the same pull request, or fails visibly; the job that pushes never executes pull-request-authored code or hooks.",
+      "Dependency updates touching cryptography, secure storage, database encryption, the build toolchain, CI actions, prerelease packages, or any major version can never merge without human approval.",
+      "A required status check refuses to let any bot pull request auto-merge if it changes a file outside the set that the build and dependency-scan gates actually cover.",
+      "Every dependency is checked for known vulnerabilities on every dependency change and on a schedule, and a scanner that crashes fails the gate closed rather than passing.",
+      "Every redistributed dependency's license is checked against an explicit allowlist and the build fails on any license outside it, with GPL-incompatible licenses permanently absent from that list.",
+      "Swift and watchOS sources are statically analyzed for security defects on every pull request by a gate that blocks on high-severity findings, surfaces lower-severity findings without blocking, and reports files it could not parse.",
+      "Secrets are scanned across the repository on every pull request.",
+      "Every workflow definition is linted and security-audited, and every third-party action is pinned to a full commit SHA, with violations blocking merge.",
+      "Every commit is developer-certificate-signed and free of AI attribution trailers, enforced both by a local hook and server-side so an uninstalled hook cannot bypass it.",
+      "Changed-path and commit-type labels are applied automatically to every pull request and drive both the changelog taxonomy and the dependency auto-merge policy.",
+      "Changes to signing configuration, entitlements, release automation, dependency policy, and the safety-critical pump driver trees require the project lead's review.",
+      "No build a user runs ever contains a project-owned telemetry or analytics credential; crash reporting is off by default and can only be enabled with the building user's own credential.",
+      "The Xcode version, Swift toolchain, and every CLI tool used by CI are pinned in the repository and are the same on a maintainer's machine as in CI, with a mismatch failing the build.",
+      "A maintainer can boot a paired iPhone and Apple Watch simulator, install both apps, and stream filtered subsystem logs with a single command.",
+      "Bluetooth-dependent behavior is exercised either on physical hardware by the hardware maintainer or against an in-process simulated pump driver, and every CI gate states explicitly that it does not cover real Bluetooth.",
+      "A fork can pull upstream changes and rebuild without manual merge work, and can see which upstream release it is currently behind.",
+      "The upstream project holds no signing key, certificate, provisioning profile, or Apple credential belonging to itself or to any user.",
+      "Compile-time inclusion of an individual pump driver is controlled by an in-repository build setting that removes the driver from the binary and from the user interface entirely."
+    ],
+    "risks": [
+      {
+        "risk": "Fork build workflows execute third-party GitHub Actions with each user's App Store Connect private key, match passphrase, and personal access token in scope. A single compromised or unpinned action in the build lane exfiltrates the signing identity of every user who has synced that workflow \u2014 a far larger blast radius than the Android model, where only the project held a keystore.",
+        "severity": "critical",
+        "mitigation": "Apply the existing full-SHA pin gate to the fork build workflow with no exceptions; keep the action set in that workflow minimal and prefer plain `run:` steps over marketplace actions; treat any change to the build lane as a security-critical review requiring the project lead; document for users that syncing upstream pulls new workflow code that will run with their credentials, and that they should read the workflow diff."
+      },
+      {
+        "risk": "TestFlight builds stop launching 90 days after upload. A user who does not rebuild loses the app entirely \u2014 for a diabetes monitoring app this is a silent loss of monitoring, not a cosmetic degradation.",
+        "severity": "critical",
+        "mitigation": "Ship a scheduled rebuild workflow enabled by default in every fork; surface build date, expiry date, and days remaining in the app; fire escalating local notifications starting well before expiry; document manual re-trigger in the top-level setup guide, not buried in troubleshooting."
+      },
+      {
+        "risk": "App Store Connect permanently rejects a build number less than or equal to one already uploaded for the same marketing version. A run-number-derived or otherwise resettable build number can put a user into a state where every upload fails with an opaque error.",
+        "severity": "high",
+        "mitigation": "Derive the build number from a monotonic UTC clock rather than a run counter; provide a documented, never-decreasing offset repository variable as an escape hatch; surface the actual App Store Connect rejection message verbatim in the workflow output so the failure is diagnosable."
+      },
+      {
+        "risk": "Apple Developer Program membership lapses annually and distribution certificates and provisioning profiles expire on a one-year cycle. A lapse silently ends a user's ability to build, with no upstream visibility.",
+        "severity": "high",
+        "mitigation": "Have the build pipeline report days-to-expiry for the certificate, profile, and program membership on every run and warn at a threshold; document renewal in the setup guide; have the app show its own signing expiry alongside its build expiry."
+      },
+      {
+        "risk": "The critical alerts entitlement cannot be self-enabled \u2014 it requires a per-team application to Apple that is rarely granted to individuals. If any alerting behavior in the app is designed to depend on it, most users' builds will either fail to provision or ship with silently degraded alarms.",
+        "severity": "high",
+        "mitigation": "Design alerting to time-sensitive interruption level with custom sounds as the baseline and treat critical alerts as an optional enhancement; make the provisioning lane report the entitlement's absence explicitly rather than failing; never let the build depend on it. Behavioral design belongs to the alerting subsystem; provisioning must not assume the grant."
+      },
+      {
+        "risk": "Swift/SwiftPM vulnerability advisory coverage is materially thinner than Maven's, and lockfile parsing support is weaker. The dependency scan gate can be green while a vulnerable package is present, producing false assurance relative to the Android baseline.",
+        "severity": "high",
+        "mitigation": "Run both GitHub Dependabot alerts and osv-scanner rather than one; keep the 7-day minimum-release-age soak with strict internal checks as the primary supply-chain defense as documented on Android; minimize third-party packages by preferring Apple system frameworks; add a documented quarterly manual review of the resolved package list; state the coverage gap explicitly in the security-testing doc rather than implying parity."
+      },
+      {
+        "risk": "Porting Semgrep's Kotlin and Java rulesets to a Swift repository yields a permanently green gate covering nothing, which is worse than no gate because it reads as passing coverage on a required status check.",
+        "severity": "high",
+        "mitigation": "Make CodeQL Swift `security-extended` the blocking gate of record and verify on a seeded test finding that it actually fails the build; add project-authored Swift rules for app-specific bans; keep the fail-closed-on-scanner-error rule; assert a non-zero rule count at scan time so an empty ruleset cannot masquerade as a clean scan."
+      },
+      {
+        "risk": "SwiftPM silently re-resolves when Package.resolved disagrees with the manifests, so a stale or missing lockfile still produces a successful build against unpinned, unscanned versions \u2014 defeating both the pinning guarantee and the dependency scan.",
+        "severity": "high",
+        "mitigation": "Build with automatic package resolution disabled and resolved-file-only enforcement in every CI lane, so a stale lockfile is a hard build failure; make the lockfile-regeneration job's failure block the dependency pull request rather than merely warn."
+      },
+      {
+        "risk": "There is no Swift or Xcode equivalent of Gradle wrapper checksum verification. Toolchain trust reduces to the GitHub-hosted runner image and the selected Xcode version, and an unpinned Xcode bump can silently change signing behavior, entitlement defaults, and package resolution.",
+        "severity": "medium",
+        "mitigation": "Commit an explicit Xcode version pin, select it in CI, and assert at build start that the selected version matches the pin; prefer GitHub-hosted images over self-hosted runners; treat an Xcode bump as a build-toolchain change requiring lead review, exactly as the Android policy treats AGP and Gradle bumps."
+      },
+      {
+        "risk": "Losing the fixed release-signer fingerprint assertion removes an equality check with no per-user replacement, so nothing structurally prevents a user's pipeline from producing and installing a development-signed build.",
+        "severity": "medium",
+        "mitigation": "Replace equality with a property assertion that is equally hard-failing: Apple Distribution identity, get-task-allow false, team identifier equal to the configured team, profile unexpired. Record the check's provenance in-repo \u2014 the Android side referenced a runbook that does not exist."
+      },
+      {
+        "risk": "Every user becomes their own release engineer. A mis-entered secret, a wrong team role on the App Store Connect key, or a stale provisioning profile produces a build failure with no upstream visibility and no shared logs to debug against.",
+        "severity": "medium",
+        "mitigation": "Ship the Validate Secrets workflow and require it as the documented first step; make every preflight failure emit a specific, greppable message naming the exact secret or setting at fault; maintain a troubleshooting document keyed to those messages; keep the fail-closed-before-build property so failures happen fast and cheap."
+      },
+      {
+        "risk": "Uploading a GPL-3.0-only work to TestFlight is a distribution under Apple's terms, and the long-standing free-software objection to App Store distribution terms applies to TestFlight as well. The risk grows if a maintainer adds another person as an internal tester on their own team rather than having that person build their own fork.",
+        "severity": "medium",
+        "mitigation": "Keep the model strictly one-user-one-account-one-build; document that each hardware validator builds and installs from their own fork and their own developer account; do not add third-party internal testers to a maintainer's team without legal review."
+      },
+      {
+        "risk": "The Android promotion pipeline is documented as built and unit-proven in parts but never exercised end to end, and the lockfile-regeneration path is labelled unproven. Porting it wholesale ports unvalidated behavior into a repository where the first real release is also the first live test.",
+        "severity": "medium",
+        "mitigation": "Exercise the full promotion, changelog, and sync-back cycle on a throwaway repository before the first iOS release; verify empirically that Renovate's Swift manager reports the dependency type the auto-merge tier matches on, since the documented safe-fail is that everything falls to manual review if it does not."
+      },
+      {
+        "risk": "macOS runner minutes carry roughly a 10x multiplier for private repositories. A user who makes their fork private can exhaust the free allowance in a handful of iOS-plus-watchOS builds and lose the ability to rebuild before expiry.",
+        "severity": "medium",
+        "mitigation": "Document keeping the fork public; factor platform-agnostic parsing and safety logic into Swift packages tested on Linux runners to cut macOS time; cache derived data and resolved packages; avoid rebuilding on documentation-only changes using the existing deployable-change path filter."
+      },
+      {
+        "risk": "The Android repository's dependency documentation describes an auto-merge relay workflow that does not exist, and the workflow-security allowlist names it by filename. Porting the documentation faithfully would carry a described-but-absent control into the iOS repo.",
+        "severity": "low",
+        "mitigation": "Either author the relay workflow in the iOS repository or remove every reference to it, and drop the corresponding whole-file entry from the workflow-security allowlist so it does not silently exempt a future file of that name."
+      }
+    ],
+    "questions_for_pm": [
+      "Hardware validation depends on the maintainer with an iPhone, Apple Watch, and t:slim X2. Should he build from his own fork under his own Apple Developer account (clean under the fork-and-build model, but costs him $99/yr and a full setup), or be added as an internal TestFlight tester on the lead's account (much faster loop, but is a distribution of a GPL-3.0-only binary under Apple's terms and reintroduces the licence conflict the fork-and-build model exists to avoid)? This is a legal and cost judgment that cannot be resolved from the Android repo or Apple's rules.",
+      "Must a user be able to have the stable build and the development build installed on the same iPhone at the same time? On Android this was free \u2014 different applicationId suffixes. On iOS it requires a second globally-unique App ID, a second provisioning profile, a second App Store Connect record, and a second TestFlight setup for every single user, roughly doubling the onboarding burden. If side-by-side is not a real requirement, one identifier and a branch-selectable build is dramatically cheaper."
+    ]
+  }
+}
