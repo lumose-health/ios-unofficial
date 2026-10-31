@@ -100,7 +100,7 @@ driver_conditions() {
 }
 
 project_paths() {
-  find . \( -path './.build' -o -path './.swiftpm' -o -name '_bmad*' \) -prune -o \( -name '*.xcodeproj' -o -name '*.xcworkspace' \) -print
+  find . \( -path './.build' -o -path './.swiftpm' -o -name '_bmad*' \) -prune -o \( -name '*.xcodeproj' -o -name '*.xcworkspace' \) -print -prune
 }
 
 project_tripwire() {
@@ -233,6 +233,8 @@ self_test() {
   (cd "$fixture"; assert_case unlisted-build-project fail 'Xcode project exists but XCODE_BUILD_SCHEMES is empty' project_tripwire XCODE_BUILD_SCHEMES 0; assert_case unlisted-ui-project fail 'has no UI-test scheme or reasoned opt-out' ui_project_tripwire)
   (cd "$fixture"; XCODE_UITEST_OPTOUT=('Test.xcodeproj:'); assert_case empty-ui-optout-reason fail 'has no UI-test scheme or reasoned opt-out' ui_project_tripwire)
   (cd "$fixture"; XCODE_UITEST_OPTOUT=('Test.xcodeproj:no UI-test target yet'); assert_case reasoned-ui-optout pass '' ui_project_tripwire)
+  mkdir -p "$fixture/Test.xcodeproj/project.xcworkspace"
+  (cd "$fixture"; XCODE_UITEST_OPTOUT=('Test.xcodeproj:no UI-test target yet'); assert_case nested-workspace-ignored pass '' ui_project_tripwire)
   echo 'self-test: all cases passed'
 }
 
