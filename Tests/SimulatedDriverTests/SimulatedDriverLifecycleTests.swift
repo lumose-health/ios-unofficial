@@ -113,6 +113,66 @@ struct SimulatedDriverLifecycleTests {
         #expect(secondReading != firstReading, "the re-activated Driver keeps producing new data")
     }
 
+    /// The host cancels its consuming task when it stops, and cancelling a
+    /// `for await` consumer terminates an `AsyncStream` for good. If the
+    /// Driver handed that same stream to the next activation, the host's new
+    /// loop would end at once and live updates would stop after the first
+    /// background/foreground cycle.
+    @Test("A consumer cancelled at teardown does not kill the next activation's streams")
+    func cancelledConsumerDoesNotKillNextActivation() async throws {
+        let (driver, clock, scheduler) = try makeDriver()
+        try await driver.activate()
+        guard case .glucoseSource(let firstGlucose) = driver.capability(.glucoseSource),
+              case .insulinSource(let firstInsulin) = driver.capability(.insulinSource) else {
+            Issue.record("expected glucose and insulin ports")
+            return
+        }
+        let (received, signal) = AsyncStream<Void>.makeStream()
+        let glucoseConsumer = Task { for await _ in firstGlucose.readings { signal.yield() } }
+        let insulinConsumer = Task { for await _ in firstInsulin.insulinOnBoard {} }
+        clock.advance(by: SimulatedDriver.defaultTickInterval)
+        await scheduler.tick()
+        var receivedIterator = received.makeAsyncIterator()
+        _ = await receivedIterator.next()
+        glucoseConsumer.cancel()
+        insulinConsumer.cancel()
+        await glucoseConsumer.value
+        await insulinConsumer.value
+        await driver.deactivate()
+
+        try await driver.activate()
+        guard case .glucoseSource(let glucose) = driver.capability(.glucoseSource),
+              case .insulinSource(let insulin) = driver.capability(.insulinSource) else {
+            Issue.record("expected glucose and insulin ports")
+            return
+        }
+        var glucoseIterator = glucose.readings.makeAsyncIterator()
+        var insulinIterator = insulin.insulinOnBoard.makeAsyncIterator()
+        clock.advance(by: SimulatedDriver.defaultTickInterval)
+        await scheduler.tick()
+
+        let sample = await glucoseIterator.next()
+        #expect(sample?.recordedAt == clock.now, "the reactivated glucose stream must deliver the new tick")
+        let iob = await insulinIterator.next()
+        #expect(iob?.calculatedAt == clock.now, "the reactivated insulin stream must deliver the new tick")
+    }
+
+    @Test("Teardown finishes the streams handed out for that activation")
+    func teardownFinishesStreams() async throws {
+        let (driver, _, _) = try makeDriver()
+        try await driver.activate()
+        guard case .glucoseSource(let glucose) = driver.capability(.glucoseSource),
+              case .insulinSource(let insulin) = driver.capability(.insulinSource) else {
+            Issue.record("expected glucose and insulin ports")
+            return
+        }
+        var glucoseIterator = glucose.readings.makeAsyncIterator()
+        var insulinIterator = insulin.insulinOnBoard.makeAsyncIterator()
+        await driver.deactivate()
+        #expect(await glucoseIterator.next() == nil)
+        #expect(await insulinIterator.next() == nil)
+    }
+
     @Test("A failed Driver activates again without a teardown in between")
     func failedDriverActivatesAgain() async throws {
         let (driver, clock, scheduler) = try makeDriver()

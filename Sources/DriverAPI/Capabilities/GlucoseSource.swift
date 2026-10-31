@@ -22,10 +22,19 @@ public protocol GlucoseSource: Sendable {
     /// missing what the other consumed — for this stream, missing glucose
     /// readings with no error anywhere. The platform is the one consumer;
     /// anything else that wants readings observes what the platform stores,
-    /// never this port. A Driver vends the SAME stream on every read of this
-    /// property, so the getter is side-effect free and a re-read is not a
-    /// fresh subscription. Every stream on a Capability port carries this
-    /// contract.
+    /// never this port.
+    ///
+    /// SCOPED TO ONE ACTIVATION. Within an activation a Driver vends the SAME
+    /// stream on every read of this property, so the getter is side-effect
+    /// free and a re-read is not a fresh subscription. ``Driver/deactivate()``
+    /// finishes the stream, which ends the consumer's loop, and the next
+    /// ``Driver/activate()`` feeds a fresh one: the platform reads the port
+    /// again after each activation and never reuses a stream across one.
+    /// The reason is that cancelling a `for await` consumer terminates an
+    /// `AsyncStream` permanently, and the platform cancels its consumers when
+    /// it stops a Driver; a stream carried into the next activation would end
+    /// the new consumer at once. Every stream on a Capability port carries
+    /// this contract.
     var readings: AsyncStream<GlucoseSample> { get }
 
     /// The most recent reading the Driver holds, or `nil` if it holds none.

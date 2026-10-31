@@ -167,6 +167,102 @@ struct DriverHostTests {
         #expect(await driver.activationCount == 1)
         #expect(scheduler.isCancelled)
     }
+
+    @Test @MainActor func liveUpdatesResumeAfterStopAndReactivation() async throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let clock = HostAdjustableClock(now: now)
+        let driver = StreamingHostDriver()
+        let model = HomeModel(driver: driver, demoIdentifiers: [], clock: clock, scheduler: HostManualScheduler())
+        await model.activateIfNeeded()
+
+        let first = GlucoseSample(glucose: try Glucose(mgdl: 110), recordedAt: now, trend: .steady)
+        await driver.emit(first)
+        #expect(await eventually { model.latestGlucose == first })
+
+        await model.stop()
+        await model.activateIfNeeded()
+
+        clock.advance(by: 300)
+        let second = GlucoseSample(glucose: try Glucose(mgdl: 140), recordedAt: clock.now, trend: .rising)
+        await driver.emit(second)
+        #expect(await eventually { model.latestGlucose == second }, "streams must deliver after reactivation")
+        await model.stop()
+    }
+
+    @Test @MainActor func lateBackgroundRequestActsOnLatestScenePhase() async {
+        let driver = StreamingHostDriver()
+        let model = HomeModel(driver: driver, demoIdentifiers: [], scheduler: HostManualScheduler())
+        await model.setScenePhaseActive(true).value
+
+        // Background then foreground in quick succession, with the tasks
+        // completing in the opposite order to how they were requested.
+        let background = model.setScenePhaseActive(false)
+        let foreground = model.setScenePhaseActive(true)
+        await foreground.value
+        await background.value
+        #expect(model.lifecycleState == .active)
+        #expect(model.ports != nil)
+
+        await model.setScenePhaseActive(false).value
+        #expect(model.lifecycleState == .notActivated)
+    }
+
+    @Test @MainActor func foregroundDuringBackgroundTeardownReactivates() async {
+        let gate = HostDeactivationGate()
+        let driver = StreamingHostDriver(deactivationGate: gate)
+        let model = HomeModel(driver: driver, demoIdentifiers: [], scheduler: HostManualScheduler())
+        await model.setScenePhaseActive(true).value
+
+        let background = model.setScenePhaseActive(false)
+        await gate.waitUntilEntered()
+        let foreground = model.setScenePhaseActive(true)
+        await foreground.value
+        await gate.release()
+        await background.value
+        #expect(model.lifecycleState == .active)
+        #expect(await driver.activationCount == 2)
+    }
+
+    @Test @MainActor func futureDatedGlucoseBeyondSkewIsDroppedAndDoesNotBlockLaterSamples() async throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let clock = HostAdjustableClock(now: now)
+        let driver = StreamingHostDriver()
+        let model = HomeModel(driver: driver, demoIdentifiers: [], clock: clock, scheduler: HostManualScheduler())
+        await model.activateIfNeeded()
+
+        let skew = SafetyConstants.alertFloorMaxFutureSkew
+        let future = GlucoseSample(glucose: try Glucose(mgdl: 200), recordedAt: now.addingTimeInterval(skew + 3600), trend: .steady)
+        await driver.emit(future)
+        let valid = GlucoseSample(glucose: try Glucose(mgdl: 120), recordedAt: now, trend: .steady)
+        await driver.emit(valid)
+        #expect(await eventually { model.latestGlucose == valid })
+        #expect(model.heroState.valueText == "120")
+
+        let withinSkew = GlucoseSample(glucose: try Glucose(mgdl: 125), recordedAt: now.addingTimeInterval(skew), trend: .steady)
+        await driver.emit(withinSkew)
+        #expect(await eventually { model.latestGlucose == withinSkew }, "skew up to the tolerance is accepted")
+        await model.stop()
+    }
+
+    @Test @MainActor func futureDatedIOBAndPumpStatusBeyondSkewAreDropped() async throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let clock = HostAdjustableClock(now: now)
+        let driver = StreamingHostDriver()
+        let model = HomeModel(driver: driver, demoIdentifiers: [], clock: clock, scheduler: HostManualScheduler())
+        await model.activateIfNeeded()
+
+        let tooFar = now.addingTimeInterval(SafetyConstants.alertFloorMaxFutureSkew + 1)
+        await driver.emit(try InsulinOnBoardSample(units: 9, calculatedAt: tooFar))
+        await driver.emit(try InsulinOnBoardSample(units: 1.5, calculatedAt: now))
+        #expect(await eventually { model.latestIOB?.calculatedAt == now })
+        #expect(model.latestIOB?.units == 1.5)
+
+        await driver.emit(try PumpStatusSnapshot(batteryFraction: 0.9, observedAt: tooFar))
+        await driver.emit(try PumpStatusSnapshot(batteryFraction: 0.4, observedAt: now))
+        #expect(await eventually { model.latestPumpStatus?.observedAt == now })
+        #expect(model.latestPumpStatus?.batteryFraction == 0.4)
+        await model.stop()
+    }
 }
 
 private actor HostTestDriver: Driver {
@@ -289,4 +385,78 @@ private final class HostManualScheduler: Scheduler, @unchecked Sendable {
 private struct HostRegistration: SchedulerRegistration {
     let onCancel: @Sendable () -> Void
     func cancel() { onCancel() }
+}
+
+@MainActor
+private func eventually(_ condition: @MainActor () -> Bool) async -> Bool {
+    for _ in 0..<2000 {
+        if condition() { return true }
+        try? await Task.sleep(nanoseconds: 1_000_000)
+    }
+    return condition()
+}
+
+/// Follows the Capability stream contract: each activation feeds fresh
+/// streams and teardown finishes them.
+private actor StreamingHostDriver: Driver {
+    nonisolated let descriptor = DriverDescriptor(
+        identifier: DriverIdentifier("com.glycemicgpt.streaming-test")!,
+        targetName: "StreamingHostDriver",
+        displayName: "Streaming host test Driver",
+        transport: .inProcess,
+        version: "1.0.0",
+        capabilities: [.glucoseSource, .insulinSource, .pumpStatus],
+        verification: .unverified
+    )
+    private let deactivationGate: HostDeactivationGate?
+    private(set) var activationCount = 0
+    private var glucose = AsyncStream<GlucoseSample>.makeStream()
+    private var insulin = AsyncStream<InsulinOnBoardSample>.makeStream()
+    private var pump = AsyncStream<PumpStatusSnapshot>.makeStream()
+
+    init(deactivationGate: HostDeactivationGate? = nil) {
+        self.deactivationGate = deactivationGate
+    }
+
+    func capability(_ capability: Capability) -> CapabilityPort? {
+        switch capability {
+        case .glucoseSource: .glucoseSource(StreamGlucosePort(readings: glucose.stream))
+        case .insulinSource: .insulinSource(StreamInsulinPort(insulinOnBoard: insulin.stream))
+        case .pumpStatus: .pumpStatus(StreamPumpPort(status: pump.stream))
+        case .bgmSource, .dataSync, .doseCategoryProvider: nil
+        }
+    }
+
+    func activate() async throws(DriverFailure) {
+        activationCount += 1
+        glucose = AsyncStream.makeStream()
+        insulin = AsyncStream.makeStream()
+        pump = AsyncStream.makeStream()
+    }
+
+    func deactivate() async {
+        glucose.continuation.finish()
+        insulin.continuation.finish()
+        pump.continuation.finish()
+        await deactivationGate?.enter()
+    }
+
+    func emit(_ sample: GlucoseSample) { glucose.continuation.yield(sample) }
+    func emit(_ sample: InsulinOnBoardSample) { insulin.continuation.yield(sample) }
+    func emit(_ status: PumpStatusSnapshot) { pump.continuation.yield(status) }
+}
+
+private struct StreamGlucosePort: GlucoseSource {
+    let readings: AsyncStream<GlucoseSample>
+    func latestReading() async throws(DriverFailure) -> GlucoseSample? { nil }
+}
+
+private struct StreamInsulinPort: InsulinSource {
+    let insulinOnBoard: AsyncStream<InsulinOnBoardSample>
+    func doses(since: Date) async throws(DriverFailure) -> [DoseRecord] { [] }
+}
+
+private struct StreamPumpPort: PumpStatusSource {
+    let status: AsyncStream<PumpStatusSnapshot>
+    func latestStatus() async throws(DriverFailure) -> PumpStatusSnapshot? { nil }
 }

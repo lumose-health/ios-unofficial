@@ -88,7 +88,9 @@ public protocol Driver: Actor {
     /// IDEMPOTENT, and that is a contract term: calling it twice, calling it on a
     /// Driver that was never activated, and calling it while a previous teardown
     /// is still running must all be safe and must all end with the Driver holding
-    /// no connection, no timer and no subscription. It does not throw — teardown
+    /// no connection, no timer and no subscription. It finishes every Capability
+    /// stream vended for the activation it ends, and the next activation feeds
+    /// fresh ones (see ``GlucoseSource/readings``). It does not throw — teardown
     /// that can fail is teardown a caller has to retry, and a caller that gets it
     /// wrong leaks a live Bluetooth link across a restoration cycle.
     ///

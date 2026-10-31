@@ -14,8 +14,9 @@ public protocol BGMSource: Sendable {
 
     /// Fingerstick readings as the meter produces them.
     ///
-    /// Single consumer, obtained once, same stream on every read; the contract
-    /// is stated in full on ``GlucoseSource/readings``.
+    /// Single consumer, same stream on every read within one activation, and
+    /// finished by ``Driver/deactivate()``; the contract is stated in full on
+    /// ``GlucoseSource/readings``.
     var readings: AsyncStream<FingerstickSample> { get }
 
     /// The most recent fingerstick the Driver holds, or `nil` if it holds none.

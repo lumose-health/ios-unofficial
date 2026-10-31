@@ -28,14 +28,14 @@ struct GlycemicGPTApp: App {
                         HomeScreen()
                     }
                 }
-                .task { await model.activateIfNeeded() }
+                .task { await model.setScenePhaseActive(true).value }
             }
             .environment(model)
             .onChange(of: scenePhase) { _, phase in
                 if phase == .background {
-                    Task { await model.stop() }
+                    model.setScenePhaseActive(false)
                 } else if phase == .active {
-                    Task { await model.activateIfNeeded() }
+                    model.setScenePhaseActive(true)
                 }
             }
         }

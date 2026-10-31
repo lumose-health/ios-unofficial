@@ -27,8 +27,9 @@ public protocol DataSync: Sendable {
 
     /// What the Driver is doing now, as it changes.
     ///
-    /// Single consumer, obtained once, same stream on every read; the contract
-    /// is stated in full on ``GlucoseSource/readings``.
+    /// Single consumer, same stream on every read within one activation, and
+    /// finished by ``Driver/deactivate()``; the contract is stated in full on
+    /// ``GlucoseSource/readings``.
     var state: AsyncStream<SyncState> { get }
 
     /// When the last mirror succeeded, or `nil` if none has.

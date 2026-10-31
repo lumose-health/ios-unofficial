@@ -38,6 +38,7 @@ public final class HomeModel {
     private let clock: any Clock
     private let scheduler: any Scheduler
     private var pendingReactivation = false
+    private var wantsActive = false
     private var activationGeneration = 0
     // These handles are mutated on the main actor and only read outside it during deinit.
     @ObservationIgnored nonisolated(unsafe) private var tickRegistration: SchedulerRegistration?
@@ -62,6 +63,24 @@ public final class HomeModel {
 
     public var footerMessage: String? {
         HomeScaffoldModel.footer(isConnected: HomeScaffoldModel.isConnected(lifecycleState), hasGlucose: latestGlucose != nil)
+    }
+
+    /// Records whether the scene is active and moves the Driver toward that
+    /// state. Call it synchronously from the scene-phase handler.
+    ///
+    /// Two quick scene changes start two unstructured tasks, and Swift does
+    /// not promise which one runs first. Each task therefore acts on the
+    /// LATEST recorded phase when it runs, not the phase that spawned it, so
+    /// whichever runs last converges on the current phase. Transitions that
+    /// overlap mid-flight are handled by `pendingReactivation` and the
+    /// activation generation, as they are for direct calls.
+    @discardableResult
+    public func setScenePhaseActive(_ active: Bool) -> Task<Void, Never> {
+        wantsActive = active
+        return Task { [weak self] in
+            guard let self else { return }
+            if self.wantsActive { await self.activateIfNeeded() } else { await self.stop() }
+        }
     }
 
     public func activateIfNeeded() async {
@@ -173,19 +192,30 @@ public final class HomeModel {
         }
     }
 
+    /// A timestamp further in the future than the alert floor's skew
+    /// tolerance is a clock fault, not a reading. Holding one would block
+    /// every later valid sample behind the ordering guard and show a
+    /// negative age as Fresh, so it is dropped at ingest.
+    private func isTooFarInFuture(_ timestamp: Date) -> Bool {
+        timestamp.timeIntervalSince(clock.now) > SafetyConstants.alertFloorMaxFutureSkew
+    }
+
     private func receive(_ sample: GlucoseSample) {
+        guard !isTooFarInFuture(sample.recordedAt) else { return }
         guard latestGlucose.map({ sample.recordedAt >= $0.recordedAt }) ?? true else { return }
         latestGlucose = sample
         refreshHero()
     }
 
     private func receive(_ sample: InsulinOnBoardSample) {
+        guard !isTooFarInFuture(sample.calculatedAt) else { return }
         guard latestIOB.map({ sample.calculatedAt >= $0.calculatedAt }) ?? true else { return }
         latestIOB = sample
         refreshHero()
     }
 
     private func receive(_ status: PumpStatusSnapshot) {
+        guard !isTooFarInFuture(status.observedAt) else { return }
         guard latestPumpStatus.map({ status.observedAt >= $0.observedAt }) ?? true else { return }
         latestPumpStatus = status
         refreshHero()
