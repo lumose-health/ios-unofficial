@@ -281,10 +281,10 @@ list is empty**. It runs `xcodebuild build test` per listed scheme, unsigned, on
 - If 8-8 has merged to `develop` before you branch or before your PR merges: add `GlycemicGPT`
   to `XCODE_BUILD_SCHEMES` in the same PR (one-line list edit). Flag it in the PR body; it is a
   CI-adjacent file and may need maintainer review.
-- Either way, make the shared scheme's **Test action include the package test target
-  `AppFeatureTests`** (BuildableReference to the local package), so
-  `xcodebuild test -scheme GlycemicGPT` works and 8-8's `build test` step does not fail with
-  "scheme is not configured for testing".
+- Either way, CI builds the app with the `GlycemicGPT` scheme (build only; its Test action is
+  empty, because a project cannot reference a local package's test targets, see the resolution
+  at the end of this file) and runs `AppFeatureTests` through a separate
+  `xcodebuild test -scheme GlycemicGPT-Package` step.
 
 ### Testing standards
 
