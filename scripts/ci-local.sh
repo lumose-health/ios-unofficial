@@ -103,10 +103,27 @@ project_paths() {
   find . \( -path './.build' -o -path './.swiftpm' -o -name '_bmad*' \) -prune -o \( -name '*.xcodeproj' -o -name '*.xcworkspace' \) -print -prune
 }
 
+# Every discovered project or workspace needs at least one SDK:path:scheme build entry.
 project_tripwire() {
-  local label=$1 count=$2
-  if (( count == 0 )) && [[ -n "$(project_paths)" ]]; then fail "Xcode project exists but ${label} is empty"; return 1; fi
-  if (( count == 0 )); then echo 'no Xcode targets declared yet'; fi
+  local project entry rest listed
+  while IFS= read -r project; do
+    project=${project#./}
+    listed=0
+    for entry in "${XCODE_BUILD_SCHEMES[@]+"${XCODE_BUILD_SCHEMES[@]}"}"; do
+      rest=${entry#*:}
+      [[ "$entry" == *:*:* && "${rest%%:*}" == "$project" && -n "${rest#*:}" ]] && listed=1
+    done
+    (( listed )) || { fail "Xcode project $project has no XCODE_BUILD_SCHEMES entry"; return 1; }
+  done < <(project_paths)
+  if [[ -z "$(project_paths)" ]]; then echo 'no Xcode targets declared yet'; fi
+}
+
+container_flag() {
+  case "$1" in
+    *.xcworkspace) echo -workspace ;;
+    *.xcodeproj) echo -project ;;
+    *) fail "not an Xcode project or workspace: $1"; return 1 ;;
+  esac
 }
 
 ui_project_tripwire() {
@@ -139,16 +156,17 @@ check_xcode() {
 }
 
 run_xcode_builds() {
-  local entry sdk project scheme destination
+  local entry sdk project scheme destination flag
   local -a entries=("${XCODE_BUILD_SCHEMES[@]+"${XCODE_BUILD_SCHEMES[@]}"}")
-  project_tripwire XCODE_BUILD_SCHEMES "${#entries[@]}"
+  project_tripwire
   for entry in "${entries[@]+"${entries[@]}"}"; do
     sdk=${entry%%:*}; project=${entry#*:}; scheme=${project#*:}; project=${project%%:*}
     [[ "$entry" == *:*:* && -n "$project" && -n "$scheme" ]] || { fail "invalid Xcode build entry: $entry"; return 1; }
+    flag=$(container_flag "$project")
     destination='platform=iOS Simulator,name=iPhone 17'
     if [[ "$sdk" == watchsimulator ]]; then destination='platform=watchOS Simulator,name=Apple Watch Series 11 (46mm)'; fi
     header "Xcode build and test: $scheme ($sdk)"
-    xcodebuild build test -project "$project" -scheme "$scheme" -sdk "$sdk" -destination "$destination" -derivedDataPath .build/xcode-dd CODE_SIGNING_ALLOWED=NO SWIFT_TREAT_WARNINGS_AS_ERRORS=YES
+    xcodebuild build test "$flag" "$project" -scheme "$scheme" -sdk "$sdk" -destination "$destination" -derivedDataPath .build/xcode-dd CODE_SIGNING_ALLOWED=NO SWIFT_TREAT_WARNINGS_AS_ERRORS=YES
   done
 }
 
@@ -170,7 +188,7 @@ ios_gate() {
 }
 
 ui_tests() {
-  local entry project scheme destination safe
+  local entry project scheme destination safe flag
   local -a schemes=("${XCODE_UITEST_SCHEMES[@]+"${XCODE_UITEST_SCHEMES[@]}"}") destinations=("${XCODE_UITEST_DESTINATIONS[@]+"${XCODE_UITEST_DESTINATIONS[@]}"}")
   header 'Simulator UI tests'
   ui_project_tripwire
@@ -179,9 +197,12 @@ ui_tests() {
   for entry in "${schemes[@]+"${schemes[@]}"}"; do
     project=${entry%%:*}; scheme=${entry#*:}
     [[ "$entry" == *:* && -n "$project" && -n "$scheme" ]] || { fail "invalid UI-test entry: $entry"; return 1; }
+    flag=$(container_flag "$project")
     for destination in "${destinations[@]+"${destinations[@]}"}"; do
       safe=$(printf '%s-%s' "$scheme" "$destination" | tr -c '[:alnum:]_-' '_')
-      xcodebuild test -project "$project" -scheme "$scheme" -destination "$destination" -derivedDataPath .build/xcode-dd -resultBundlePath ".build/ui-results/${safe}.xcresult" CODE_SIGNING_ALLOWED=NO SWIFT_TREAT_WARNINGS_AS_ERRORS=YES
+      # xcodebuild refuses an existing result bundle, so clear this run's path first.
+      rm -rf ".build/ui-results/${safe}.xcresult"
+      xcodebuild test "$flag" "$project" -scheme "$scheme" -destination "$destination" -derivedDataPath .build/xcode-dd -resultBundlePath ".build/ui-results/${safe}.xcresult" CODE_SIGNING_ALLOWED=NO SWIFT_TREAT_WARNINGS_AS_ERRORS=YES
     done
   done
 }
@@ -228,9 +249,19 @@ self_test() {
   (cd "$fixture"; printf 'steps:\n  - uses: docker://alpine@sha256:%064d\n' 0 > .github/workflows/check.yml; assert_case pinned-docker pass '' pin_scan)
   mkdir -p "$fixture/Sources"; printf '#if SAMPLE_DRIVER_ENABLED\n#endif\n' > "$fixture/Sources/Test.swift"
   (cd "$fixture"; assert_case undeclared-driver-condition fail 'undeclared Driver condition' driver_conditions)
-  (cd "$fixture"; assert_case no-project-build pass '' project_tripwire XCODE_BUILD_SCHEMES 0; assert_case no-project-ui pass '' ui_project_tripwire)
+  (cd "$fixture"; assert_case no-project-build pass '' project_tripwire; assert_case no-project-ui pass '' ui_project_tripwire)
   mkdir -p "$fixture/Test.xcodeproj"
-  (cd "$fixture"; assert_case unlisted-build-project fail 'Xcode project exists but XCODE_BUILD_SCHEMES is empty' project_tripwire XCODE_BUILD_SCHEMES 0; assert_case unlisted-ui-project fail 'has no UI-test scheme or reasoned opt-out' ui_project_tripwire)
+  (cd "$fixture"; assert_case unlisted-build-project fail 'Test.xcodeproj has no XCODE_BUILD_SCHEMES entry' project_tripwire; assert_case unlisted-ui-project fail 'has no UI-test scheme or reasoned opt-out' ui_project_tripwire)
+  (cd "$fixture"; XCODE_BUILD_SCHEMES=('iphonesimulator:Test.xcodeproj:Test'); assert_case listed-build-project pass '' project_tripwire)
+  (cd "$fixture"; XCODE_BUILD_SCHEMES=('iphonesimulator:Test.xcodeproj:'); assert_case empty-build-scheme fail 'Test.xcodeproj has no XCODE_BUILD_SCHEMES entry' project_tripwire)
+  mkdir -p "$fixture/Other.xcodeproj"
+  (cd "$fixture"; XCODE_BUILD_SCHEMES=('iphonesimulator:Test.xcodeproj:Test'); assert_case second-build-project fail 'Other.xcodeproj has no XCODE_BUILD_SCHEMES entry' project_tripwire)
+  rm -rf "$fixture/Other.xcodeproj"
+  assert_case container-project pass '' container_flag Test.xcodeproj
+  assert_case container-workspace pass '' container_flag Test.xcworkspace
+  assert_case container-other fail 'not an Xcode project or workspace' container_flag Test
+  [[ "$(container_flag App.xcworkspace)" == -workspace && "$(container_flag App.xcodeproj)" == -project ]] || { fail 'self-test container-flag-value: wrong flag'; return 1; }
+  echo 'self-test: container-flag-value: pass'
   (cd "$fixture"; XCODE_UITEST_OPTOUT=('Test.xcodeproj:'); assert_case empty-ui-optout-reason fail 'has no UI-test scheme or reasoned opt-out' ui_project_tripwire)
   (cd "$fixture"; XCODE_UITEST_OPTOUT=('Test.xcodeproj:no UI-test target yet'); assert_case reasoned-ui-optout pass '' ui_project_tripwire)
   mkdir -p "$fixture/Test.xcodeproj/project.xcworkspace"

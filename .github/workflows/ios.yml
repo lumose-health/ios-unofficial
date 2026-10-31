@@ -32,6 +32,9 @@ jobs:
       - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
         id: filter
         with:
+          # Pushes compare against the previous commit on the same branch;
+          # pull requests ignore base and use the PR diff.
+          base: ${{ github.ref }}
           filters: |
             ios:
               - 'Sources/**'
@@ -43,6 +46,7 @@ jobs:
               - '.xcode-version'
               - 'Contract/**'
               - '**/*.xcodeproj/**'
+              - '**/*.xcworkspace/**'
               - '**/*.xcconfig'
               - '**/*.entitlements'
               - '**/Info.plist'
