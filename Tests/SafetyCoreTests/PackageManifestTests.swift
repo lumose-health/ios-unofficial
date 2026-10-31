@@ -209,7 +209,7 @@ struct PackageManifestTests {
         let entries = try FileManager.default.contentsOfDirectory(atPath: sources.path)
             .filter { !$0.hasPrefix(".") }
             .sorted()
-        #expect(entries == ["DriverAPI", "Drivers", "Persistence", "SafetyCore"])
+        #expect(entries == ["AppFeature", "DriverAPI", "Drivers", "Persistence", "SafetyCore"])
     }
 
     /// `Persistence` is the only target allowed to see the SQL vendor, and its
@@ -252,7 +252,14 @@ struct PackageManifestTests {
             "DriverAPI", "DriverAPITests",
             "SimulatedDriver", "SimulatedDriverTests",
             "Persistence", "PersistenceTests",
+            "AppFeature", "AppFeatureTests",
         ]))
+    }
+
+    @Test("AppFeature depends on exactly SafetyCore and DriverAPI")
+    func appFeatureDependencies() throws {
+        let arguments = try #require(Self.targetArguments(named: "AppFeature", in: try Self.manifestSource()))
+        #expect(arguments.contains("dependencies:[\"SafetyCore\",\"DriverAPI\"]"))
     }
 
     /// `SimulatedDriver` is a Driver target, so it is held to the same ceiling
