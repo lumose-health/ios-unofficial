@@ -83,11 +83,7 @@ struct HomeScaffoldView: View {
         switch card {
         case .statusRow: Color.clear.frame(height: 1).accessibilityIdentifier("home.status-row-slot")
         case .glucoseHero:
-            VStack(spacing: 4) {
-                Text("--").font(.system(size: 64, weight: .light)).foregroundStyle(.secondary)
-                    .accessibilityLabel(HomeScaffoldModel.heroAccessibilityLabel(demo: model.isDemo))
-                Text(GlucoseUnit.mgdl.label).font(.system(size: 16))
-            }.frame(maxWidth: .infinity).padding(16)
+            GlucoseHeroView(state: model.heroState)
         case .glucoseTrend: emptyCard(HomeScaffoldModel.cardTable[0])
         case .timeInRange: emptyCard(HomeScaffoldModel.cardTable[1])
         case .cgmStats: emptyCard(HomeScaffoldModel.cardTable[2])

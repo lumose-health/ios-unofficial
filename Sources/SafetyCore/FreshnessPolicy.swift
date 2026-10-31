@@ -18,4 +18,12 @@ public enum FreshnessPolicy {
         staleAfter: SafetyConstants.cgmStaleAfter,
         tooStaleAfter: SafetyConstants.cgmTooStaleAfter
     )
+
+    /// Pump metrics: Fresh under 15 minutes, Stale until 60 minutes, then Too Stale
+    /// (Android Freshness.kt:120, GlucoseHero.kt:99-102).
+    /// `try!` is safe because these fixed, ordered durations are known valid.
+    public static let pump = try! FreshnessThresholds(
+        staleAfter: SafetyConstants.pumpStaleAfter,
+        tooStaleAfter: SafetyConstants.pumpTooStaleAfter
+    )
 }

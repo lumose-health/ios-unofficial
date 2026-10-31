@@ -6,6 +6,7 @@ import SafetyCore
 
 @main
 struct GlycemicGPTApp: App {
+    @Environment(\.scenePhase) private var scenePhase
     @State private var model: HomeModel
 
     init() {
@@ -30,6 +31,13 @@ struct GlycemicGPTApp: App {
                 .task { await model.activateIfNeeded() }
             }
             .environment(model)
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .background {
+                    Task { await model.stop() }
+                } else if phase == .active {
+                    Task { await model.activateIfNeeded() }
+                }
+            }
         }
     }
 }

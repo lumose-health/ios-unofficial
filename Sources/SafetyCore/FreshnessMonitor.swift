@@ -85,7 +85,7 @@ public actor FreshnessMonitor {
     /// One quarter of `staleAfter` (FR-50), clamped to
     /// `[minTickInterval, maxTickInterval]` the way Android's alert-floor ticker is
     /// (`AlertFloorStatusProvider.kt:64`: `(thresholds.staleAfterMs / 4).coerceIn(...)`).
-    static func tickInterval(staleAfter: TimeInterval) -> TimeInterval {
+    public static func tickInterval(staleAfter: TimeInterval) -> TimeInterval {
         min(max(staleAfter / 4, minTickInterval), maxTickInterval)
     }
 
