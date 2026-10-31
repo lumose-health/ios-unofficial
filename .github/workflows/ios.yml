@@ -1,0 +1,114 @@
+name: iOS
+
+on:
+  pull_request:
+    branches: [develop, main]
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [develop, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  detect-changes:
+    name: Detect iOS-Relevant Changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      should_build: ${{ steps.filter.outputs.ios }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
+        id: filter
+        with:
+          filters: |
+            ios:
+              - 'Sources/**'
+              - 'Apps/**'
+              - 'Tests/**'
+              - 'Package.swift'
+              - 'Package.resolved'
+              - 'Package@swift-*.swift'
+              - '.xcode-version'
+              - 'Contract/**'
+              - '**/*.xcodeproj/**'
+              - '**/*.xcconfig'
+              - '**/*.entitlements'
+              - '**/Info.plist'
+              - 'Resources/**'
+              - '.github/workflows/ios.yml'
+              - '.github/actions/**'
+              - 'Plugins/**'
+              - 'README.md'
+              - 'LICENSE'
+              - 'docs/THIRD_PARTY_LICENSES.md'
+              - 'docs/licenses/**'
+              - 'scripts/ci-local.sh'
+              - 'scripts/guards/**'
+
+  build:
+    name: Build & Test
+    needs: detect-changes
+    if: needs.detect-changes.outputs.should_build == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Select pinned Xcode
+        run: sudo xcode-select -s "/Applications/Xcode_$(cat .xcode-version).app"
+      - name: Run iOS checks
+        run: bash scripts/ci-local.sh ios-gate
+
+  ui-tests:
+    name: UI Tests (Simulator)
+    needs: detect-changes
+    if: needs.detect-changes.outputs.should_build == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Select pinned Xcode
+        run: sudo xcode-select -s "/Applications/Xcode_$(cat .xcode-version).app"
+      - name: Run Simulator UI tests
+        run: bash scripts/ci-local.sh ui-tests
+      - name: Upload Simulator results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ios-ui-results
+          path: .build/ui-results/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  ios-gate:
+    name: iOS Gate
+    needs: [detect-changes, build]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Evaluate iOS result
+        env:
+          DETECT_RESULT: ${{ needs.detect-changes.result }}
+          SHOULD_BUILD: ${{ needs.detect-changes.outputs.should_build }}
+          WORK_RESULT: ${{ needs.build.result }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: bash scripts/ci-local.sh gate-verdict
