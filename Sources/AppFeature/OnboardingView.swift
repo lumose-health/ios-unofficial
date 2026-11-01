@@ -20,6 +20,8 @@ public struct OnboardingFlowView: View {
                 .padding(.horizontal, 24).padding(.vertical, 16)
                 .frame(maxWidth: .infinity, alignment: .topLeading)
             }
+            // A new identity per stage starts each stage scrolled to the top.
+            .id(model.stage)
             controls.padding(16)
         }
         .onChange(of: model.isFinished) { _, finished in if finished { onFinished() } }
