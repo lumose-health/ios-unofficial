@@ -23,6 +23,14 @@
 /// ``doseCategoryProvider``, explained on that case.
 public enum Capability: String, CaseIterable, Hashable, Sendable {
 
+    /// Whether one or several Drivers may hold this capability.
+    public var cardinality: CapabilityCardinality {
+        switch self {
+        case .glucoseSource, .insulinSource, .pumpStatus, .doseCategoryProvider: .singleInstance
+        case .bgmSource, .dataSync: .multiInstance
+        }
+    }
+
     /// Continuous glucose readings: a standalone CGM, or a pump that streams one.
     case glucoseSource
 
@@ -49,6 +57,12 @@ public enum Capability: String, CaseIterable, Hashable, Sendable {
     /// write surface eventually gets waved through. A category is a property of a
     /// dose that already happened, so `dose` is the accurate word regardless.
     case doseCategoryProvider
+}
+
+/// The number of Drivers that may claim a capability at once.
+public enum CapabilityCardinality: String, CaseIterable, Hashable, Sendable {
+    case singleInstance
+    case multiInstance
 }
 
 /// The one thing a Driver may hand the platform: one of exactly six ports.
