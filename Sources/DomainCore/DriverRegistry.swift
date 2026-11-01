@@ -11,6 +11,9 @@ public enum DriverRegistryError: Error, Hashable, Sendable {
     /// The incoming Driver is active and is the only persisted claimant, but the
     /// listed evicted Drivers did not reach `notActivated`.
     case evictionIncomplete(evicted: [DriverIdentifier], failedToDeactivate: [DriverIdentifier: DriverFailure])
+    /// The selection write failed and the incoming Driver could not be torn down, so it
+    /// is still live although the persisted selection does not name it.
+    case persistenceFailedDriverStillLive(DriverSelectionStoreFailure, live: DriverIdentifier)
 }
 
 public struct RestoreFailure: Equatable, Sendable {
@@ -44,8 +47,10 @@ public actor DriverRegistry {
     private var lifecycles: [DriverIdentifier: DriverLifecycle]
     private var isBusy = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
+    #if DEBUG
     private var onEnqueue: (@Sendable () -> Void)?
     private var transitionFault: (@Sendable (DriverIdentifier, DriverLifecycleState) -> DriverFailure?)?
+    #endif
 
     public init(drivers: [any Driver], store: any DriverSelectionStore) throws(DriverRegistryError) {
         var byID: [DriverIdentifier: any Driver] = [:]
@@ -78,6 +83,7 @@ public actor DriverRegistry {
         lifecycles[id]?.state
     }
 
+    #if DEBUG
     /// Test seam: called each time an operation queues behind a running one.
     func setEnqueueHook(_ hook: (@Sendable () -> Void)?) { onEnqueue = hook }
 
@@ -85,12 +91,15 @@ public actor DriverRegistry {
     func setTransitionFault(_ fault: (@Sendable (DriverIdentifier, DriverLifecycleState) -> DriverFailure?)?) {
         transitionFault = fault
     }
+    #endif
 
     private func enter() async {
         if !isBusy { isBusy = true; return }
         await withCheckedContinuation {
             waiters.append($0)
+            #if DEBUG
             onEnqueue?()
+            #endif
         }
     }
 
@@ -100,7 +109,9 @@ public actor DriverRegistry {
 
     private func advance(_ id: DriverIdentifier, to next: DriverLifecycleState) throws(DriverRegistryError) {
         guard var lifecycle = lifecycles[id] else { throw .unknownDriver(id) }
+        #if DEBUG
         if let fault = transitionFault?(id, next) { throw .lifecycle(fault) }
+        #endif
         do { try lifecycle.advance(to: next) }
         catch { throw .lifecycle(error) }
         lifecycles[id] = lifecycle
@@ -131,9 +142,12 @@ public actor DriverRegistry {
         if let loadFailure { throw .selectionUnavailable(loadFailure) }
         if let state = lifecycles[id]?.state, state == .active || state == .degraded { return [] }
         let incoming = driver.descriptor.capabilities.filter { $0.cardinality == .singleInstance }
+        // A Driver left live but unpersisted (e.g. after `.evictionIncomplete`) still
+        // holds the slot, so it is evicted alongside the persisted holders.
         let conflicts = descriptors.filter {
-            $0.identifier != id && persisted.contains($0.identifier.rawValue) &&
-                !$0.capabilities.isDisjoint(with: incoming)
+            $0.identifier != id && !$0.capabilities.isDisjoint(with: incoming) &&
+                (persisted.contains($0.identifier.rawValue) ||
+                    (lifecycles[$0.identifier]?.state ?? .notActivated) != .notActivated)
         }.map(\.identifier).sorted { $0.rawValue < $1.rawValue }
         try advance(id, to: .activating)
         do { try await driver.activate() }
@@ -149,9 +163,9 @@ public actor DriverRegistry {
         if selection != persisted {
             do { try save(selection) }
             catch {
-                try advance(id, to: .deactivating)
-                await driver.deactivate()
-                try advance(id, to: .notActivated)
+                guard case .persistenceFailed(let failure) = error else { throw error }
+                do { try await tearDown(id) }
+                catch { throw .persistenceFailedDriverStillLive(failure, live: id) }
                 throw error
             }
         }

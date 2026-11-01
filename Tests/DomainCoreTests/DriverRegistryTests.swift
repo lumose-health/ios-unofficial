@@ -135,6 +135,47 @@ struct DriverRegistryTests {
         #expect(await registry.slots.glucose == alphaID)
     }
 
+    @Test func leftoverFromIncompleteEvictionIsEvictedNextTime() async throws {
+        let c = TestDriver(id: "test.cgm.charlie", capabilities: [.glucoseSource])
+        let a = TestDriver(id: "test.pump.alpha", capabilities: pump)
+        let b = TestDriver(id: "test.pump.bravo", capabilities: pump)
+        let store = RecordingSelectionStore()
+        let registry = try DriverRegistry(drivers: [c, a, b], store: store)
+        let charlie = c.descriptor.identifier
+        try await registry.activate(charlie)
+        await registry.setTransitionFault { id, next in
+            id == charlie && next == .deactivating ? .cancelled : nil
+        }
+        do { try await registry.activate(alphaID); Issue.record("teardown failure was ignored") }
+        catch { #expect(error == .evictionIncomplete(evicted: [charlie], failedToDeactivate: [charlie: .cancelled])) }
+        #expect(await registry.lifecycleState(of: charlie) == .active)
+        #expect(store.current == [alphaID.rawValue])
+        await registry.setTransitionFault(nil)
+        #expect(try await registry.activate(bravoID) == [charlie, alphaID])
+        #expect(await c.deactivateCount == 1)
+        #expect(await registry.lifecycleState(of: charlie) == .notActivated)
+        #expect(await registry.lifecycleState(of: alphaID) == .notActivated)
+        #expect(store.current == [bravoID.rawValue])
+    }
+
+    @Test func saveAndTeardownFailureReportsLiveDriver() async throws {
+        let a = TestDriver(id: "test.pump.alpha", capabilities: pump)
+        let b = TestDriver(id: "test.pump.bravo", capabilities: pump)
+        let store = RecordingSelectionStore()
+        let registry = try DriverRegistry(drivers: [a, b], store: store)
+        try await registry.activate(alphaID)
+        let bravo = bravoID
+        await registry.setTransitionFault { id, next in
+            id == bravo && next == .deactivating ? .cancelled : nil
+        }
+        store.saveFailure = .unwritable(detail: "injected")
+        do { try await registry.activate(bravoID); Issue.record("save failure was ignored") }
+        catch { #expect(error == .persistenceFailedDriverStillLive(.unwritable(detail: "injected"), live: bravoID)) }
+        #expect(await registry.lifecycleState(of: bravoID) == .active)
+        #expect(await registry.persistedSelection == [alphaID.rawValue])
+        #expect(await a.deactivateCount == 0)
+    }
+
     @Test func multiInstanceDriversCoexist() async throws {
         let a = TestDriver(id: "test.pump.alpha", capabilities: pump)
         let b1 = TestDriver(id: "test.bgm.one", capabilities: [.bgmSource])
@@ -313,6 +354,28 @@ struct DriverRegistryTests {
         #expect(report.selectionFailure == .unwritable(detail: "injected"))
         #expect(report.unremoved == [bravoID])
         #expect(await b.activateCount == 0)
+    }
+
+    @Test func restoreKeepsRunningHolderOverLowerPersistedId() async throws {
+        let store = RecordingSelectionStore([alphaID.rawValue, bravoID.rawValue])
+        let a = TestDriver(id: "test.pump.alpha", capabilities: pump)
+        let b = TestDriver(id: "test.pump.bravo", capabilities: pump)
+        await a.setFailure(.transportUnavailable)
+        let registry = try DriverRegistry(drivers: [a, b], store: store)
+        store.saveFailure = .unwritable(detail: "injected")
+        let first = await registry.restore()
+        #expect(first.restored == [bravoID])
+        #expect(first.unremoved == [alphaID])
+        #expect(await registry.persistedSelection == [alphaID.rawValue, bravoID.rawValue])
+        store.saveFailure = nil
+        await a.setFailure(nil)
+        let second = await registry.restore()
+        #expect(second.removedConflicts == [alphaID])
+        #expect(second.restored.isEmpty)
+        #expect(await a.activateCount == 1)
+        #expect(await registry.lifecycleState(of: bravoID) == .active)
+        #expect(store.current == [bravoID.rawValue])
+        #expect(await registry.slots.glucose == bravoID)
     }
 
     @Test func restoreRetriesTransientLoadFailure() async throws {

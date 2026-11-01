@@ -688,6 +688,13 @@ Codex (GPT-6), cycle 1.
   - The store distinguishes `.unavailable` (file present but unreadable now, e.g. before first unlock) from `.unreadable` (corrupt). `restore()` retries the load only for `.unavailable`; other failures are never retried, read as empty, or overwritten.
   - `operationsAreSerializedAndNewClaimSurvives` uses an internal enqueue hook to prove the deactivation is queued before the release. Teardown failure is injected through an internal transition-fault seam (`@testable import`).
 
+- Follow-ups after safety re-review (2026-11-01):
+  - Activation conflicts are computed from `persisted ∪ live` (every Driver not in `.notActivated`, excluding the incoming one), so a Driver left live but unpersisted by `.evictionIncomplete` is evicted by the next activation for that slot.
+  - A failed selection save followed by a failed teardown of the incoming Driver throws `.persistenceFailedDriverStillLive(_, live:)`, keeping the original persistence failure and naming the live Driver.
+  - The enqueue and transition-fault seams and every check against them are compiled only under `#if DEBUG`; `swift build -c release` contains neither.
+  - Known limit (noted, no code change): slots are derived from the persisted set. When a restore removal save fails, the slot can name a Driver that failed to start until the next restore. This is reported through `unremoved`/`selectionFailure`; how it is surfaced to the user is covered by the FR-33 distinguishable-error work in 1-12b.
+  - Known limit (noted, no code change): a Driver stuck in `.deactivating` after a failed transition is reachable only through the DEBUG transition-fault seam.
+
 ### File List
 
 - `Package.swift`
