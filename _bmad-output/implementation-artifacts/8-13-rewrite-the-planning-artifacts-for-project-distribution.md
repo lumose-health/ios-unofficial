@@ -25,7 +25,7 @@ gates:
 max_cycles: 3
 ---
 
-Status: review
+Status: done
 
 # Story 8.13: Rewrite the planning artifacts for project distribution
 

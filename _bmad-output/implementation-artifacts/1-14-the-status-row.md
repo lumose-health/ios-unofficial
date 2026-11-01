@@ -19,7 +19,7 @@ max_cycles: 3
 
 # Story 1.14: The status row — pump link, and what it does not claim
 
-Status: review
+Status: done
 
 <!-- Planning note (for the maintainer): depends on 1.13a and 1.13b, both merged to develop
 (cefc500). Estimate: ~600-700 reviewable lines over ~9 files, about half of it tests. Inside the
