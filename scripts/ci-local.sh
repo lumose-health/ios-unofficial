@@ -7,12 +7,12 @@ cd "$ROOT"
 # Add Driver compilation conditions here when a Driver first uses one.
 ALL_DRIVER_CONDITIONS=()
 # Entries are SDK:project-path:scheme. List each scheme when its project lands.
-XCODE_BUILD_SCHEMES=()
+XCODE_BUILD_SCHEMES=('iphonesimulator:Apps/GlycemicGPT/GlycemicGPT.xcodeproj:GlycemicGPT')
 # Entries are project-path:scheme and project-path:reason, respectively.
 # An opt-out is only for a project that has no UI-test target yet.
 XCODE_UITEST_SCHEMES=()
 XCODE_UITEST_DESTINATIONS=()
-XCODE_UITEST_OPTOUT=()
+XCODE_UITEST_OPTOUT=('Apps/GlycemicGPT/GlycemicGPT.xcodeproj:no UI-test target yet')
 
 usage() {
   cat <<'EOF'
