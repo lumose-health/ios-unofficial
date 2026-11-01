@@ -29,7 +29,7 @@ public final class HomeModel {
     public private(set) var latestIOB: InsulinOnBoardSample?
     public private(set) var latestPumpStatus: PumpStatusSnapshot?
     public private(set) var heroState: HeroState
-    private let backend: BackendConfiguration
+    public let backend: BackendConfiguration
     public var statusRow: StatusRowState {
         // No hosted Driver currently reports pump-link state, so never infer it from activation.
         StatusRowState.make(connection: .disconnected, backend: backend, activeDrivers: [driver.descriptor.identifier])
