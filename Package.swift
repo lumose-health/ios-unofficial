@@ -5,7 +5,7 @@
 // This manifest grows one target at a time (AD-2). Today it declares SafetyCore,
 // the keystone every later target depends on; DriverAPI, the closed set of
 // Capability ports every Driver implements; SimulatedDriver, the first Driver;
-// and Persistence, the on-device store. DomainCore, UI and the watch target
+// Persistence, the on-device store, and DomainCore, the registry. UI and the watch target
 // arrive with their own work. Empty scaffolding is deliberately absent — a
 // directory that exists before it has an owner invites drift.
 //
@@ -32,6 +32,7 @@ let package = Package(
         .library(name: "DriverAPI", targets: ["DriverAPI"]),
         .library(name: "SimulatedDriver", targets: ["SimulatedDriver"]),
         .library(name: "Persistence", targets: ["Persistence"]),
+        .library(name: "DomainCore", targets: ["DomainCore"]),
         .library(name: "AppFeature", targets: ["AppFeature"]),
     ],
     // The workspace's first and only external dependency (AD-6).
@@ -105,6 +106,16 @@ let package = Package(
         .testTarget(
             name: "PersistenceTests",
             dependencies: ["Persistence", "DriverAPI", "SafetyCore"],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .target(
+            name: "DomainCore",
+            dependencies: ["SafetyCore", "DriverAPI"],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .testTarget(
+            name: "DomainCoreTests",
+            dependencies: ["DomainCore", "DriverAPI", "SafetyCore"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         // AppFeature owns presentation and hosting; its dependency ceiling keeps

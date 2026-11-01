@@ -209,7 +209,7 @@ struct PackageManifestTests {
         let entries = try FileManager.default.contentsOfDirectory(atPath: sources.path)
             .filter { !$0.hasPrefix(".") }
             .sorted()
-        #expect(entries == ["AppFeature", "DriverAPI", "Drivers", "Persistence", "SafetyCore"])
+        #expect(entries == ["AppFeature", "DomainCore", "DriverAPI", "Drivers", "Persistence", "SafetyCore"])
     }
 
     /// `Persistence` is the only target allowed to see the SQL vendor, and its
@@ -250,6 +250,7 @@ struct PackageManifestTests {
         #expect(names.isSuperset(of: [
             "SafetyCore", "SafetyCoreTests",
             "DriverAPI", "DriverAPITests",
+            "DomainCore", "DomainCoreTests",
             "SimulatedDriver", "SimulatedDriverTests",
             "Persistence", "PersistenceTests",
             "AppFeature", "AppFeatureTests",
@@ -259,6 +260,12 @@ struct PackageManifestTests {
     @Test("AppFeature depends on exactly SafetyCore and DriverAPI")
     func appFeatureDependencies() throws {
         let arguments = try #require(Self.targetArguments(named: "AppFeature", in: try Self.manifestSource()))
+        #expect(arguments.contains("dependencies:[\"SafetyCore\",\"DriverAPI\"]"))
+    }
+
+    @Test("DomainCore depends on exactly SafetyCore and DriverAPI")
+    func domainCoreDependencies() throws {
+        let arguments = try #require(Self.targetArguments(named: "DomainCore", in: try Self.manifestSource()))
         #expect(arguments.contains("dependencies:[\"SafetyCore\",\"DriverAPI\"]"))
     }
 

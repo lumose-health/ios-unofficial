@@ -101,6 +101,31 @@ public enum DriverFailure: Error, Hashable, Sendable {
     case cancelled
 }
 
+extension DriverFailure {
+
+    /// Whether the condition can clear without the user doing anything: the
+    /// transport comes back, the device returns to range, or the work is simply
+    /// run again. A transient failure must not cost the user a persisted
+    /// selection — a pump out of range, or Bluetooth off during a background
+    /// relaunch, says nothing about which pump the user chose.
+    ///
+    /// Everything else is permanent until something changes: pairing, a device
+    /// fault, a platform bug, or a value the bounds in force refuse. Retrying
+    /// those unchanged reproduces the same failure.
+    ///
+    /// The switch is exhaustive on purpose. A new case has to be classified here
+    /// before the package builds again.
+    public var isTransient: Bool {
+        switch self {
+        case .transportUnavailable, .connectionLost, .timedOut, .cancelled:
+            return true
+        case .notPaired, .authenticationRejected, .decodeFailed, .valueRejected,
+             .capabilityUnavailable, .deviceFault, .illegalTransition, .safetyLimitRejected:
+            return false
+        }
+    }
+}
+
 /// Why a ``SafetyLimits`` value was refused (SI-11).
 ///
 /// A payload on ``DriverFailure/safetyLimitRejected(_:)`` rather than a second

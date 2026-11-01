@@ -95,4 +95,25 @@ struct DriverFailureTests {
         // than showing one generic refusal (AD-13).
         #expect(Set(rejections).count == rejections.count)
     }
+
+    /// Every case is pinned, so moving one between the two sides is a visible
+    /// test change rather than a quiet edit to the switch.
+    @Test("Transient failures are exactly the transport, link, timeout and cancellation cases")
+    func transientClassification() {
+        let transient: [DriverFailure] = [.transportUnavailable, .connectionLost, .timedOut, .cancelled]
+        let permanent: [DriverFailure] = [
+            .notPaired,
+            .authenticationRejected,
+            .decodeFailed(detail: "frame"),
+            .valueRejected(bound: "glucose"),
+            .capabilityUnavailable(.glucoseSource),
+            .deviceFault(code: "E1"),
+            .illegalTransition(from: .active, to: .activating),
+            .safetyLimitRejected(.notFinite),
+            .safetyLimitRejected(.widensAbsoluteBound(lower: 10, upper: 600)),
+            .safetyLimitRejected(.emptyOrInverted(lower: 200, upper: 100)),
+        ]
+        for failure in transient { #expect(failure.isTransient, "\(failure)") }
+        for failure in permanent { #expect(!failure.isTransient, "\(failure)") }
+    }
 }

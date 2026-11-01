@@ -22,6 +22,13 @@ import Testing
 /// pins that.
 @Suite("The closed Capability set")
 struct CapabilitySetTests {
+    @Test("Every capability has the intended cardinality")
+    func cardinality() {
+        #expect(Set(Capability.allCases.filter { $0.cardinality == .singleInstance }) ==
+                [.glucoseSource, .insulinSource, .pumpStatus, .doseCategoryProvider])
+        #expect(Set(Capability.allCases.filter { $0.cardinality == .multiInstance }) ==
+                [.bgmSource, .dataSync])
+    }
 
     /// The six, spelled out. Changing this list is changing the product, and the
     /// test says so where it fails.
