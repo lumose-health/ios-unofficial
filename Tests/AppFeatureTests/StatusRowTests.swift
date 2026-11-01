@@ -104,3 +104,18 @@ extension StatusRowTests {
     }
 }
 #endif
+
+@Suite("Home status row colour tokens")
+struct StatusRowColourTests {
+    @Test func lightModeUsesHighContrastCautionAndError() {
+        #expect(StatusColor.caution.rgb(dark: false) == StatusRGB(red: 0xA1, green: 0x62, blue: 0x07))
+        #expect(StatusColor.error.rgb(dark: false) == StatusRGB(red: 0xB9, green: 0x1C, blue: 0x1C))
+        #expect(StatusColor.primary.rgb(dark: false) == StatusRGB(red: 0x25, green: 0x63, blue: 0xEB))
+        #expect(StatusColor.muted.rgb(dark: false) == nil)
+    }
+
+    @Test func darkModeKeepsTheBrighterCautionAndError() {
+        #expect(StatusColor.caution.rgb(dark: true) == StatusRGB(red: 0xEA, green: 0xB3, blue: 0x08))
+        #expect(StatusColor.error.rgb(dark: true) == StatusRGB(red: 0xEF, green: 0x44, blue: 0x44))
+    }
+}

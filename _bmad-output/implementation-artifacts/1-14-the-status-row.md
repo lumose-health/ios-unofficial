@@ -50,7 +50,11 @@ Android client's exact strings pinned. AC 7 is extra scope added by the PM.
    | reconnecting | reconnecting | caution (amber) | "Reconnecting..." | "Reconnecting to pump" |
    | scanning | searching | caution (amber) | "Scanning..." | "Scanning for pump" |
    | authFailed | crossed-out | error (red) | "Pairing failed" | "Pump pairing failed" |
-   | disconnected | crossed-out | error (red) | none | "No pump connected" |
+   | disconnected | crossed-out | muted | "No pump" | "No pump connected" |
+
+   *Amended by the PM decision in "PM note: cycle 2 validation on the simulator": disconnected was
+   originally error (red) with no visible text. It is the resting state, so it now uses muted colour
+   with the visible text "No pump".*
 
    The "..." is three ASCII full stops, as on Android, not the U+2026 ellipsis. Connecting and
    authenticating produce identical output. Across the six states the pair (colour, text) is
@@ -248,7 +252,9 @@ Android client's exact strings pinned. AC 7 is extra scope added by the PM.
 
 ### Pump-link state for a Simulated-only build: Disconnected
 
-The row shows **Disconnected**: crossed-out glyph, red, no text, VoiceOver "No pump connected".
+The row shows **Disconnected**: crossed-out glyph, muted colour, text "No pump", VoiceOver "No pump
+connected". (Amended by the PM decision in "PM note: cycle 2 validation on the simulator"; this
+originally read red with no text.)
 Reasons:
 - FR-43 calls crossed-out the resting state for "no Pump paired, idle, or out of range". The
   Simulated Driver is not a pump. It declares no `pumpStatus` capability and its transport is
@@ -322,6 +328,8 @@ Driver work. It is not part of this story.
   - caution `#EAB308` (FR-43 says "tertiary amber"; this is the project's only amber, Android
     Yellow500, already `HeroColor.amber`)
   - muted `Color.secondary`
+  - *Amended for WCAG contrast: Light Mode uses caution `#A16207` and error `#B91C1C`; Dark Mode
+    keeps the values above. See the Dev Agent Record.*
 
   We follow the PRD's "amber", not Android's accidental mauve. This is recorded as a deliberate
   deviation. Put the hex in the view, never in SafetyCore.
@@ -508,6 +516,7 @@ The required Swift and Xcode build/test gates were attempted. SwiftPM cannot wri
 - `swiftc -frontend -parse` on every edited Swift file: pass; `git diff --check`: pass.
 - `swift build`, `swift test`, and both required `xcodebuild` commands were attempted but are blocked by sandbox cache permissions and unavailable Simulator services; no screenshot could be captured. The PM must rerun those gates and take the requested screenshot.
 - Reviewable implementation diff is approximately 351 lines, under the 800-line budget.
+- PR triage: the spec's caution token `#EAB308` (about 1.9:1 on white) and error `#EF4444` (about 3.8:1) fail WCAG AA for small text in Light Mode. The view now reads the colour scheme: Light Mode uses caution `#A16207` (amber-700) and error `#B91C1C` (red-700), both at least 4.5:1 on white; Dark Mode keeps `#EAB308` and `#EF4444`. Glyphs and text share the colour. `StatusRowColourTests` pins the tokens.
 
 ### File List
 - `Sources/AppFeature/StatusRow.swift`
