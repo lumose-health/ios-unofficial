@@ -7,7 +7,7 @@ paradigm: 'hexagonal (ports and adapters) with an actor-guarded device edge'
 scope: 'iPhone app, Apple Watch app, widget and complication extensions, compile-time-linked pump Drivers, encrypted local store, optional self-hosted Backend'
 status: final
 created: '2026-08-03'
-updated: '2026-08-03'
+updated: '2026-11-01'
 binds: ['FR-1..FR-237', 'SI-1..SI-12', 'NFR-1..NFR-34']
 sources: ['_bmad-output/planning-artifacts/prds/prd-ios-unofficial-2026-08-01/prd.md', '_bmad-output/planning-artifacts/prds/prd-ios-unofficial-2026-08-01/addendum.md']
 companions: []
@@ -111,7 +111,7 @@ graph TD
 
 - **Binds:** `Persistence`, widget and complication extensions
 - **Prevents:** two processes writing one SQLite file; an extension holding a lock a background wake needs.
-- **Rule:** one App Group container, its identifier templated on the Builder's Team ID. **The app is the only writer.** Extensions read a small versioned snapshot file written by the app — never the database.
+- **Rule:** one App Group container: a fixed project identifier for the project build, Team-ID templating only for self-builds. **The app is the only writer.** Extensions read a small versioned snapshot file written by the app — never the database.
 - The snapshot is **one record written atomically** (write-temp-then-rename), carrying its schema version and the instant it was produced. A reader that cannot parse it, or that finds a version it does not know, renders *unknown* — never a partial record. A non-atomic write racing a timeline read would otherwise yield a structurally valid, semantically mixed record: a stale value rendered Fresh, which is SI-6's worst failure.
 
 ### AD-10 — The Coverage Claim has one implementation and one owner
@@ -240,7 +240,7 @@ graph TD
 | GRDB.swift | 7.11.1 |
 | swift-crypto (project fork) | 4.5.1, pinned to an exact tag |
 | SwiftUI, WidgetKit, Core Bluetooth | platform |
-| fastlane + match | Builder-side signing |
+| fastlane + match | Project signing from a project-owned match repository in the release-gated environment; the same lanes serve self-builds |
 
 ## Structural Seed
 
@@ -291,5 +291,5 @@ ios-unofficial/
 | Per-Driver *wire* protocol detail (frames, opcodes, CRC) | Belongs to each Driver's epic. The lifecycle every Driver shares is **not** deferred — see AD-16. |
 | Medtronic transport viability | Gated on the spike the PRD sequences first; a negative result changes `Drivers/Medtronic` only. |
 | CI runner topology and job splits | Repository tooling; the required-check roster is fixed by the PRD. |
-| Observability and crash reporting | No project telemetry exists to design; a Builder's own DSN is their choice. |
+| Observability and crash reporting | Deferred until the maintainer decides whether the project build carries a crash-reporting credential (FR-189). A self-builder's own DSN stays their choice. |
 | Swift 6.2 default actor isolation | A language-mode option with no cross-unit divergence at this altitude; settled once when the toolchain is pinned. |

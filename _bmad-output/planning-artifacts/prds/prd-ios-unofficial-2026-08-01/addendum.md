@@ -46,7 +46,7 @@ Both warrant a lint rule, not only a test.
 
 ### 1.6 Shared module and target topology
 
-The PRD states the *data contract*; the target list is architecture. Fragments worth carrying forward: a shared safety module must build for iOS, watchOS, and the widget extension, since SI-4 requires one definition of each Safety Constant across every target that renders or validates a glucose value. App Group container identifiers are templated on the Builder's Team ID, because App IDs are globally unique across all Apple accounts and nothing can be shared between Builders.
+The PRD states the *data contract*; the target list is architecture. Fragments worth carrying forward: a shared safety module must build for iOS, watchOS, and the widget extension, since SI-4 requires one definition of each Safety Constant across every target that renders or validates a glucose value. App Group identifiers are fixed for the project build and Team-ID templating only for self-builds, because App IDs are globally unique across all Apple accounts.
 
 ---
 
@@ -58,22 +58,20 @@ The PRD states the *data contract*; the target list is architecture. Fragments w
 |---|---|
 | Project-operated APNs relay | Puts the project in the data path for every user's alerts. Incompatible with the no-project-infrastructure posture. |
 | Distribute a shared APNs key to self-hosters | Anyone holding it can push to every user of every build. Unacceptable. |
-| Per-deployment APNs (each Builder mints their own key for their own bundle ID) | **The right eventual design** — no relay, no shared secret, nobody in the data path. Deferred only because it requires work in the platform repository, which this PRD cannot discharge. |
+| Per-deployment APNs (each self-builder mints a key for their own bundle ID) | **The right eventual design for self-builds** — no relay, no shared secret, nobody in the data path. Project builds share one bundle ID: per-deployment APNs would require the project key on every Backend (the rejected shared-key option) or a project relay (also rejected). Deferred only because it requires work in the platform repository, which this PRD cannot discharge (decision 7). |
 | SSE while alive + on-device Alert Floor (**chosen for v1**) | Self-contained. Cost: Backend-generated alerts do not reach a suspended or terminated app, so caregiver alerting is degraded versus Android. Recorded as a forced loss. |
 
 ### 2.2 Critical Alerts
 
 | Option | Why not chosen |
 |---|---|
-| Treat as a launch blocker | The entitlement is granted per Team ID on individual review, and under fork-and-build every user signs with their own personal team. Blocking on it blocks indefinitely. |
-| Require every Builder to request it | Most will not obtain it, producing a userbase split across two alarm behaviours — and the people who skip the step believe they are covered. Inconsistent silent coverage is worse than a uniform documented limit. |
-| `.timeSensitive` with runtime upgrade (**chosen**) | Uniform, honest, and free to upgrade if the entitlement ever appears. |
+| Treat as a launch blocker | The project can apply once for its Team ID, but has no grant today. Self-builders normally do not hold the entitlement. Blocking launch on a grant would defer the monitoring-only build indefinitely. |
+| Require every self-builder to request it | Most will not obtain it, producing a userbase split across two alarm behaviours — and the people who skip the step believe they are covered. Inconsistent silent coverage is worse than a uniform documented limit. |
+| `.timeSensitive` with runtime upgrade (**chosen**) | Honest, and upgrades at runtime wherever the entitlement exists. Reopened decision 4 makes the result split by build: project builds can carry `.critical` once Apple grants the entitlement to the project Team ID, while self-builds normally never will. No grant exists today. The silent-switch caveat stays on any build where `.critical` is not actually active (FR-66). |
 
 ### 2.3 Distribution
 
-Project-published binaries were rejected on two independent grounds, either sufficient. GPL-3.0-only conflicts with Apple's Developer Program License Agreement, which governs TestFlight as well as the App Store. And the Medtronic driver derives from OpenMinimed work whose copyright the project does not hold, so the project could not relicense it even if it wanted to.
-
-Fork-and-build resolves both: the project conveys no binary and accepts no terms on anyone's behalf, and every Builder provably holds the corresponding source. It is strictly *stronger* for GPL compliance than the Android sideload model.
+The project publishes a TestFlight build. External distribution remains gated by L1 (GPL-3.0-only and Apple's Developer Program License Agreement) and L2 (OpenMinimed copyright in the Medtronic Driver). Medtronic is excluded from project builds until permission is obtained; self-builds may include it. Fork-and-build remains the advanced self-build path.
 
 ### 2.4 Alert sounds
 
@@ -91,11 +89,11 @@ Android uses the system `RingtoneManager` picker across the entire system sound 
 
 The Medtronic driver derives from OpenMinimed work (GPL-3.0), relied on under explicit relicensing permission from palmarci (Pál Marci). Android consumes `org.openminimed:javasake` as a Maven artifact; Swift cannot link a Java library, so iOS needs a clean-room reimplementation of the SAKE state machine.
 
-**Standing constraint:** the project does not own that copyright. Any future project-published binary would require permission from every holder — which is a second, independent reason the fork-and-build model is not merely convenient but load-bearing.
+**Standing constraint:** the project does not own that copyright. Project builds exclude Medtronic until every holder grants permission (L2); self-builds may include it.
 
 ### 3.3 The manufacturer framing
 
-`MEDICAL-DISCLAIMER.md` currently reserves its *"users become the manufacturer of their own personal medical device"* framing for third-party forks that add device control. Under fork-and-build, **every iOS user compiles their own binary**, so that sentence arguably now describes all of them. Flagged for counsel before the build instructions publish. Cheap to fix now; expensive later.
+`MEDICAL-DISCLAIMER.md` currently reserves its *"users become the manufacturer of their own personal medical device"* framing for third-party forks that add device control. The framing may apply to self-builders. For project-build users, the project is the distributor and the question joins L1 counsel review. No legal conclusion is made here.
 
 ---
 
