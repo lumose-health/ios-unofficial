@@ -21,6 +21,12 @@ public struct ActiveDriverPorts: Sendable {
 
 @MainActor @Observable
 public final class HomeModel {
+    /// The pause between a pump-status read and the glucose read that follows
+    /// it. It paces sequential pump requests the way Android's
+    /// `REQUEST_STAGGER_MS` does, so one refresh never sends the pump two
+    /// requests back to back. It is request pacing, not a clinical bound, and
+    /// it applies only when both reads run.
+    public static let pumpReadGap: TimeInterval = 0.5
     public let isDemo: Bool
     public private(set) var lifecycleState = DriverLifecycleState.notActivated
     public private(set) var ports: ActiveDriverPorts?
@@ -28,6 +34,11 @@ public final class HomeModel {
     public private(set) var latestGlucose: GlucoseSample?
     public private(set) var latestIOB: InsulinOnBoardSample?
     public private(set) var latestPumpStatus: PumpStatusSnapshot?
+    /// True while a read sequence for the CURRENT activation is in flight. A
+    /// sequence started by an earlier activation may still be suspended inside
+    /// a slow Driver read after `stop()`, but it can no longer write anything,
+    /// so it must not block the next activation's reads.
+    public var isRefreshing: Bool { refreshGeneration == activationGeneration }
     public private(set) var heroState: HeroState
     public let backend: BackendConfiguration
     public var statusRow: StatusRowState {
@@ -42,9 +53,16 @@ public final class HomeModel {
     private let driver: any Driver
     private let clock: any Clock
     private let scheduler: any Scheduler
+    private let log: any HomeLogging
+    private let readGap: @Sendable (TimeInterval) async -> Void
+    private var foregroundReadSatisfied = false
+    // Counts inactive transitions so a read that was in flight while the scene
+    // went inactive cannot mark the next foreground as already read.
+    private var inactiveTransitions = 0
     private var pendingReactivation = false
     private var wantsActive = false
     private var activationGeneration = 0
+    private var refreshGeneration: Int?
     // These handles are mutated on the main actor and only read outside it during deinit.
     @ObservationIgnored nonisolated(unsafe) private var tickRegistration: SchedulerRegistration?
     @ObservationIgnored nonisolated(unsafe) private var streamTasks: [Task<Void, Never>] = []
@@ -54,11 +72,13 @@ public final class HomeModel {
         for task in streamTasks { task.cancel() }
     }
 
-    public init(driver: any Driver, demoIdentifiers: Set<DriverIdentifier>, backend: BackendConfiguration = .notConfigured, clock: any Clock = SystemClock(), scheduler: any Scheduler = WallClockScheduler()) {
+    public init(driver: any Driver, demoIdentifiers: Set<DriverIdentifier>, backend: BackendConfiguration = .notConfigured, clock: any Clock = SystemClock(), scheduler: any Scheduler = WallClockScheduler(), log: any HomeLogging = OSHomeLog(), readGap: @escaping @Sendable (TimeInterval) async -> Void = { try? await Task.sleep(for: .seconds($0)) }) {
         self.driver = driver
         self.backend = backend
         self.clock = clock
         self.scheduler = scheduler
+        self.log = log
+        self.readGap = readGap
         self.isDemo = DemoDataLabel.isVisible(
             activeGlucoseDriver: driver.descriptor.identifier,
             demoIdentifiers: demoIdentifiers
@@ -85,8 +105,21 @@ public final class HomeModel {
         wantsActive = active
         return Task { [weak self] in
             guard let self else { return }
-            if self.wantsActive { await self.activateIfNeeded() } else { await self.stop() }
+            if !self.wantsActive { await self.stop(); return }
+            switch self.lifecycleState {
+            case .notActivated, .deactivating: await self.activateIfNeeded()
+            case .activating: break
+            case .active:
+                if self.foregroundReadSatisfied { self.foregroundReadSatisfied = false }
+                else { await self.refresh() }
+            case .failed, .degraded: break
+            }
         }
+    }
+
+    public func sceneBecameInactive() {
+        inactiveTransitions &+= 1
+        foregroundReadSatisfied = false
     }
 
     public func activateIfNeeded() async {
@@ -139,15 +172,14 @@ public final class HomeModel {
         guard generation == activationGeneration else { return }
         if case .pumpStatus(let source)? = pumpPort { pump = source }
         else { pump = nil }
-        ports = ActiveDriverPorts(identifier: driver.descriptor.identifier, glucoseSource: glucose,
-                                  insulinSource: insulin, pumpStatusSource: pump)
-        let latestGlucose = try? await glucose.latestReading()
-        guard generation == activationGeneration else { return }
-        if let latestGlucose { receive(latestGlucose) }
-        if let pump {
-            let latestStatus = try? await pump.latestStatus()
+        let activePorts = ActiveDriverPorts(identifier: driver.descriptor.identifier, glucoseSource: glucose,
+                                            insulinSource: insulin, pumpStatusSource: pump)
+        ports = activePorts
+        if !isRefreshing {
+            let inactiveTransitionsBeforeRead = inactiveTransitions
+            await runReadSequence(ports: activePorts, generation: generation)
             guard generation == activationGeneration else { return }
-            if let latestStatus { receive(latestStatus) }
+            if !Task.isCancelled, inactiveTransitions == inactiveTransitionsBeforeRead { foregroundReadSatisfied = true }
         }
         streamTasks.append(Task { [weak self] in
             for await sample in glucose.readings { self?.receive(sample) }
@@ -160,6 +192,33 @@ public final class HomeModel {
                 for await status in pump.status { self?.receive(status) }
             })
         }
+    }
+
+    public func refresh() async {
+        guard !isRefreshing, lifecycleState == .active, let ports else { return }
+        await runReadSequence(ports: ports, generation: activationGeneration)
+    }
+
+    private func runReadSequence(ports: ActiveDriverPorts, generation: Int) async {
+        refreshGeneration = generation
+        defer { if refreshGeneration == generation { refreshGeneration = nil } }
+        await readSequence(ports: ports, generation: generation)
+    }
+
+    private func readSequence(ports: ActiveDriverPorts, generation: Int) async {
+        if let pump = ports.pumpStatusSource {
+            do {
+                if let status = try await pump.latestStatus(), generation == activationGeneration { receive(status) }
+            } catch { log.refreshReadFailed(step: .pumpStatus, failure: error) }
+            guard generation == activationGeneration, !Task.isCancelled else { return }
+            await readGap(Self.pumpReadGap)
+            guard generation == activationGeneration, !Task.isCancelled else { return }
+        }
+        do {
+            if let sample = try await ports.glucoseSource.latestReading(), generation == activationGeneration { receive(sample) }
+        } catch { log.refreshReadFailed(step: .glucose, failure: error) }
+        guard generation == activationGeneration, !Task.isCancelled else { return }
+        refreshHero()
     }
 
     public var tickInterval: TimeInterval {
@@ -175,6 +234,8 @@ public final class HomeModel {
 
     public func stop() async {
         activationGeneration &+= 1
+        refreshGeneration = nil
+        foregroundReadSatisfied = false
         pendingReactivation = false
         tickRegistration?.cancel()
         tickRegistration = nil
