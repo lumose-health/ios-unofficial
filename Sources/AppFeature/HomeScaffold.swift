@@ -8,16 +8,40 @@ public enum HomeCard: String, CaseIterable, Sendable {
     case insulinSummary, recentBoluses, driverCards, footer
 }
 
+public enum HomeCardBody: Equatable, Sendable { case empty(String), comingSoon(String) }
+
 public enum HomeScaffoldModel {
     public static let order: [HomeCard] = [.statusRow, .glucoseHero, .recentMeal, .glucoseTrend, .timeInRange, .cgmStats, .insulinSummary, .recentBoluses, .driverCards, .footer]
     public static let omittedWithoutData: Set<HomeCard> = [.recentMeal]
-    public static let cardTable: [(title: String, emptyText: String)] = [
-        ("Glucose Trend", "No glucose readings yet"),
-        ("Time in Range", "No glucose readings for this period"),
-        ("CGM Stats", "No glucose readings for this period"),
-        ("Insulin Summary", "No insulin data for this period"),
-        ("Recent Boluses", "No boluses for this period"),
-    ]
+    private static let textCards: [HomeCard] = [.glucoseTrend, .timeInRange, .cgmStats, .insulinSummary, .recentBoluses]
+    public static let cardTable: [(title: String, emptyText: String)] = textCards.compactMap { card in
+        content(for: card).map { (title: $0.title, emptyText: $0.emptyText) }
+    }
+
+    private static func content(for card: HomeCard) -> (title: String, emptyText: String, comingSoonText: String)? {
+        switch card {
+        case .glucoseTrend: ("Glucose Trend", "No glucose readings yet", "Trend chart coming soon")
+        case .timeInRange: ("Time in Range", "No glucose readings for this period", "Time in Range coming soon")
+        case .cgmStats: ("CGM Stats", "No glucose readings for this period", "CGM stats coming soon")
+        case .insulinSummary: ("Insulin Summary", "No insulin data for this period", "Insulin summary coming soon")
+        case .recentBoluses: ("Recent Boluses", "No boluses for this period", "Recent boluses coming soon")
+        case .statusRow, .glucoseHero, .recentMeal, .driverCards, .footer: nil
+        }
+    }
+
+    public static func title(for card: HomeCard) -> String? { content(for: card)?.title }
+
+    public static func body(for card: HomeCard, hasGlucose: Bool, hasInsulinOnBoard: Bool) -> HomeCardBody? {
+        guard let content = content(for: card) else { return nil }
+        let hasData = switch card {
+        case .glucoseTrend, .timeInRange, .cgmStats: hasGlucose
+        case .insulinSummary: hasInsulinOnBoard
+        // Doses are never read here, so the card must not claim there were none.
+        case .recentBoluses: true
+        case .statusRow, .glucoseHero, .recentMeal, .driverCards, .footer: false
+        }
+        return hasData ? .comingSoon(content.comingSoonText) : .empty(content.emptyText)
+    }
 
     public static func isConnected(_ state: DriverLifecycleState) -> Bool {
         // Interim derivation until pump-link status exists.
@@ -77,18 +101,20 @@ struct HomeScaffoldView: View {
             }
             .padding(.horizontal, 16).padding(.top, 16).padding(.bottom, 88)
         }
+        .accessibilityIdentifier("home.scroll")
+        .refreshable { await model.refresh() }
     }
 
     @ViewBuilder private func cardView(_ card: HomeCard) -> some View {
         switch card {
         case .statusRow: StatusRowView(state: model.statusRow)
         case .glucoseHero:
-            GlucoseHeroView(state: model.heroState)
-        case .glucoseTrend: emptyCard(HomeScaffoldModel.cardTable[0])
-        case .timeInRange: emptyCard(HomeScaffoldModel.cardTable[1])
-        case .cgmStats: emptyCard(HomeScaffoldModel.cardTable[2])
-        case .insulinSummary: emptyCard(HomeScaffoldModel.cardTable[3])
-        case .recentBoluses: emptyCard(HomeScaffoldModel.cardTable[4])
+            GlucoseHeroView(state: model.heroState, onRefresh: { Task { await model.refresh() } })
+        case .glucoseTrend, .timeInRange, .cgmStats, .insulinSummary, .recentBoluses:
+            if let body = HomeScaffoldModel.body(for: card, hasGlucose: model.latestGlucose != nil, hasInsulinOnBoard: model.latestIOB != nil),
+               let title = HomeScaffoldModel.title(for: card) {
+                textCard(card, title: title, body: body)
+            }
         case .footer:
             if let message = model.footerMessage {
                 Text(message).frame(maxWidth: .infinity).padding(.top, 12)
@@ -97,10 +123,13 @@ struct HomeScaffoldView: View {
         }
     }
 
-    private func emptyCard(_ item: (title: String, emptyText: String)) -> some View {
-        VStack(alignment: .leading, spacing: 8) { Text(item.title).font(.headline); Text(item.emptyText).foregroundStyle(.secondary) }
+    private func textCard(_ card: HomeCard, title: String, body: HomeCardBody) -> some View {
+        let text = switch body { case .empty(let value), .comingSoon(let value): value }
+        return VStack(alignment: .leading, spacing: 8) { Text(title).font(.headline); Text(text).foregroundStyle(.secondary) }
             .frame(maxWidth: .infinity, alignment: .leading).padding(16).background(.thinMaterial, in: RoundedRectangle(cornerRadius: 12))
+            .accessibilityIdentifier("home.card.\(card.rawValue)")
     }
+
 }
 
 public struct HomeScreen: View {
