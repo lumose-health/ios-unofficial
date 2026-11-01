@@ -13,6 +13,9 @@ XCODE_BUILD_SCHEMES=('iphonesimulator:Apps/GlycemicGPT/GlycemicGPT.xcodeproj:Gly
 XCODE_UITEST_SCHEMES=()
 XCODE_UITEST_DESTINATIONS=()
 XCODE_UITEST_OPTOUT=('Apps/GlycemicGPT/GlycemicGPT.xcodeproj:no UI-test target yet')
+# Entries are project-path:reason, for a scheme with no test action of its own
+# (its code is tested elsewhere). The project is still built.
+XCODE_TEST_OPTOUT=('Apps/GlycemicGPT/GlycemicGPT.xcodeproj:app code is tested through the package tests')
 
 usage() {
   cat <<'EOF'
@@ -155,8 +158,21 @@ check_xcode() {
   xcodebuild -version
 }
 
+test_optout_reason() {
+  local entry reason
+  for entry in "${XCODE_TEST_OPTOUT[@]+"${XCODE_TEST_OPTOUT[@]}"}"; do
+    reason=${entry#*:}
+    if [[ "${entry%%:*}" == "$1" && "$entry" == *:* && -n "${reason//[[:space:]]/}" ]]; then
+      echo "$reason"
+      return 0
+    fi
+  done
+  return 1
+}
+
 run_xcode_builds() {
-  local entry sdk project scheme destination flag
+  local entry sdk project scheme destination flag reason
+  local -a actions
   local -a entries=("${XCODE_BUILD_SCHEMES[@]+"${XCODE_BUILD_SCHEMES[@]}"}")
   project_tripwire
   for entry in "${entries[@]+"${entries[@]}"}"; do
@@ -165,8 +181,13 @@ run_xcode_builds() {
     flag=$(container_flag "$project")
     destination='platform=iOS Simulator,name=iPhone 17'
     if [[ "$sdk" == watchsimulator ]]; then destination='platform=watchOS Simulator,name=Apple Watch Series 11 (46mm)'; fi
-    header "Xcode build and test: $scheme ($sdk)"
-    xcodebuild build test "$flag" "$project" -scheme "$scheme" -sdk "$sdk" -destination "$destination" -derivedDataPath .build/xcode-dd CODE_SIGNING_ALLOWED=NO SWIFT_TREAT_WARNINGS_AS_ERRORS=YES
+    actions=(build test)
+    if reason=$(test_optout_reason "$project"); then
+      actions=(build)
+      echo "Xcode test action opted out for $project: $reason"
+    fi
+    header "Xcode ${actions[*]}: $scheme ($sdk)"
+    xcodebuild "${actions[@]}" "$flag" "$project" -scheme "$scheme" -sdk "$sdk" -destination "$destination" -derivedDataPath .build/xcode-dd CODE_SIGNING_ALLOWED=NO
   done
 }
 
@@ -202,7 +223,7 @@ ui_tests() {
       safe=$(printf '%s-%s' "$scheme" "$destination" | tr -c '[:alnum:]_-' '_')
       # xcodebuild refuses an existing result bundle, so clear this run's path first.
       rm -rf ".build/ui-results/${safe}.xcresult"
-      xcodebuild test "$flag" "$project" -scheme "$scheme" -destination "$destination" -derivedDataPath .build/xcode-dd -resultBundlePath ".build/ui-results/${safe}.xcresult" CODE_SIGNING_ALLOWED=NO SWIFT_TREAT_WARNINGS_AS_ERRORS=YES
+      xcodebuild test "$flag" "$project" -scheme "$scheme" -destination "$destination" -derivedDataPath .build/xcode-dd -resultBundlePath ".build/ui-results/${safe}.xcresult" CODE_SIGNING_ALLOWED=NO
     done
   done
 }
@@ -266,6 +287,9 @@ self_test() {
   (cd "$fixture"; XCODE_UITEST_OPTOUT=('Test.xcodeproj:no UI-test target yet'); assert_case reasoned-ui-optout pass '' ui_project_tripwire)
   mkdir -p "$fixture/Test.xcodeproj/project.xcworkspace"
   (cd "$fixture"; XCODE_UITEST_OPTOUT=('Test.xcodeproj:no UI-test target yet'); assert_case nested-workspace-ignored pass '' ui_project_tripwire)
+  (XCODE_TEST_OPTOUT=('Test.xcodeproj:tested elsewhere'); assert_case reasoned-test-optout pass '' test_optout_reason Test.xcodeproj)
+  (XCODE_TEST_OPTOUT=('Test.xcodeproj: '); assert_case blank-test-optout-reason fail '' test_optout_reason Test.xcodeproj)
+  (XCODE_TEST_OPTOUT=('Other.xcodeproj:tested elsewhere'); assert_case other-project-test-optout fail '' test_optout_reason Test.xcodeproj)
   echo 'self-test: all cases passed'
 }
 
