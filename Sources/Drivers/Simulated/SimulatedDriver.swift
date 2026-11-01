@@ -21,8 +21,8 @@ import SafetyCore
 /// See ``SimulatedGenerator`` for the trace itself. This type is the
 /// `DriverAPI` plumbing around it: every glucose value is validated through
 /// the `SafetyLimitsValidator` the platform hands it, every timestamp
-/// is stamped from the injected ``Clock``, and emission is driven by
-/// the injected ``Scheduler`` — never a `Task.sleep` loop of its own, so a
+/// is stamped from the injected ``Clock``. One tick runs at activation and
+/// remaining emissions are driven by the injected ``Scheduler`` — never a `Task.sleep` loop, so a
 /// test can drive it tick by tick.
 public actor SimulatedDriver: Driver {
 
@@ -153,6 +153,7 @@ public actor SimulatedDriver: Driver {
             await self?.emitNextTick()
         }
         registrationBox.set(registration)
+        await emitNextTick()
     }
 
     public func deactivate() async {
@@ -175,9 +176,9 @@ public actor SimulatedDriver: Driver {
 
     // MARK: - Emission
 
-    /// One scheduler tick: advance the model, validate, stamp, emit. Never
-    /// called by this type directly — only via the registration `activate()`
-    /// sets up, so this is the one place emission happens.
+    /// One scheduler tick: advance the model, validate, stamp, emit.
+    /// `activate()` calls it once; later calls come from the scheduler
+    /// registration.
     private func emitNextTick() async {
         guard isActive else { return }
         let tick = generator.advance()

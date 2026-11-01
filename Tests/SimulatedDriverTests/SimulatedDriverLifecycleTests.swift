@@ -148,6 +148,8 @@ struct SimulatedDriverLifecycleTests {
         }
         var glucoseIterator = glucose.readings.makeAsyncIterator()
         var insulinIterator = insulin.insulinOnBoard.makeAsyncIterator()
+        #expect((await glucoseIterator.next())?.recordedAt == clock.now)
+        #expect((await insulinIterator.next())?.calculatedAt == clock.now)
         clock.advance(by: SimulatedDriver.defaultTickInterval)
         await scheduler.tick()
 
@@ -159,7 +161,7 @@ struct SimulatedDriverLifecycleTests {
 
     @Test("Teardown finishes the streams handed out for that activation")
     func teardownFinishesStreams() async throws {
-        let (driver, _, _) = try makeDriver()
+        let (driver, clock, _) = try makeDriver()
         try await driver.activate()
         guard case .glucoseSource(let glucose) = driver.capability(.glucoseSource),
               case .insulinSource(let insulin) = driver.capability(.insulinSource) else {
@@ -169,6 +171,8 @@ struct SimulatedDriverLifecycleTests {
         var glucoseIterator = glucose.readings.makeAsyncIterator()
         var insulinIterator = insulin.insulinOnBoard.makeAsyncIterator()
         await driver.deactivate()
+        #expect((await glucoseIterator.next())?.recordedAt == clock.now)
+        #expect((await insulinIterator.next())?.calculatedAt == clock.now)
         #expect(await glucoseIterator.next() == nil)
         #expect(await insulinIterator.next() == nil)
     }
@@ -176,15 +180,18 @@ struct SimulatedDriverLifecycleTests {
     @Test("A failed Driver activates again without a teardown in between")
     func failedDriverActivatesAgain() async throws {
         let (driver, clock, scheduler) = try makeDriver()
-        guard case .glucoseSource(let port) = driver.capability(.glucoseSource) else {
-            Issue.record("expected a glucoseSource port")
-            return
-        }
         var lifecycle = DriverLifecycle(restoring: .failed)
 
         try lifecycle.advance(to: .activating)
         try await driver.activate()
         try lifecycle.advance(to: .active)
+
+        guard case .glucoseSource(let port) = driver.capability(.glucoseSource) else {
+            Issue.record("expected the recovered glucose port")
+            return
+        }
+        var recoveredIterator = port.readings.makeAsyncIterator()
+        #expect((await recoveredIterator.next())?.recordedAt == clock.now)
 
         clock.advance(by: SimulatedDriver.defaultTickInterval)
         await scheduler.tick()
@@ -193,13 +200,19 @@ struct SimulatedDriverLifecycleTests {
 
     @Test("Failed-state recovery never stacks a second live registration on top of an untorn-down one")
     func failedRecoveryDoesNotLeakARegistration() async throws {
-        let (driver, _, scheduler) = try makeDriver()
+        let (driver, clock, scheduler) = try makeDriver()
         var lifecycle = DriverLifecycle()
 
         // active: one live registration.
         try lifecycle.advance(to: .activating)
         try await driver.activate()
         try lifecycle.advance(to: .active)
+        guard case .glucoseSource(let source) = driver.capability(.glucoseSource) else {
+            Issue.record("expected glucose port")
+            return
+        }
+        var iterator = source.readings.makeAsyncIterator()
+        #expect((await iterator.next())?.recordedAt == clock.now)
         #expect(scheduler.liveRegistrationCount == 1)
 
         // active -> failed is a DIRECT transition — the table never routes
@@ -210,9 +223,11 @@ struct SimulatedDriverLifecycleTests {
 
         // failed -> activating calls activate() again on the SAME instance,
         // with the untorn-down registration from above still live.
+        clock.advance(by: 60)
         try lifecycle.advance(to: .activating)
         try await driver.activate()
         try lifecycle.advance(to: .active)
+        #expect((await iterator.next())?.recordedAt == clock.now)
         #expect(scheduler.liveRegistrationCount == 1, "re-activation must cancel the prior registration, never stack a second live one")
 
         // Teardown from this recovered state leaves zero live registrations.

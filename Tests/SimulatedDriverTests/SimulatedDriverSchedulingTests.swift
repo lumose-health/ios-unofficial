@@ -45,6 +45,8 @@ struct SimulatedDriverSchedulingTests {
         var iterator = port.readings.makeAsyncIterator()
 
         try await driver.activate()
+        let activationSample = await iterator.next()
+        #expect(activationSample?.recordedAt == clock.now)
         clock.advance(by: SimulatedDriver.defaultTickInterval)
         await scheduler.tick()
 
@@ -62,6 +64,7 @@ struct SimulatedDriverSchedulingTests {
         }
         var iterator = port.readings.makeAsyncIterator()
         try await driver.activate()
+        _ = await iterator.next()
 
         var samples: [GlucoseSample] = []
         for _ in 0..<5 {
@@ -83,6 +86,7 @@ struct SimulatedDriverSchedulingTests {
         }
         var iterator = port.insulinOnBoard.makeAsyncIterator()
         try await driver.activate()
+        #expect((await iterator.next())?.calculatedAt == clock.now)
 
         clock.advance(by: SimulatedDriver.defaultTickInterval)
         await scheduler.tick()
@@ -121,9 +125,39 @@ struct SimulatedDriverSchedulingTests {
             .map(\.completedAt)
             .sorted()
 
-        #expect(basalTimestamps.count == hoursToObserve)
+        #expect(basalTimestamps.count == hoursToObserve + 1)
         for (earlier, later) in zip(basalTimestamps, basalTimestamps.dropFirst()) {
             #expect(later.timeIntervalSince(earlier) == 3600)
         }
+    }
+
+    @Test("Activation emits immediately to ports read after activate returns")
+    func activationEmissionIsAvailableOnNewPorts() async throws {
+        let (driver, clock, _) = try makeDriver()
+        try await driver.activate()
+        guard case .glucoseSource(let glucose) = driver.capability(.glucoseSource),
+              case .insulinSource(let insulin) = driver.capability(.insulinSource) else {
+            Issue.record("expected glucose and insulin ports")
+            return
+        }
+        var glucoseIterator = glucose.readings.makeAsyncIterator()
+        var insulinIterator = insulin.insulinOnBoard.makeAsyncIterator()
+        #expect((await glucoseIterator.next())?.recordedAt == clock.now)
+        #expect((await insulinIterator.next())?.calculatedAt == clock.now)
+    }
+
+    @Test("Activation and a scheduler tick each emit once with one live registration")
+    func activationDoesNotDuplicateSchedulerTick() async throws {
+        let (driver, clock, scheduler) = try makeDriver()
+        try await driver.activate()
+        guard case .glucoseSource(let port) = driver.capability(.glucoseSource) else { Issue.record("expected glucose port"); return }
+        var iterator = port.readings.makeAsyncIterator()
+        #expect(scheduler.liveRegistrationCount == 1)
+        let initial = await iterator.next()
+        clock.advance(by: SimulatedDriver.defaultTickInterval)
+        await scheduler.tick()
+        let next = await iterator.next()
+        #expect(initial?.recordedAt != next?.recordedAt)
+        #expect(scheduler.liveRegistrationCount == 1)
     }
 }

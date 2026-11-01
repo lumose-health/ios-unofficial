@@ -81,7 +81,7 @@ struct HomeScaffoldView: View {
 
     @ViewBuilder private func cardView(_ card: HomeCard) -> some View {
         switch card {
-        case .statusRow: Color.clear.frame(height: 1).accessibilityIdentifier("home.status-row-slot")
+        case .statusRow: StatusRowView(state: model.statusRow)
         case .glucoseHero:
             GlucoseHeroView(state: model.heroState)
         case .glucoseTrend: emptyCard(HomeScaffoldModel.cardTable[0])
