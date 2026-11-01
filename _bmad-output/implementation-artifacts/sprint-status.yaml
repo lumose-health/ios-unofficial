@@ -175,7 +175,7 @@ development_status:
   8-10-the-install-runbook-and-the-published-docs-set: backlog
   8-11-the-disclosure-surfaces-that-forced-losses-depend-on: backlog
   8-12-policy-privacy-and-the-contributor-path: backlog
-  8-13-rewrite-the-planning-artifacts-for-project-distribution: backlog
+  8-13-rewrite-the-planning-artifacts-for-project-distribution: review
   epic-8-retrospective: optional
 
 # DEFERRED (2026-08-19): WallClockSchedulerTests is timing-sensitive under load —

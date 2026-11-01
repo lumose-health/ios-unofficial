@@ -194,16 +194,16 @@ This document provides the complete epic and story breakdown for GlycemicGPT iOS
 **FR-176**: Developer section and debug console
 **FR-177**: Accessibility identifier parity as the acceptance substrate
 **FR-178**: VoiceOver, non-colour encoding and Dynamic Type
-**FR-179**: Fork-and-build with no project-held signing material
+**FR-179**: Fork-and-build as the advanced self-build path
 **FR-180**: The documented fixed secret set and isolated credential validation
-**FR-181**: Identifiers derived from the Builder Team ID
+**FR-181**: Fixed project identifiers, Team-ID templating for self-builds
 **FR-182**: One-time identifier and capability registration
-**FR-183**: Building, signing and uploading from the Builder's own fork
+**FR-183**: Building, signing and uploading the project build
 **FR-184**: Distribution-signing assertion, hard fail
 **FR-185**: Custody of signing material within a run
 **FR-186**: On-demand and scheduled rebuild so an installed build never lapses
 **FR-187**: In-app build provenance, channel and expiry
-**FR-188**: Upstream release notice and TestFlight deep link
+**FR-188**: Self-build upstream release notice
 **FR-189**: Build-time composition of what ships
 **FR-190**: One version source of truth
 **FR-191**: Monotonic build numbers
@@ -238,7 +238,7 @@ This document provides the complete epic and story breakdown for GlycemicGPT iOS
 **FR-220**: The published documentation set for the iPhone and Apple Watch apps
 **FR-221**: Public repository — rendered is not the same as private
 **FR-222**: Docs publication dispatch to the website repository
-**FR-223**: Fork-to-working-app install runbook and the 90-day rebuild
+**FR-223**: Install runbook, the self-build path, and the 90-day expiry
 **FR-224**: Apple Watch setup page
 **FR-225**: Contributor documentation, the Driver contribution guide, and the code of conduct
 **FR-226**: Security disclosure policy and the pre-declined report class
@@ -251,7 +251,7 @@ This document provides the complete epic and story breakdown for GlycemicGPT iOS
 **FR-233**: Repo-internal, unpublished provenance record
 **FR-234**: Medical disclaimer, the alert-delivery conditions, and the per-device verification table
 **FR-235**: Prohibition on guaranteed-alert claims on any surface
-**FR-236**: Privacy document and the crash-reporting posture under fork-and-build
+**FR-236**: Privacy document and the crash-reporting posture
 **FR-237**: The troubleshooting and status-icon pages, and the forced-loss disclosures they carry
 
 ### NonFunctional Requirements
@@ -278,7 +278,7 @@ This document provides the complete epic and story breakdown for GlycemicGPT iOS
 **NFR-20**: Transport security — no cleartext to a non-private host, enforced in the app
 **NFR-21**: No therapeutic write surface exists anywhere (SI-1)
 **NFR-22**: Minimal, declared attack surface
-**NFR-23**: No project telemetry, and network silence with one named exception
+**NFR-23**: No project telemetry by default, and network silence with one named exception
 **NFR-24**: Log scrubbing is a system-wide invariant (SI-9)
 **NFR-25**: Diagnostic export is scrubbed, bounded and user-initiated
 **NFR-26**: VoiceOver
@@ -287,7 +287,7 @@ This document provides the complete epic and story breakdown for GlycemicGPT iOS
 **NFR-29**: Motion, contrast, and input
 **NFR-30**: The accessibility parity rule, and the identifier contract as the UI-test substrate
 **NFR-31**: Deliberate English-only v1, with the discipline that makes i18n later mechanical
-**NFR-32**: The project can never see a crash, and the design accepts it
+**NFR-32**: The project runs no crash-reporting SDK or telemetry, and the design accepts it
 **NFR-33**: The on-device diagnostic surface is the only diagnostic channel
 **NFR-34**: Every device-only NFR has a named owner before v1 ships
 
@@ -551,16 +551,16 @@ Every story inherits these. A story that violates one is a defect, not a variati
 | FR-176 | Epic 6 | Developer section and debug console |
 | FR-177 | Epic 6 | Accessibility identifier parity as the acceptance substrate |
 | FR-178 | Epic 6 | VoiceOver, non-colour encoding and Dynamic Type |
-| FR-179 | Epic 8 | Fork-and-build with no project-held signing material |
+| FR-179 | Epic 8 | Fork-and-build as the advanced self-build path |
 | FR-180 | Epic 8 | The documented fixed secret set and isolated credential validation |
-| FR-181 | Epic 8 | Identifiers derived from the Builder Team ID |
+| FR-181 | Epic 8 | Fixed project identifiers, Team-ID templating for self-builds |
 | FR-182 | Epic 8 | One-time identifier and capability registration |
-| FR-183 | Epic 8 | Building, signing and uploading from the Builder's own fork |
+| FR-183 | Epic 8 | Building, signing and uploading the project build |
 | FR-184 | Epic 8 | Distribution-signing assertion, hard fail |
 | FR-185 | Epic 8 | Custody of signing material within a run |
 | FR-186 | Epic 8 | On-demand and scheduled rebuild so an installed build never lapses |
 | FR-187 | Epic 8 | In-app build provenance, channel and expiry |
-| FR-188 | Epic 8 | Upstream release notice and TestFlight deep link |
+| FR-188 | Epic 8 | Self-build upstream release notice |
 | FR-189 | Epic 8 | Build-time composition of what ships |
 | FR-190 | Epic 8 | One version source of truth |
 | FR-191 | Epic 8 | Monotonic build numbers |
@@ -595,7 +595,7 @@ Every story inherits these. A story that violates one is a defect, not a variati
 | FR-220 | Epic 8 | The published documentation set for the iPhone and Apple Watch apps |
 | FR-221 | Epic 8 | Public repository — rendered is not the same as private |
 | FR-222 | Epic 8 | Docs publication dispatch to the website repository |
-| FR-223 | Epic 8 | Fork-to-working-app install runbook and the 90-day rebuild |
+| FR-223 | Epic 8 | Install runbook, the self-build path, and the 90-day expiry |
 | FR-224 | Epic 8 | Apple Watch setup page |
 | FR-225 | Epic 8 | Contributor documentation, the Driver contribution guide, and the code of conduct |
 | FR-226 | Epic 8 | Security disclosure policy and the pre-declined report class |
@@ -608,7 +608,7 @@ Every story inherits these. A story that violates one is a defect, not a variati
 | FR-233 | Epic 8 | Repo-internal, unpublished provenance record |
 | FR-234 | Epic 8 | Medical disclaimer, the alert-delivery conditions, and the per-device verification table |
 | FR-235 | Epic 8 | Prohibition on guaranteed-alert claims on any surface |
-| FR-236 | Epic 8 | Privacy document and the crash-reporting posture under fork-and-build |
+| FR-236 | Epic 8 | Privacy document and the crash-reporting posture |
 | FR-237 | Epic 8 | The troubleshooting and status-icon pages, and the forced-loss disclosures they carry |
 
 ## Epic List
