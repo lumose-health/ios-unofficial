@@ -6,6 +6,41 @@ import UIKit
 import AppKit
 #endif
 
+private struct TestAuthorizations: OnboardingAuthorizations {
+    func requestNotificationAuthorization(options: NotificationAuthorizationOptions) async -> NotificationAuthorizationOutcome { .granted }
+    func requestBluetoothAuthorization() async -> BluetoothAuthorizationOutcome { .allowed }
+}
+
+private actor RecordingAuthorizations: OnboardingAuthorizations {
+    let notification: NotificationAuthorizationOutcome
+    let bluetooth: BluetoothAuthorizationOutcome
+    private(set) var calls: [String] = []
+    private(set) var seenOptions: [NotificationAuthorizationOptions] = []
+    init(notification: NotificationAuthorizationOutcome, bluetooth: BluetoothAuthorizationOutcome) { self.notification = notification; self.bluetooth = bluetooth }
+    func requestNotificationAuthorization(options: NotificationAuthorizationOptions) async -> NotificationAuthorizationOutcome { calls.append("notification"); seenOptions.append(options); return notification }
+    func requestBluetoothAuthorization() async -> BluetoothAuthorizationOutcome { calls.append("bluetooth"); return bluetooth }
+    func recorded() -> ([String], [NotificationAuthorizationOptions]) { (calls, seenOptions) }
+}
+
+private actor GatedAuthorizations: OnboardingAuthorizations {
+    private var notificationContinuation: CheckedContinuation<NotificationAuthorizationOutcome, Never>?
+    private var bluetoothContinuation: CheckedContinuation<BluetoothAuthorizationOutcome, Never>?
+    private(set) var calls: [String] = []
+    func requestNotificationAuthorization(options: NotificationAuthorizationOptions) async -> NotificationAuthorizationOutcome {
+        calls.append("notification")
+        return await withCheckedContinuation { notificationContinuation = $0 }
+    }
+    func requestBluetoothAuthorization() async -> BluetoothAuthorizationOutcome {
+        calls.append("bluetooth")
+        return await withCheckedContinuation { bluetoothContinuation = $0 }
+    }
+    func notificationIsPending() -> Bool { notificationContinuation != nil }
+    func bluetoothIsPending() -> Bool { bluetoothContinuation != nil }
+    func releaseNotification() { notificationContinuation?.resume(returning: .granted); notificationContinuation = nil }
+    func releaseBluetooth() { bluetoothContinuation?.resume(returning: .allowed); bluetoothContinuation = nil }
+    func recordedCalls() -> [String] { calls }
+}
+
 private actor BackendStub: OnboardingBackend {
     var connection: ConnectionTestOutcome
     var signInOutcome: SignInOutcome
@@ -47,7 +82,7 @@ private actor GatedBackend: OnboardingBackend {
         #expect(OnboardingControls.make(stage: .backend, connectionSucceeded: true).trailing == .next(enabled: true))
         #expect(OnboardingControls.make(stage: .signIn, connectionSucceeded: true).trailing == nil)
         let (defaults, name) = makeDefaults(); defer { defaults.removePersistentDomain(forName: name) }
-        let model = OnboardingModel(backend: UnavailableOnboardingBackend(), defaults: defaults)
+        let model = OnboardingModel(backend: UnavailableOnboardingBackend(), authorizations: TestAuthorizations(), defaults: defaults)
         model.next(); #expect(model.stage == .features)
         model.next(); #expect(model.stage == .safety)
         model.next(); model.skip(); model.swipe(.forward); #expect(model.stage == .safety)
@@ -63,7 +98,7 @@ private actor GatedBackend: OnboardingBackend {
     @MainActor @Test func blankURLAndUnavailableFailure() async {
         let (defaults, name) = makeDefaults(); defer { defaults.removePersistentDomain(forName: name) }
         let backend = BackendStub()
-        let model = OnboardingModel(backend: backend, defaults: defaults)
+        let model = OnboardingModel(backend: backend, authorizations: TestAuthorizations(), defaults: defaults)
         for value in ["", "  \n"] {
             model.updateServerURL(value); #expect(model.testConnection() == nil)
             #expect(model.connectionResult?.text == OnboardingCopy.blankURL)
@@ -74,21 +109,69 @@ private actor GatedBackend: OnboardingBackend {
         #expect(model.connectionResult?.text == "Connection failed: offline")
         #expect(!model.connectionSucceeded)
         model.updateServerURL("https://other"); #expect(model.connectionResult == nil && !model.connectionSucceeded)
-        let unavailable = OnboardingModel(backend: UnavailableOnboardingBackend(), defaults: defaults, startStage: .backend, safetyAcknowledged: true)
+        let unavailable = OnboardingModel(backend: UnavailableOnboardingBackend(), authorizations: TestAuthorizations(), defaults: defaults, startStage: .backend, safetyAcknowledged: true)
         unavailable.updateServerURL("https://server"); let unavailableTask = unavailable.testConnection()!; await unavailableTask.value
         #expect(unavailable.connectionResult?.text == "Connection failed: this build can't connect to a server yet")
+    }
+    @MainActor @Test func everyAuthorizationOutcomeFinishesAndRequestsOnceInOrder() async {
+        let notificationOutcomes: [NotificationAuthorizationOutcome] = [.granted, .denied, .failed]
+        let bluetoothOutcomes: [BluetoothAuthorizationOutcome] = [.allowed, .denied, .restricted, .unsupported]
+        for notification in notificationOutcomes {
+            for bluetooth in bluetoothOutcomes {
+                let (defaults, name) = makeDefaults(); defer { defaults.removePersistentDomain(forName: name) }
+                let authorizations = RecordingAuthorizations(notification: notification, bluetooth: bluetooth)
+                let model = OnboardingModel(backend: UnavailableOnboardingBackend(), authorizations: authorizations, defaults: defaults)
+                advanceToBackend(model)
+                let task = model.continueWithoutServer()!
+                await task.value
+                #expect(model.isFinished && OnboardingCompletion.isComplete(in: defaults))
+                #expect(model.authorizationResult == OnboardingAuthorizationResult(notification: notification, bluetooth: bluetooth))
+                let recorded = await authorizations.recorded()
+                #expect(recorded.0 == ["notification", "bluetooth"])
+                #expect(recorded.1 == [.onboarding])
+                let requested = recorded.1.first
+                #expect(requested == [.alert, .sound, .badge, .criticalAlert])
+                #expect(requested?.contains(.provisional) == false)
+            }
+        }
+    }
+    @MainActor @Test func bothCompletionPathsWaitForSequentialAuthorizationBeforePersisting() async {
+        for useServerlessPath in [true, false] {
+            let (defaults, name) = makeDefaults(); defer { defaults.removePersistentDomain(forName: name) }
+            let auth = GatedAuthorizations()
+            let backend = BackendStub(signIn: .signedIn)
+            let model = OnboardingModel(backend: backend, authorizations: auth, defaults: defaults, startStage: .backend, safetyAcknowledged: true)
+            let task: Task<Void, Never>
+            if useServerlessPath {
+                task = model.continueWithoutServer()!
+            } else {
+                model.updateEmail("user@example.com"); model.updatePassword("secret")
+                task = model.signIn()!
+            }
+            while !(await auth.notificationIsPending()) { await Task.yield() }
+            #expect(!model.isFinished && !OnboardingCompletion.isComplete(in: defaults))
+            #expect(await auth.recordedCalls() == ["notification"])
+            if useServerlessPath { #expect(model.continueWithoutServer() == nil) }
+            await auth.releaseNotification()
+            while !(await auth.bluetoothIsPending()) { await Task.yield() }
+            #expect(!model.isFinished && !OnboardingCompletion.isComplete(in: defaults))
+            #expect(await auth.recordedCalls() == ["notification", "bluetooth"])
+            await auth.releaseBluetooth()
+            await task.value
+            #expect(model.isFinished && OnboardingCompletion.isComplete(in: defaults))
+        }
     }
     @MainActor @Test func successAndEscapeHatchComplete() async {
         let (defaults, name) = makeDefaults(); defer { defaults.removePersistentDomain(forName: name) }
         let backend = BackendStub(connection: .connected)
-        let model = OnboardingModel(backend: backend, defaults: defaults, startStage: .backend, safetyAcknowledged: true)
+        let model = OnboardingModel(backend: backend, authorizations: TestAuthorizations(), defaults: defaults, startStage: .backend, safetyAcknowledged: true)
         model.updateServerURL("https://server"); let task = model.testConnection()!; await task.value
         #expect(model.connectionResult?.text == "Connected successfully")
         model.next(); #expect(model.stage == .signIn)
-        let escape = OnboardingModel(backend: backend, defaults: defaults)
+        let escape = OnboardingModel(backend: backend, authorizations: TestAuthorizations(), defaults: defaults)
         advanceToBackend(escape)
         escape.updateServerURL("https://server"); let failed = escape.testConnection()!; await failed.value
-        escape.continueWithoutServer()
+        let escapeTask = escape.continueWithoutServer()!; await escapeTask.value
         #expect(escape.isFinished && escape.serverURL.isEmpty && escape.connectionResult == nil)
         #expect(OnboardingCompletion.isComplete(in: defaults))
         escape.continueWithoutServer(); #expect(escape.isFinished)
@@ -96,27 +179,37 @@ private actor GatedBackend: OnboardingBackend {
     @MainActor @Test func cancellationPreventsLateConnectionResult() async {
         let (defaults, name) = makeDefaults(); defer { defaults.removePersistentDomain(forName: name) }
         let backend = GatedBackend()
-        let model = OnboardingModel(backend: backend, defaults: defaults)
+        let auth = GatedAuthorizations()
+        let model = OnboardingModel(backend: backend, authorizations: auth, defaults: defaults)
         advanceToBackend(model)
         model.updateServerURL("https://server")
         let task = model.testConnection()!
         while !(await backend.isPending()) { await Task.yield() }
-        model.continueWithoutServer()
+        let completion = model.continueWithoutServer()!
+        while !(await auth.notificationIsPending()) { await Task.yield() }
         await backend.release()
         await task.value
+        #expect(!model.isFinished && !OnboardingCompletion.isComplete(in: defaults))
+        await auth.releaseNotification()
+        while !(await auth.bluetoothIsPending()) { await Task.yield() }
+        #expect(!model.isFinished && model.connectionResult == nil && !model.connectionSucceeded)
+        await auth.releaseBluetooth()
+        await completion.value
         #expect(model.isFinished && model.serverURL.isEmpty)
         #expect(model.connectionResult == nil && !model.connectionSucceeded)
     }
     @MainActor @Test func signInValidationFailureAndSuccess() async {
         let (defaults, name) = makeDefaults(); defer { defaults.removePersistentDomain(forName: name) }
         let backend = BackendStub(signIn: .failed(message: "bad credentials"))
-        let model = OnboardingModel(backend: backend, defaults: defaults, startStage: .backend, safetyAcknowledged: true)
+        let auth = RecordingAuthorizations(notification: .granted, bluetooth: .allowed)
+        let model = OnboardingModel(backend: backend, authorizations: auth, defaults: defaults, startStage: .backend, safetyAcknowledged: true)
         #expect(model.signIn() == nil && model.loginError == OnboardingCopy.blankCredentials)
         model.updateEmail("a@example.com"); model.updatePassword("secret")
         let failed = model.signIn()!; await failed.value
         #expect(model.loginError == "bad credentials" && model.password.isEmpty)
+        #expect(await auth.recorded().0.isEmpty)
         let success = BackendStub(signIn: .signedIn)
-        let second = OnboardingModel(backend: success, defaults: defaults, startStage: .backend, safetyAcknowledged: true)
+        let second = OnboardingModel(backend: success, authorizations: TestAuthorizations(), defaults: defaults, startStage: .backend, safetyAcknowledged: true)
         second.updateEmail("a@example.com"); second.updatePassword("secret")
         let done = second.signIn()!; await done.value
         #expect(second.isFinished && second.password.isEmpty && OnboardingCompletion.isComplete(in: defaults))
@@ -124,10 +217,11 @@ private actor GatedBackend: OnboardingBackend {
     @MainActor @Test func escapeAndSignInDoNothingBeforeSafetyAcknowledged() async {
         let (defaults, name) = makeDefaults(); defer { defaults.removePersistentDomain(forName: name) }
         let backend = BackendStub(signIn: .signedIn)
-        let model = OnboardingModel(backend: backend, defaults: defaults)
+        let auth = RecordingAuthorizations(notification: .granted, bluetooth: .allowed)
+        let model = OnboardingModel(backend: backend, authorizations: auth, defaults: defaults)
         model.updateEmail("a@example.com"); model.updatePassword("secret")
         for _ in OnboardingStage.allCases.prefix(3) {
-            model.continueWithoutServer()
+            #expect(model.continueWithoutServer() == nil)
             #expect(model.signIn() == nil)
             #expect(!model.isFinished && !model.isSigningIn && model.loginError == nil)
             model.next()
@@ -135,25 +229,31 @@ private actor GatedBackend: OnboardingBackend {
         #expect(model.stage == .safety && !model.safetyAcknowledged)
         #expect(!OnboardingCompletion.isComplete(in: defaults))
         #expect(await backend.counts().1 == 0)
-        model.acknowledgeSafety(); model.continueWithoutServer()
+        #expect(await auth.recorded().0.isEmpty)
+        model.acknowledgeSafety(); let completion = model.continueWithoutServer()!; await completion.value
         #expect(model.isFinished && OnboardingCompletion.isComplete(in: defaults))
-        let resumed = OnboardingModel(backend: backend, defaults: defaults, startStage: .backend, safetyAcknowledged: true)
+        let resumed = OnboardingModel(backend: backend, authorizations: TestAuthorizations(), defaults: defaults, startStage: .backend, safetyAcknowledged: true)
         #expect(resumed.safetyAcknowledged && resumed.stage == .backend)
-        #expect(!OnboardingModel(backend: backend, defaults: defaults, startStage: .safety).safetyAcknowledged)
+        #expect(!OnboardingModel(backend: backend, authorizations: TestAuthorizations(), defaults: defaults, startStage: .safety).safetyAcknowledged)
     }
     @MainActor @Test func laterStartWithoutAcknowledgementLandsOnSafety() async {
         let (defaults, name) = makeDefaults(); defer { defaults.removePersistentDomain(forName: name) }
         let backend = BackendStub(connection: .connected, signIn: .signedIn)
         for start in [OnboardingStage.backend, .signIn] {
-            let model = OnboardingModel(backend: backend, defaults: defaults, startStage: start)
+            let model = OnboardingModel(backend: backend, authorizations: TestAuthorizations(), defaults: defaults, startStage: start)
             #expect(model.stage == .safety && !model.safetyAcknowledged)
             model.updateEmail("a@example.com"); model.updatePassword("secret")
-            model.continueWithoutServer()
+            #expect(model.continueWithoutServer() == nil)
             #expect(model.signIn() == nil)
             #expect(!model.isFinished && !model.isSigningIn)
         }
         #expect(!OnboardingCompletion.isComplete(in: defaults))
         #expect(await backend.counts().1 == 0)
+    }
+    @Test func monitoringLimitsCopyIsPinned() {
+        #expect(OnboardingCopy.monitoringLimitsTitle == "What stops monitoring")
+        #expect(OnboardingCopy.monitoringLimits == ["Force-quitting GlycemicGPT from the app switcher stops monitoring, including reconnecting to your pump, until you open the app again.", "Restarting your phone stops monitoring until you unlock it once.", "Low Power Mode cuts some of the background time GlycemicGPT uses to stay up to date."])
+        #expect(OnboardingIdentifier.monitoringLimits == "onboarding_monitoring_limits")
     }
     @Test func previewNoticeIsShownWhileNoRealDriverOrBackend() {
         #expect(OnboardingPreview.showsNotice)
@@ -164,7 +264,7 @@ private actor GatedBackend: OnboardingBackend {
     @MainActor @Test func staleConnectionResultIsDroppedAfterURLEdit() async {
         let (defaults, name) = makeDefaults(); defer { defaults.removePersistentDomain(forName: name) }
         let backend = GatedBackend()
-        let model = OnboardingModel(backend: backend, defaults: defaults, startStage: .backend, safetyAcknowledged: true)
+        let model = OnboardingModel(backend: backend, authorizations: TestAuthorizations(), defaults: defaults, startStage: .backend, safetyAcknowledged: true)
         model.updateServerURL("https://first")
         let task = model.testConnection()!
         while !(await backend.isPending()) { await Task.yield() }

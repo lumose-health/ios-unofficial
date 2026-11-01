@@ -53,6 +53,8 @@ public enum OnboardingCopy {
     public static let welcomePreviewNotice = "This preview shows demo data only. Pump connection and server features are coming to iOS."
     public static let featuresTitle = "What You Get"
     public static let safetyTitle = "Important Safety Information"
+    public static let monitoringLimitsTitle = "What stops monitoring"
+    public static let monitoringLimits = ["Force-quitting GlycemicGPT from the app switcher stops monitoring, including reconnecting to your pump, until you open the app again.", "Restarting your phone stops monitoring until you unlock it once.", "Low Power Mode cuts some of the background time GlycemicGPT uses to stay up to date."]
     public static let noTherapeuticWrites = "GlycemicGPT only reads from your pump. It never delivers a bolus, never changes your basal, and never changes a pump setting."
     public static let backendTitle = "Connect a Server (Optional)"
     public static let backendBody = "A server adds AI, meal analysis, and caregiver features. You can skip it and use the app as a direct pump monitor."
@@ -101,6 +103,7 @@ public enum OnboardingIdentifier {
     public static let connectionResult = "onboarding_connection_result", continueWithoutServer = "onboarding_continue_without_server"
     public static let email = "onboarding_email", password = "onboarding_password", loginError = "onboarding_login_error", signIn = "onboarding_sign_in"
     public static let noTherapeuticWrites = "onboarding_no_therapeutic_writes"
+    public static let monitoringLimits = "onboarding_monitoring_limits"
     public static let comingToIOS = "onboarding_coming_to_ios"
     public static let previewNotice = "onboarding_preview_notice"
 }
@@ -117,6 +120,28 @@ public enum OnboardingSymbol {
 }
 
 public enum ConnectionTestOutcome: Sendable, Equatable { case connected, failed(reason: String) }
+public struct NotificationAuthorizationOptions: OptionSet, Sendable, Hashable {
+    public let rawValue: Int
+    public init(rawValue: Int) { self.rawValue = rawValue }
+    public static let alert = Self(rawValue: 1 << 0)
+    public static let sound = Self(rawValue: 1 << 1)
+    public static let badge = Self(rawValue: 1 << 2)
+    /// Requests have no effect until Apple grants the Critical Alerts entitlement.
+    public static let criticalAlert = Self(rawValue: 1 << 3)
+    public static let provisional = Self(rawValue: 1 << 4)
+    public static let onboarding: Self = [.alert, .sound, .badge, .criticalAlert]
+}
+public enum NotificationAuthorizationOutcome: Sendable, Equatable { case granted, denied, failed }
+public enum BluetoothAuthorizationOutcome: Sendable, Equatable { case allowed, denied, restricted, unsupported }
+public struct OnboardingAuthorizationResult: Sendable, Equatable {
+    public let notification: NotificationAuthorizationOutcome
+    public let bluetooth: BluetoothAuthorizationOutcome
+    public init(notification: NotificationAuthorizationOutcome, bluetooth: BluetoothAuthorizationOutcome) { self.notification = notification; self.bluetooth = bluetooth }
+}
+public protocol OnboardingAuthorizations: Sendable {
+    func requestNotificationAuthorization(options: NotificationAuthorizationOptions) async -> NotificationAuthorizationOutcome
+    func requestBluetoothAuthorization() async -> BluetoothAuthorizationOutcome
+}
 public enum SignInOutcome: Sendable, Equatable { case signedIn, failed(message: String) }
 public protocol OnboardingBackend: Sendable {
     func testConnection(to url: String) async -> ConnectionTestOutcome
@@ -142,13 +167,16 @@ public final class OnboardingModel {
     public private(set) var isSigningIn = false
     public private(set) var loginError: String?
     public private(set) var isFinished = false
+    public private(set) var isCompletingSetup = false
+    public private(set) var authorizationResult: OnboardingAuthorizationResult?
     @ObservationIgnored private let backend: any OnboardingBackend
+    @ObservationIgnored private let authorizations: any OnboardingAuthorizations
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private var connectionTask: Task<Void, Never>?
     /// A start stage after `.safety` is honored only when the caller passes an explicit
     /// prior acknowledgement; without one, onboarding starts at `.safety`.
-    public init(backend: any OnboardingBackend, defaults: UserDefaults, startStage: OnboardingStage = .welcome, safetyAcknowledged: Bool = false) {
-        self.backend = backend; self.defaults = defaults
+    public init(backend: any OnboardingBackend, authorizations: any OnboardingAuthorizations, defaults: UserDefaults, startStage: OnboardingStage = .welcome, safetyAcknowledged: Bool = false) {
+        self.backend = backend; self.authorizations = authorizations; self.defaults = defaults
         self.safetyAcknowledged = safetyAcknowledged
         self.stage = startStage.rawValue > OnboardingStage.safety.rawValue && !safetyAcknowledged ? .safety : startStage
     }
@@ -185,14 +213,14 @@ public final class OnboardingModel {
         connectionTask = task
         return task
     }
-    public func continueWithoutServer() {
-        guard pastSafetyGate, !isFinished else { return }
+    @discardableResult public func continueWithoutServer() -> Task<Void, Never>? {
+        guard pastSafetyGate, !isFinished, !isCompletingSetup else { return nil }
         connectionTask?.cancel(); connectionTask = nil
         serverURL = ""; connectionResult = nil; connectionSucceeded = false; isTestingConnection = false
-        complete()
+        return complete()
     }
     @discardableResult public func signIn() -> Task<Void, Never>? {
-        guard pastSafetyGate, !isSigningIn else { return nil }
+        guard pastSafetyGate, !isSigningIn, !isFinished, !isCompletingSetup else { return nil }
         guard !email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !password.isEmpty else { loginError = OnboardingCopy.blankCredentials; password = ""; return nil }
         isSigningIn = true; loginError = nil
         let url = serverURL, email = email, password = password
@@ -200,9 +228,21 @@ public final class OnboardingModel {
             let outcome = await backend.signIn(url: url, email: email, password: password)
             guard let self else { return }
             self.password = ""; self.isSigningIn = false
-            switch outcome { case .signedIn: self.complete(); case .failed(let message): self.loginError = message }
+            switch outcome { case .signedIn: await self.complete().value; case .failed(let message): self.loginError = message }
         }
         return task
     }
-    private func complete() { OnboardingCompletion.record(true, in: defaults); isFinished = true }
+    private func complete() -> Task<Void, Never> {
+        isCompletingSetup = true
+        let authorizations = authorizations, defaults = defaults
+        return Task { [weak self, authorizations, defaults] in
+            let notification = await authorizations.requestNotificationAuthorization(options: .onboarding)
+            let bluetooth = await authorizations.requestBluetoothAuthorization()
+            guard let self else { return }
+            self.authorizationResult = .init(notification: notification, bluetooth: bluetooth)
+            OnboardingCompletion.record(true, in: defaults)
+            self.isFinished = true
+            self.isCompletingSetup = false
+        }
+    }
 }

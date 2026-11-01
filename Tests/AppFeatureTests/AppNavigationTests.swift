@@ -7,6 +7,11 @@ import UIKit
 import AppKit
 #endif
 
+private struct NavigationAuthorizations: OnboardingAuthorizations {
+    func requestNotificationAuthorization(options: NotificationAuthorizationOptions) async -> NotificationAuthorizationOutcome { .granted }
+    func requestBluetoothAuthorization() async -> BluetoothAuthorizationOutcome { .allowed }
+}
+
 @Suite("App navigation")
 struct AppNavigationTests {
     private var configuredBackend: BackendConfiguration {
@@ -89,7 +94,7 @@ struct AppNavigationTests {
         let suiteName = "AppNavigationShell-\(UUID())"
         let defaults = UserDefaults(suiteName: suiteName)!
         defer { defaults.removePersistentDomain(forName: suiteName) }
-        let model = OnboardingModel(backend: UnavailableOnboardingBackend(), defaults: defaults)
+        let model = OnboardingModel(backend: UnavailableOnboardingBackend(), authorizations: NavigationAuthorizations(), defaults: defaults)
         let mainBody = AppShell(startDestination: .main, onboarding: model).body
         let onboardingBody = AppShell(startDestination: .onboarding, onboarding: model).body
         #expect(String(describing: type(of: mainBody)).hasPrefix("DemoDataBannerRoot<"))

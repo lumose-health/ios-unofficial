@@ -16,7 +16,7 @@ struct GlycemicGPTApp: App {
         let validator = AppComposition.makeSafetyValidator()
         let driver = SimulatedDriver(clock: SystemClock(), scheduler: WallClockScheduler(), validator: validator)
         _model = State(initialValue: HomeModel(driver: driver, demoIdentifiers: [SimulatedDriver.identifier]))
-        _onboarding = State(initialValue: OnboardingModel(backend: UnavailableOnboardingBackend(), defaults: .standard))
+        _onboarding = State(initialValue: OnboardingModel(backend: UnavailableOnboardingBackend(), authorizations: SystemOnboardingAuthorizations(), defaults: .standard))
     }
 
     var body: some Scene {
