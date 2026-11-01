@@ -19,7 +19,7 @@ max_cycles: 4
 
 # Story 1.13a: App shell, DEMO DATA banner and the Home scaffold
 
-Status: review
+Status: done
 
 <!-- Split note (for the maintainer): epics.md Story 1.13 "Home dashboard and the glucose hero"
 is delivered as two PRs. 1.13a (this file) = the first installable app: Apps/ shell, AppFeature

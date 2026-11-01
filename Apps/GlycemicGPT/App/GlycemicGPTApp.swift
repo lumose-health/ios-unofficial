@@ -8,8 +8,10 @@ import SafetyCore
 struct GlycemicGPTApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @State private var model: HomeModel
+    private let startDestination: StartDestination
 
     init() {
+        startDestination = StartDestination.resolve(onboardingComplete: OnboardingCompletion.isComplete(in: .standard))
         let validator = AppComposition.makeSafetyValidator()
         let driver = SimulatedDriver(clock: SystemClock(), scheduler: WallClockScheduler(), validator: validator)
         _model = State(initialValue: HomeModel(driver: driver, demoIdentifiers: [SimulatedDriver.identifier]))
@@ -17,19 +19,8 @@ struct GlycemicGPTApp: App {
 
     var body: some Scene {
         WindowGroup {
-            DemoDataBannerRoot {
-                Group {
-                    if let activationError = model.hostError {
-                        VStack(spacing: 12) {
-                            Text("Unable to start data source").font(.headline)
-                            Text(activationError.recoverer)
-                        }.padding(16)
-                    } else {
-                        HomeScreen()
-                    }
-                }
+            AppShell(startDestination: startDestination)
                 .task { await model.setScenePhaseActive(true).value }
-            }
             .environment(model)
             .onChange(of: scenePhase) { _, phase in
                 if phase == .background {

@@ -40,7 +40,7 @@ public final class HomeModel {
     /// so it must not block the next activation's reads.
     public var isRefreshing: Bool { refreshGeneration == activationGeneration }
     public private(set) var heroState: HeroState
-    private let backend: BackendConfiguration
+    public let backend: BackendConfiguration
     public var statusRow: StatusRowState {
         // No hosted Driver currently reports pump-link state, so never infer it from activation.
         StatusRowState.make(connection: .disconnected, backend: backend, activeDrivers: [driver.descriptor.identifier])

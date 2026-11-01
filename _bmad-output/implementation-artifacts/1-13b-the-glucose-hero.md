@@ -23,7 +23,7 @@ max_cycles: 4
 
 # Story 1.13b: The glucose hero
 
-Status: review
+Status: done
 
 <!-- Split note (for the maintainer): second half of epics.md Story 1.13. DEPENDS ON 1.13a being
 merged to develop (AppFeature target, Apps/ shell, Home scaffold, DEMO DATA banner). Do not
@@ -398,3 +398,10 @@ The launcher re-run of cycle 3 passed **all 8 gates**. A re-review confirmed tha
    - Add a test for each.
 
 Change nothing else. Update the Dev Agent Record and the final diff size (it is currently about 738 reviewable lines; keep it under 800).
+
+### PM note — post-PR triage round 1 (2026-10-31)
+- PR #13 review wave: Sentry HIGH (stream reuse after stop/reactivate), CodeRabbit x2 (scene-phase ordering; future-dated sample retention). All three real.
+- Triage worker fixed all in `390483f` (12 files, +401/−39, ~230 test lines): per-activation driver streams (SimulatedDriver + DriverAPI contract docs), `HomeModel.setScenePhaseActive(_:)` desired-state reconcile, future-skew bound reusing `SafetyConstants.alertFloorMaxFutureSkew` on recordedAt/calculatedAt/observedAt.
+- Gates: all 8 pass (swift build/test 303 tests, safety+driver guards & self-tests, xcodebuild build + package test on iPhone 17 sim).
+- Replies posted, Sentry 👍, all threads resolved; CodeRabbit incremental review on 390483f: no new findings, confirmed the skew fix. GitGuardian pass. mergeState CLEAN.
+- Scope note: touched DriverAPI + SimulatedDriver (beyond hero surface) — protected-adjacent; escalated to maintainer merge with #12.

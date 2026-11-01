@@ -90,8 +90,11 @@ development_status:
   1-10-reconnect-indefinitely-and-survive-backgrounding: backlog
   1-11-recover-from-a-broken-pairing: backlog
   1-12-activate-deactivate-and-persist-driver-selection: backlog
-  1-13-home-dashboard-and-the-glucose-hero: backlog
-  1-14-the-status-row-pump-link-and-what-it-does-not-claim: backlog
+  # 1-13 split at story creation (2026-10-30): ~1,600 reviewable lines combined, over the
+  # PR budget. 1-13b stacks on 1-13a.
+  1-13a-app-shell-demo-banner-and-home-scaffold: done
+  1-13b-the-glucose-hero: done
+  1-14-the-status-row-pump-link-and-what-it-does-not-claim: done
   1-15-refresh-without-losing-what-i-already-had: backlog
   1-16-navigation-and-the-capability-driven-tab-bar: backlog
   1-17-first-run-welcome-safety-and-getting-to-a-working-monitor: backlog
@@ -170,14 +173,22 @@ development_status:
   8-5-the-five-required-checks: backlog
   8-6-swift-static-analysis-that-actually-analyses-swift: backlog
   8-7-guards-that-keep-the-invariants-true: backlog
-  8-8-build-test-and-ui-test-every-target: backlog
+  8-8-build-test-and-ui-test-every-target: done
   8-9-licensing-attribution-and-the-spdx-contract: backlog
   8-10-the-install-runbook-and-the-published-docs-set: backlog
   8-11-the-disclosure-surfaces-that-forced-losses-depend-on: backlog
   8-12-policy-privacy-and-the-contributor-path: backlog
-  8-13-rewrite-the-planning-artifacts-for-project-distribution: review
+  8-13-rewrite-the-planning-artifacts-for-project-distribution: done
   epic-8-retrospective: optional
 
 # DEFERRED (2026-08-19): WallClockSchedulerTests is timing-sensitive under load —
 # flaked once locally (1/259), passed on immediate re-run twice. Harden when a
 # test-infra story exists: widen tolerance or virtualize the clock boundary.
+
+# MERGE LOG (PM merge authority granted by the maintainer 2026-11-01)
+#   2026-11-01  #10 docs: project TestFlight + backlog reorder (sprint change)  squash -> develop
+#   2026-11-01  #11 8-8 iOS Gate workflow + ci-local.sh                         squash -> develop
+#   2026-11-01  #12 1-13a app shell + DEMO DATA banner + CI app declaration      squash -> develop
+#   2026-11-01  #13 1-13b glucose hero + per-activation driver streams + skew bound  squash -> develop
+#   2026-11-01  #14 8-13 planning docs rewrite for project TestFlight distribution  squash -> develop
+#   2026-11-01  #15 1-14 status row + immediate first demo sample + contrast fix   squash -> develop
