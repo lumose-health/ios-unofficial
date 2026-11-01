@@ -278,7 +278,7 @@ This document provides the complete epic and story breakdown for GlycemicGPT iOS
 **NFR-20**: Transport security — no cleartext to a non-private host, enforced in the app
 **NFR-21**: No therapeutic write surface exists anywhere (SI-1)
 **NFR-22**: Minimal, declared attack surface
-**NFR-23**: No project telemetry by default, and network silence with one named exception
+**NFR-23**: No project telemetry, and network silence with one named exception
 **NFR-24**: Log scrubbing is a system-wide invariant (SI-9)
 **NFR-25**: Diagnostic export is scrubbed, bounded and user-initiated
 **NFR-26**: VoiceOver

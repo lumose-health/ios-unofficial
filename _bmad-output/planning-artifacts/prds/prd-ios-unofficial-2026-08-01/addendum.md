@@ -58,7 +58,7 @@ The PRD states the *data contract*; the target list is architecture. Fragments w
 |---|---|
 | Project-operated APNs relay | Puts the project in the data path for every user's alerts. Incompatible with the no-project-infrastructure posture. |
 | Distribute a shared APNs key to self-hosters | Anyone holding it can push to every user of every build. Unacceptable. |
-| Per-deployment APNs (each self-builder mints a key for their own bundle ID) | Viable for self-builds only. Project builds share one bundle ID: per-deployment APNs would require the project key on every Backend (the rejected shared-key option) or a project relay (also rejected). Decision 7 defers server-generated alerts. |
+| Per-deployment APNs (each self-builder mints a key for their own bundle ID) | **The right eventual design for self-builds** — no relay, no shared secret, nobody in the data path. Project builds share one bundle ID: per-deployment APNs would require the project key on every Backend (the rejected shared-key option) or a project relay (also rejected). Deferred only because it requires work in the platform repository, which this PRD cannot discharge (decision 7). |
 | SSE while alive + on-device Alert Floor (**chosen for v1**) | Self-contained. Cost: Backend-generated alerts do not reach a suspended or terminated app, so caregiver alerting is degraded versus Android. Recorded as a forced loss. |
 
 ### 2.2 Critical Alerts
