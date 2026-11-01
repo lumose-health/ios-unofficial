@@ -279,6 +279,27 @@ struct DriverHostTests {
         #expect(await driver.readCounts.0 == 3)
     }
 
+    @Test @MainActor func inactiveDuringActivationReadStillReadsOnNextForeground() async {
+        let gap = HostGapController()
+        let driver = HostTestDriver(pumpReads: [.value(nil), .value(nil), .value(nil)])
+        let model = HomeModel(driver: driver, demoIdentifiers: [], readGap: { _ in await gap.waitIfArmed() })
+        await gap.arm()
+        let activation = model.setScenePhaseActive(true)
+        await gap.waitUntilEntered()
+        // The scene goes inactive while the activation read is held between reads.
+        model.sceneBecameInactive()
+        await gap.release()
+        await activation.value
+        #expect(await driver.readCounts == (1, 1))
+
+        await model.setScenePhaseActive(true).value
+        // The activation read finished after the inactive transition, so it does
+        // not count for this foreground and a new read runs.
+        #expect(await driver.activationCount == 1)
+        #expect(await driver.readCounts == (2, 2))
+        await model.stop()
+    }
+
     @Test @MainActor func equalReadingKeepsAgeAndBadge() async throws {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         let sample = try glucose(120, at: now)

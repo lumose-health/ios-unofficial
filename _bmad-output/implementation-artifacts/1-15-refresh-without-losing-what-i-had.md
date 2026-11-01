@@ -112,7 +112,7 @@ the Android client's behaviour copied in. AC 5 is extra scope added by the PM.
    | CGM Stats | a glucose reading | "CGM stats coming soon" |
    | Insulin Summary | no IOB sample | "No insulin data for this period" (unchanged) |
    | Insulin Summary | an IOB sample | "Insulin summary coming soon" |
-   | Recent Boluses | (not evaluated) | "No boluses for this period" (unchanged; see Dev Notes) |
+   | Recent Boluses | any (doses are not read) | "Recent boluses coming soon" (amended by the Recent Boluses entry in "PM decisions on drafting open points (2026-11-01)"; it must never claim there were no boluses) |
 
    Titles stay as they are. "Holds a glucose reading" means `latestGlucose != nil`. "Holds an
    IOB sample" means `latestIOB != nil`, which is also exactly when the hero shows its IOB

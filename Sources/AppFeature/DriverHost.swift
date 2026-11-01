@@ -56,6 +56,9 @@ public final class HomeModel {
     private let log: any HomeLogging
     private let readGap: @Sendable (TimeInterval) async -> Void
     private var foregroundReadSatisfied = false
+    // Counts inactive transitions so a read that was in flight while the scene
+    // went inactive cannot mark the next foreground as already read.
+    private var inactiveTransitions = 0
     private var pendingReactivation = false
     private var wantsActive = false
     private var activationGeneration = 0
@@ -114,7 +117,10 @@ public final class HomeModel {
         }
     }
 
-    public func sceneBecameInactive() { foregroundReadSatisfied = false }
+    public func sceneBecameInactive() {
+        inactiveTransitions &+= 1
+        foregroundReadSatisfied = false
+    }
 
     public func activateIfNeeded() async {
         startTickerIfNeeded()
@@ -170,9 +176,10 @@ public final class HomeModel {
                                             insulinSource: insulin, pumpStatusSource: pump)
         ports = activePorts
         if !isRefreshing {
+            let inactiveTransitionsBeforeRead = inactiveTransitions
             await runReadSequence(ports: activePorts, generation: generation)
             guard generation == activationGeneration else { return }
-            if !Task.isCancelled { foregroundReadSatisfied = true }
+            if !Task.isCancelled, inactiveTransitions == inactiveTransitionsBeforeRead { foregroundReadSatisfied = true }
         }
         streamTasks.append(Task { [weak self] in
             for await sample in glucose.readings { self?.receive(sample) }
