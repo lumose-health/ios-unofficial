@@ -7,6 +7,20 @@ import DriverAPI
 
 @Suite("Driver host")
 struct DriverHostTests {
+    @Test @MainActor func statusRowDefaultsToDisconnectedWithoutBackend() {
+        let model = HomeModel(driver: HostTestDriver(), demoIdentifiers: [])
+        #expect(model.statusRow.pumpLink == PumpLinkIndicator.make(.disconnected))
+        #expect(model.statusRow.sync == nil)
+        #expect(model.statusRow.reachability == nil)
+    }
+
+    @Test @MainActor func configuredBackendAppearsInStatusRow() {
+        let backend = BackendConfiguration.configured(.init(sync: .init(hasError: false, pendingCount: 0, lastSync: nil), reachability: .reachable))
+        let model = HomeModel(driver: HostTestDriver(), demoIdentifiers: [], backend: backend)
+        #expect(model.statusRow.sync != nil)
+        #expect(model.statusRow.reachability?.accessibilityLabel == "Backend reachable")
+    }
+
     @Test @MainActor func demoFlagExistsBeforeActivationAndAfterSuccess() async {
         let driver = HostTestDriver()
         let model = HomeModel(driver: driver, demoIdentifiers: [HostTestDriver.simulatedIdentifier])

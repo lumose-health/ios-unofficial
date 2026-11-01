@@ -29,6 +29,11 @@ public final class HomeModel {
     public private(set) var latestIOB: InsulinOnBoardSample?
     public private(set) var latestPumpStatus: PumpStatusSnapshot?
     public private(set) var heroState: HeroState
+    private let backend: BackendConfiguration
+    public var statusRow: StatusRowState {
+        // No hosted Driver currently reports pump-link state, so never infer it from activation.
+        StatusRowState.make(connection: .disconnected, backend: backend, activeDrivers: [driver.descriptor.identifier])
+    }
     public var glucoseUnit: GlucoseUnit = .mgdl {
         didSet { refreshHero() }
     }
@@ -49,8 +54,9 @@ public final class HomeModel {
         for task in streamTasks { task.cancel() }
     }
 
-    public init(driver: any Driver, demoIdentifiers: Set<DriverIdentifier>, clock: any Clock = SystemClock(), scheduler: any Scheduler = WallClockScheduler()) {
+    public init(driver: any Driver, demoIdentifiers: Set<DriverIdentifier>, backend: BackendConfiguration = .notConfigured, clock: any Clock = SystemClock(), scheduler: any Scheduler = WallClockScheduler()) {
         self.driver = driver
+        self.backend = backend
         self.clock = clock
         self.scheduler = scheduler
         self.isDemo = DemoDataLabel.isVisible(
