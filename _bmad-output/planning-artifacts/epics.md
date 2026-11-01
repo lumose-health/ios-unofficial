@@ -346,7 +346,7 @@ Every story inherits these. A story that violates one is a defect, not a variati
 
 - No starter template. Greenfield SPM package; the module topology is fixed by AD-2 and its dependency direction by AD-3.
 - Stack pinned: Swift 6.x, iOS 17.0 / watchOS 10.0, GRDB 7.11.1 (unforked), a pinned fork of swift-crypto 4.5.1 exporting `CryptoBoringWrapper`.
-- Distribution is fork-and-build: no project-published binary, no project-held signing key; each Builder signs into their own TestFlight.
+- Distribution is a **project-published TestFlight** (internal first; public link gated on licensing L1/L2 and Beta App Review). Fork-and-build remains the advanced self-build path. *(Sprint Change Proposal 2026-10-30; supersedes PRD decision 3.)*
 - Five Required Checks on `develop`, fixed by name in the PRD; branch protection keys on those exact strings.
 
 
@@ -657,7 +657,7 @@ A Medtronic MiniMed 680G/770G/780G user pairs by making the phone discoverable t
 
 ### Epic 8: Build it, install it, and keep it working
 
-A Builder forks the repository, adds their own Apple credentials, and produces a signed build on their own iPhone through their own TestFlight — then keeps it alive past the 90-day expiry. Includes the gates that make the pipeline trustworthy and the documentation that makes it followable, because under fork-and-build the docs are the delivery mechanism.
+The project produces a signed build and delivers it through its own TestFlight — internal first, then a public link once licensing and Beta App Review gates clear — and keeps every installed build alive past the 90-day expiry. A Builder who prefers to self-sign can still fork and build. Includes the gates that make the pipeline trustworthy and the documentation that makes both paths followable. *(Rewritten per Sprint Change Proposal 2026-10-30.)*
 
 **FRs covered (59):** FR-179–FR-237
 
@@ -793,6 +793,7 @@ So that I can pick mine with confidence.
 **And** the scan stops automatically after a bounded period of no interaction so the radio is not left running (FR-7)
 **And** when a scan cannot start, the specific blocking condition is named — Bluetooth off, unauthorized, or already connected — rather than a generic failure (FR-8)
 **And** the discovered-Pump list updates live and ages out entries that stop advertising (FR-4)
+**And** live-radio behaviour (scan, handshake, reconnect, background restoration) is recorded as validation debt in the Dev Agent Record; nothing in-product implies the device has been tested, and the Driver list and pairing copy read *unverified on hardware* (Protocol-Implemented) until §8.3 evidence is recorded (prd.md §8.1; Sprint Change Proposal 2026-10-30)
 
 ### Story 1.9: Complete first-time Tandem pairing
 
@@ -811,6 +812,7 @@ So that the app can read my glucose.
 **And** cancelling a connection attempt leaves no live subscription behind, so the next attempt starts clean (FR-9)
 **And** a rejection names its category — wrong or expired code, pump busy, or trust failure — rather than collapsing them into one string (FR-12)
 **And** no pairing path issues any device command (SI-1)
+**And** live-radio behaviour (scan, handshake, reconnect, background restoration) is recorded as validation debt in the Dev Agent Record; nothing in-product implies the device has been tested, and the Driver list and pairing copy read *unverified on hardware* (Protocol-Implemented) until §8.3 evidence is recorded (prd.md §8.1; Sprint Change Proposal 2026-10-30)
 
 ### Story 1.10: Reconnect indefinitely, and survive backgrounding
 
@@ -826,6 +828,7 @@ So that I do not have to think about it.
 **And** `CBCentralManager` is configured with a restoration identifier and reconnection continues while backgrounded and while the device is locked (FR-14, AD-11)
 **And** the user is told plainly that force-quitting from the App Switcher stops monitoring (FR-15)
 **And** pairing secrets are stored in the Keychain, device-only and after-first-unlock, so overnight reconnection works while locked (SI-10)
+**And** live-radio behaviour (scan, handshake, reconnect, background restoration) is recorded as validation debt in the Dev Agent Record; nothing in-product implies the device has been tested, and the Driver list and pairing copy read *unverified on hardware* (Protocol-Implemented) until §8.3 evidence is recorded (prd.md §8.1; Sprint Change Proposal 2026-10-30)
 
 ### Story 1.11: Recover from a broken pairing
 
@@ -841,6 +844,7 @@ So that I am not left staring at a generic disconnect.
 **And** the wall states that iOS gives the app no way to clear a Bluetooth bond, and walks the user through Settings → Bluetooth → ⓘ → Forget This Device, then Retry Pairing (PL-1)
 **And** the app never presents that instruction for an ordinary disconnection (FR-11)
 **And** unpairing requires explicit confirmation, clears credentials, and tells the user to forget the device in iOS Settings too (FR-17, FR-18)
+**And** live-radio behaviour (scan, handshake, reconnect, background restoration) is recorded as validation debt in the Dev Agent Record; nothing in-product implies the device has been tested, and the Driver list and pairing copy read *unverified on hardware* (Protocol-Implemented) until §8.3 evidence is recorded (prd.md §8.1; Sprint Change Proposal 2026-10-30)
 
 ### Story 1.12: Activate, deactivate and persist Driver selection
 
@@ -876,6 +880,8 @@ So that one look answers the question I opened it for.
 **And** the hero shows the value at hero scale with its trend glyph in the same colour, banded from the **Target Range** — never from Alert Thresholds (FR-46, FR-47)
 **And** at Too Stale the hero loses its severity colour and de-emphasises (FR-48)
 **And** the trend glyph carries its own timestamp and renders at the **worse** of the two Freshness Tiers, degrading to "?" when its own source is Too Stale (FR-46)
+**And** whenever the active Driver is the Simulated Driver, every screen shows a persistent, non-dismissable "DEMO DATA — not your glucose" banner, and the hero value carries the same label to VoiceOver, so a tester can never read simulated numbers as their own (Sprint Change Proposal 2026-10-30)
+**And** builds whose only selectable Driver is the Simulated Driver are distributed to the internal TestFlight group only (Sprint Change Proposal 2026-10-30)
 
 ### Story 1.14: The status row — pump link, and what it does not claim
 
@@ -1049,6 +1055,7 @@ So that I wake up.
 **And** the product states plainly — in onboarding, in Settings and in the docs — that the ring/silent switch can silence the alarm and the app cannot detect it (FR-66, PL-23)
 **And** a foreground app still presents the alert; it never swallows one (FR-68)
 **And** the alert body names the value, the unit and that it was computed on-device from the last sensor reading (FR-69)
+**And** if the project's Critical Alerts entitlement is granted, urgent low is delivered as `.critical` and the forced-loss copy for Do Not Disturb and the silent switch is removed for project builds (decision 4, reopened per Sprint Change Proposal 2026-10-30)
 
 ### Story 2.5: Alert sounds, slots and duplicate suppression
 
@@ -1770,27 +1777,30 @@ So that I can decide whether to rely on it.
 
 ## Epic 8: Build it, install it, and keep it working
 
-A Builder forks the repository, adds their own Apple credentials, and produces a signed build on their own iPhone through their own TestFlight — then keeps it alive past the 90-day expiry. Includes the gates that make the pipeline trustworthy and the documentation that makes it followable.
+The project produces a signed build and delivers it through its own TestFlight — internal first, then a public link once licensing and Beta App Review gates clear — and keeps every installed build alive past the 90-day expiry. A Builder who prefers to self-sign can still fork and build. Includes the gates that make the pipeline trustworthy and the documentation that makes both paths followable. *(Rewritten per Sprint Change Proposal 2026-10-30.)*
 
 **Inherits:** AD-3, AD-12, AD-17. **Upholds:** SI-1, SI-4, SI-9, SI-12.
 
-### Story 8.1: Fork, add six secrets, and get a signed build
+### Story 8.1: Signed project build to TestFlight
 
-As a Builder who has never opened App Store Connect,
-I want to follow one page and end up with the app on my phone,
-So that I can actually use this.
+*(Rewritten per Sprint Change Proposal 2026-10-30; supersedes the fork-and-six-secrets version.)*
+
+As a maintainer,
+I want every release-channel build signed and uploaded to the project's TestFlight automatically,
+So that community users install from TestFlight instead of building the app themselves.
 
 **Acceptance Criteria:**
 
-**Given** a fork of the repository
-**When** the Builder adds the documented secret set — `TEAMID`, `FASTLANE_ISSUER_ID`, `FASTLANE_KEY_ID`, `FASTLANE_KEY`, `MATCH_PASSWORD`, `GH_PAT` — and runs the build workflow
-**Then** a signed build reaches their own TestFlight, with **no project-held signing material at any point** (FR-179, FR-183)
-**And** `GH_PAT` carries the `workflow` scope, without which the scheduled rebuild cannot fire (FR-180)
-**And** signing material is managed by `fastlane match` against a private `Match-Secrets` repository in the Builder's own account (FR-180)
-**And** credentials can be validated in isolation without exposing any secret value (FR-180)
-**And** the build hard-fails — never warns — if the archive is not signed by an Apple Distribution certificate (FR-184)
-**And** any credential materialized during a run is created with restrictive permissions and destroyed with the run (FR-185)
-**And** the pipeline is a **supported product surface** — CODEOWNERS-gated, SHA-pinned, inside the security-response scope — while key custody, Apple account state, certificate lifecycle and the 90-day rebuild remain the Builder's (FR-196, decision 6)
+**Given** the project's App Store Connect API key and signing material stored as protected repository/environment secrets
+**When** the release workflow runs on `develop` or `main`
+**Then** a signed build is uploaded to the project's TestFlight (FR-183, rewritten)
+**And** signing material is managed by `fastlane match` against a private project-owned repository; the secret set is documented, and credentials can be validated in isolation without exposing any value (FR-180)
+**And** the build hard-fails — never warns — if the archive is not signed by an Apple Distribution certificate whose identity matches the pinned project signer (FR-184)
+**And** any credential materialized during a run has restrictive permissions and is destroyed with the run (FR-185)
+**And** the signing job runs only in a protected `release-gated` environment; fork pull requests never reach it
+**And** the same workflow still works in a fork with the fork owner's own secrets (self-build path, FR-179 rewritten)
+**And** Medtronic is compiled out of the project build configuration until licensing gate L2 clears; the every-Driver build still compiles in CI (AD-17)
+**And** this is a protected path (signing, CI workflow): the maintainer merges
 
 ### Story 8.2: Register identifiers once, and choose a channel
 
@@ -1803,9 +1813,10 @@ So that subsequent builds just work.
 **Given** a one-time registration workflow
 **When** it runs
 **Then** it registers one App ID set — app, Watch app and every extension — with exactly the capabilities used (FR-182)
-**And** bundle identifiers, App Group containers and Keychain access groups derive from the Builder's Team ID, because App IDs are globally unique across all Apple accounts (FR-181)
+**And** bundle identifiers, App Group containers and Keychain access groups are fixed project identifiers for the project build, and template on the Team ID only for self-builds, because App IDs are globally unique across all Apple accounts (FR-181, AD-9; rewritten per Sprint Change Proposal 2026-10-30)
 **And** the channel is a build-time branch choice — `develop` for a development build, `main` for production — and a new build **replaces** the installed one rather than sitting beside it (FR-182)
 **And** side-by-side installation is documented as an advanced path requiring a second identifier set, not the default
+**And** an internal TestFlight group is created; the external group exists but is not enabled until licensing gate L1 and Beta App Review clear (Sprint Change Proposal 2026-10-30)
 
 ### Story 8.3: Never let an installed build lapse
 
@@ -1818,10 +1829,10 @@ So that my glucose monitor does not silently die at 90 days.
 **Given** Apple expires TestFlight builds after 90 days
 **When** the scheduled rebuild workflow runs
 **Then** it performs a **weekly change-triggered build plus a monthly unconditional build**, so a quiet upstream cannot let a build lapse (FR-186)
-**And** the workflow ships enabled by default in every fork (FR-186)
+**And** the project's scheduled weekly change-triggered and monthly unconditional uploads run from the upstream repository; the fork template keeps them enabled for self-builders (FR-186, rewritten per Sprint Change Proposal 2026-10-30)
 **And** the app shows its build date, source commit, channel and days until expiry (FR-187)
 **And** the documentation names the monthly unconditional build as the thing not to disable
-**And** the app can report that a newer upstream release exists and deep-link to it, off by default and user-toggleable (FR-188)
+**And** TestFlight delivers updates to project-build users; the in-app newer-release notice — off by default and user-toggleable — applies to self-builds only (FR-188, rewritten per Sprint Change Proposal 2026-10-30)
 
 ### Story 8.4: Promotion, versioning and pinned inputs
 
@@ -1934,13 +1945,14 @@ So that I can get from a fork to a working app.
 **Given** `docs/` is empty today and every page is authored fresh
 **When** the documentation set ships
 **Then** it carries index, install, daily-use, apple-watch, troubleshooting, reference, concepts and dev sections, each with its `_meta.json` (FR-219, FR-220)
-**And** the install runbook takes a Builder from a fresh fork to a working app, states the 90-day expiry in the body, and names the macOS runner-minutes cost as a prerequisite (FR-223)
+**And** the primary install guide takes a user from the TestFlight invite to a paired, working app and how to report a problem; the fork-and-build runbook is the advanced path, states the 90-day expiry in the body, and names the macOS runner-minutes cost as a prerequisite (FR-223, rewritten per Sprint Change Proposal 2026-10-30)
 **And** it is validated end to end by someone who did not write it, from a clean GitHub account and a clean Apple Developer account, before the repository is announced (FR-223)
 **And** pages are written for a reader on the website, not a reader browsing GitHub; every link leaving `docs/` is absolute (FR-219, FR-220)
 **And** CI fails a docs PR on missing frontmatter, a page absent from its `pages` array, a `pages` entry with no file, or a dead link (FR-219)
 **And** a push to `main` touching `docs/**` dispatches the rebuild event (FR-222)
 **And** the Apple Watch setup page states that the Watch app installs automatically with the phone app and how to place complications (FR-224)
 **And** the documentation states that this repository is **public**, so "not rendered on the website" never means "not visible" — genuinely internal material does not belong here at all (FR-221)
+**And** a community feedback channel exists — a GitHub issue template for device reports capturing pump model, iOS version and build number — so TestFlight testers can submit problems and Verification evidence (parity H17; Sprint Change Proposal 2026-10-30)
 
 ### Story 8.11: The disclosure surfaces that forced losses depend on
 
@@ -1975,6 +1987,25 @@ So that I can participate without guessing.
 **And** the privacy document enumerates every outbound connection by name and states the crash-reporting posture: no pipeline-produced build carries a telemetry credential (FR-236)
 **And** the acknowledgments page states, per upstream project, whether code was studied or ported — Tandem studied, Medtronic ported under explicit permission (FR-232)
 **And** a repo-internal, unpublished provenance record maps each Swift module to its Android origin (FR-233)
+**And** the maintainer decides whether the project build carries a crash-reporting credential; if it does, the privacy disclosure says so (FR-189, rewritten per Sprint Change Proposal 2026-10-30)
+
+### Story 8.13: Rewrite the planning artifacts for project distribution
+
+*(Added per Sprint Change Proposal 2026-10-30.)*
+
+As a maintainer,
+I want the PRD, addendum and architecture spine to describe project distribution accurately,
+So that no future story is built on the superseded fork-and-build text.
+
+**Acceptance Criteria:**
+
+**Given** Appendix A of the Sprint Change Proposal 2026-10-30 lists every location that depends on fork-and-build
+**When** the rewrite lands
+**Then** every Appendix A row is dispositioned — obsolete text removed, rewrite rows rewritten, unchanged rows left alone — and the PRD amendment block is removed
+**And** the parity-review leftovers are fixed: OQ-20 and FR-40 use the Target Range (C1); FR-164 places the escape hatch on the Backend stage, consistent with its notes (C2); PD-41 and OQ-7 no longer say a Medtronic validity gate "must be identified" (C3)
+**And** AD-9 and the stack line in the architecture spine reflect fixed project identifiers and project-side signing
+**And** the PRD gains a revision log recording this change and the parity-review fixes
+**And** no code changes
 
 ---
 

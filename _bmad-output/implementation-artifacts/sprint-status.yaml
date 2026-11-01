@@ -41,13 +41,24 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-08-10
-last_updated: 2026-08-17
+last_updated: 2026-10-30
 project: ios-unofficial
 project_key: NOKEY
 tracking_system: file-system
 story_location: _bmad-output/implementation-artifacts
 
 development_status:
+  # SPRINT CHANGE 2026-10-30 (sprint-change-proposal-2026-10-30.md, approved by the maintainer):
+  # project-published TestFlight replaces fork-and-build; installable app first; Tandem
+  # ships Protocol-Implemented. Two lanes, two stories in flight at once:
+  #   Lane A (app):      1-13 -> {1-14,1-15,1-16} -> 1-12 -> 1-17 -> 1-18 -> 1-7 -> 1-8 ->
+  #                      1-9 -> 1-10 -> 1-11 -> 1-19 -> 1-20 -> epic-2
+  #   Lane B (pipeline): 8-1 -> 8-2 -> 8-8 -> 8-5 -> 8-3 -> 8-4 -> 8-10 -> 8-13 -> 8-6 ->
+  #                      8-7 -> 8-9 -> 8-11 -> 8-12
+  # Milestones: M1 internal demo (Simulated Driver, DEMO DATA banner, internal TestFlight);
+  # M2 community beta (Epic 1 + Epic 2, public link gated on licensing L1/L2 + Beta App
+  # Review); M3 Android parity (Epics 3-6). Medtronic compiled out of project builds (L2).
+  # 7-1 stays ready-for-dev but is off both lanes until M2.
   epic-1: in-progress
   # 1-1 MERGE LOG (PM autonomous merge, 2026-08-17): PR #3 squash-merged to develop,
   # merge commit b16c26cf. Route claude/opus/high, 3 dev cycles (c1 impl, c2+c3 review
@@ -72,7 +83,7 @@ development_status:
   # 1-4: done via PR #7 (9ef310c); 4 cycles incl. maintainer-authorized doc-honesty round
   1-4-the-driver-catalog-and-the-closed-capability-set: done
   1-5-the-simulated-driver-as-a-shipped-target: done
-  1-6-encrypted-local-store-with-write-time-invariants: in-progress
+  1-6-encrypted-local-store-with-write-time-invariants: done
   1-7-the-trace-replay-driver: backlog
   1-8-discover-a-tandem-pump-by-scanning: backlog
   1-9-complete-first-time-tandem-pairing: backlog
@@ -151,7 +162,7 @@ development_status:
   7-3-medtronic-decode-gates-and-history: backlog
   7-4-ship-medtronic-gated-at-beta: backlog
   epic-7-retrospective: optional
-  epic-8: backlog
+  epic-8: in-progress
   8-1-fork-add-six-secrets-and-get-a-signed-build: backlog
   8-2-register-identifiers-once-and-choose-a-channel: backlog
   8-3-never-let-an-installed-build-lapse: backlog
@@ -164,6 +175,7 @@ development_status:
   8-10-the-install-runbook-and-the-published-docs-set: backlog
   8-11-the-disclosure-surfaces-that-forced-losses-depend-on: backlog
   8-12-policy-privacy-and-the-contributor-path: backlog
+  8-13-rewrite-the-planning-artifacts-for-project-distribution: backlog
   epic-8-retrospective: optional
 
 # DEFERRED (2026-08-19): WallClockSchedulerTests is timing-sensitive under load —

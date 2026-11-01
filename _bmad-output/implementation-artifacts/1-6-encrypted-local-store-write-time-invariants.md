@@ -15,7 +15,7 @@ max_cycles: 3
 
 # Story 1.6: Encrypted local store with write-time invariants
 
-Status: ready-for-review
+Status: done
 
 <!-- Route rationale (for the maintainer): persistence layer with write-time safety invariants
 and the repo's FIRST third-party dependency — schema design, collision semantics,
