@@ -36,4 +36,23 @@ struct HomeScaffoldTests {
             "No boluses for this period",
         ])
     }
+
+    @Test func cardBodiesReflectAvailableDataAndPlaceholders() {
+        let cards: [(HomeCard, String, String, Bool)] = [
+            (.glucoseTrend, "No glucose readings yet", "Trend chart coming soon", true),
+            (.timeInRange, "No glucose readings for this period", "Time in Range coming soon", true),
+            (.cgmStats, "No glucose readings for this period", "CGM stats coming soon", true),
+            (.insulinSummary, "No insulin data for this period", "Insulin summary coming soon", false),
+            (.recentBoluses, "No boluses for this period", "Recent boluses coming soon", false),
+        ]
+        for (card, empty, soon, glucoseDriven) in cards where card != .recentBoluses {
+            let noData = HomeScaffoldModel.body(for: card, hasGlucose: false, hasInsulinOnBoard: false)
+            let withData = HomeScaffoldModel.body(for: card, hasGlucose: glucoseDriven, hasInsulinOnBoard: !glucoseDriven)
+            #expect(noData == .empty(empty))
+            #expect(withData == .comingSoon(soon))
+        }
+        #expect(HomeScaffoldModel.body(for: .recentBoluses, hasGlucose: false, hasInsulinOnBoard: false) == .comingSoon("Recent boluses coming soon"))
+        #expect(HomeScaffoldModel.body(for: .recentBoluses, hasGlucose: true, hasInsulinOnBoard: true) == .comingSoon("Recent boluses coming soon"))
+        #expect(HomeScaffoldModel.body(for: .statusRow, hasGlucose: true, hasInsulinOnBoard: true) == nil)
+    }
 }

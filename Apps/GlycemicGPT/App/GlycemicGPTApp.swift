@@ -34,6 +34,8 @@ struct GlycemicGPTApp: App {
             .onChange(of: scenePhase) { _, phase in
                 if phase == .background {
                     model.setScenePhaseActive(false)
+                } else if phase == .inactive {
+                    model.sceneBecameInactive()
                 } else if phase == .active {
                     model.setScenePhaseActive(true)
                 }

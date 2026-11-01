@@ -72,6 +72,232 @@ struct DriverHostTests {
         #expect(await driver.activationCount == 1)
     }
 
+    @Test @MainActor func refreshAppliesNewReadingAndClearsFlag() async throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let first = try glucose(110, at: now)
+        let next = try glucose(125, at: now.addingTimeInterval(30))
+        let gaps = HostGapRecorder()
+        let driver = HostTestDriver(glucoseReads: [.value(first), .value(next)])
+        let model = HomeModel(driver: driver, demoIdentifiers: [], clock: HostAdjustableClock(now: now.addingTimeInterval(30)), scheduler: HostManualScheduler(), readGap: { seconds in gaps.record(seconds) })
+        await model.activateIfNeeded()
+        await model.refresh()
+        #expect(model.latestGlucose == next)
+        #expect(model.heroState.valueText == "125")
+        #expect(!model.isRefreshing)
+        #expect(gaps.values.isEmpty)
+    }
+
+    @Test @MainActor func refreshFailureKeepsCachedReadingAndLogsOnlyStep() async throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let sample = try glucose(120, at: now)
+        let logger = HostRecordingLog()
+        let driver = HostTestDriver(glucoseReads: [.value(sample), .failure(.timedOut)])
+        let model = HomeModel(driver: driver, demoIdentifiers: [], clock: HostAdjustableClock(now: now), scheduler: HostManualScheduler(), log: logger, readGap: { _ in })
+        await model.activateIfNeeded()
+        let before = model.heroState
+        await model.refresh()
+        #expect(model.latestGlucose == sample)
+        #expect(model.heroState.valueText == before.valueText)
+        #expect(model.heroState.valueColor == before.valueColor)
+        #expect(model.heroState.badge == before.badge)
+        #expect(logger.failures == ["glucose:timedOut"])
+        #expect(!model.isRefreshing)
+    }
+
+    @Test @MainActor func nilGlucoseReadDoesNotChangeCachedReadingOrLog() async throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let sample = try glucose(120, at: now)
+        let logger = HostRecordingLog()
+        let driver = HostTestDriver(glucoseReads: [.value(sample), .value(nil)])
+        let model = HomeModel(driver: driver, demoIdentifiers: [], clock: HostAdjustableClock(now: now), scheduler: HostManualScheduler(), log: logger, readGap: { _ in })
+        await model.activateIfNeeded()
+        let before = model.heroState
+        await model.refresh()
+        #expect(model.latestGlucose == sample)
+        #expect(model.heroState == before)
+        #expect(logger.failures.isEmpty)
+    }
+
+    @Test @MainActor func pumpFailureContinuesToGlucoseAndHonorsReadGap() async throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let sample = try glucose(130, at: now)
+        let logger = HostRecordingLog()
+        let gaps = HostGapRecorder()
+        let driver = HostTestDriver(glucoseReads: [.value(sample)], pumpReads: [.failure(.connectionLost), .failure(.connectionLost)])
+        let model = HomeModel(driver: driver, demoIdentifiers: [], clock: HostAdjustableClock(now: now), scheduler: HostManualScheduler(), log: logger, readGap: { seconds in gaps.record(seconds) })
+        await model.activateIfNeeded()
+        await model.refresh()
+        #expect(model.latestGlucose == sample)
+        // Activation and the refresh each run the full sequence: a failed pump
+        // read, the gap, then a glucose read.
+        #expect(await driver.readCounts == (2, 2))
+        #expect(gaps.values == [0.5, 0.5])
+        #expect(logger.failures == ["pumpStatus:connectionLost", "pumpStatus:connectionLost"])
+    }
+
+    @Test @MainActor func refreshBeforeActivationPerformsNoRead() async {
+        let driver = HostTestDriver()
+        let model = HomeModel(driver: driver, demoIdentifiers: [])
+        await model.refresh()
+        #expect(await driver.readCounts == (0, 0))
+        #expect(!model.isRefreshing)
+    }
+
+    @Test @MainActor func failedReadsDoNotFailActivationAndAreLogged() async {
+        let logger = HostRecordingLog()
+        let driver = HostTestDriver(glucoseReads: [.failure(.timedOut)])
+        let model = HomeModel(driver: driver, demoIdentifiers: [], log: logger, readGap: { _ in })
+        await model.activateIfNeeded()
+        #expect(model.lifecycleState == .active)
+        #expect(model.hostError == nil)
+        #expect(logger.failures == ["glucose:timedOut"])
+        #expect(!model.isRefreshing)
+    }
+
+    @Test @MainActor func refreshClearsFlagWhenEveryReadThrows() async {
+        let logger = HostRecordingLog()
+        let driver = HostTestDriver(glucoseReads: [.failure(.timedOut), .failure(.timedOut)], pumpReads: [.failure(.connectionLost), .failure(.connectionLost)])
+        let model = HomeModel(driver: driver, demoIdentifiers: [], log: logger, readGap: { _ in })
+        await model.activateIfNeeded()
+        await model.refresh()
+        #expect(!model.isRefreshing)
+        #expect(model.lifecycleState == .active)
+        #expect(model.hostError == nil)
+        #expect(logger.failures == ["pumpStatus:connectionLost", "glucose:timedOut", "pumpStatus:connectionLost", "glucose:timedOut"])
+    }
+
+    @Test @MainActor func tooStaleCachedValueSurvivesReadFailure() async throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let sample = try glucose(120, at: now)
+        let clock = HostAdjustableClock(now: now)
+        let driver = HostTestDriver(glucoseReads: [.value(sample), .failure(.timedOut)])
+        let model = HomeModel(driver: driver, demoIdentifiers: [], clock: clock, scheduler: HostManualScheduler(), readGap: { _ in })
+        await model.activateIfNeeded()
+        clock.advance(by: 20_000)
+        await model.refresh()
+        #expect(model.latestGlucose == sample)
+        #expect(model.heroState.valueText == "120")
+        #expect(model.heroState.valueColor == .secondary)
+        #expect(model.heroState.badge == .tooStale)
+    }
+
+    @Test @MainActor func failedActivationDoesNotPermitRefreshReads() async {
+        let driver = HostTestDriver(activationFailure: .transportUnavailable)
+        let model = HomeModel(driver: driver, demoIdentifiers: [])
+        await model.activateIfNeeded()
+        await model.refresh()
+        #expect(model.lifecycleState == .failed)
+        #expect(await driver.readCounts == (0, 0))
+    }
+
+    @Test @MainActor func overlappingRefreshIsDroppedWhileSequenceWaitsBetweenReads() async throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let sample = try glucose(120, at: now)
+        let gap = HostGapController()
+        let driver = HostTestDriver(glucoseReads: [.value(sample), .value(sample)], pumpReads: [.value(nil), .value(nil)])
+        let model = HomeModel(driver: driver, demoIdentifiers: [], clock: HostAdjustableClock(now: now), scheduler: HostManualScheduler(), readGap: { _ in await gap.waitIfArmed() })
+        await model.activateIfNeeded()
+        await gap.arm()
+        let first = Task { await model.refresh() }
+        await gap.waitUntilEntered()
+        await model.refresh()
+        // Activation read glucose and pump once. The first refresh has read pump
+        // and is held in the gap, so glucose has not been read again, and the
+        // overlapping refresh read nothing.
+        #expect(await driver.readCounts == (1, 2))
+        #expect(model.isRefreshing)
+        await gap.release()
+        await first.value
+        #expect(await driver.readCounts == (2, 2))
+        #expect(!model.isRefreshing)
+    }
+
+    @Test @MainActor func foregroundReadRunsWhileTornDownReadIsStillBlocked() async throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let sample = try glucose(120, at: now)
+        let lateStatus = try PumpStatusSnapshot(batteryFraction: 0.7, observedAt: now)
+        let gate = HostReadGate()
+        let driver = HostTestDriver(glucoseReads: [.value(sample), .value(sample), .value(sample)],
+                                    pumpReads: [.value(nil), .value(lateStatus), .value(nil)], pumpReadGate: gate)
+        let model = HomeModel(driver: driver, demoIdentifiers: [], clock: HostAdjustableClock(now: now), scheduler: HostManualScheduler(), readGap: { _ in })
+        await model.setScenePhaseActive(true).value
+        #expect(await driver.readCounts == (1, 1))
+
+        await gate.arm()
+        let blocked = Task { await model.refresh() }
+        await gate.waitUntilEntered()
+        #expect(model.isRefreshing)
+
+        await model.setScenePhaseActive(false).value
+        #expect(!model.isRefreshing)
+        await model.setScenePhaseActive(true).value
+        // The foreground read ran even though the earlier read is still held.
+        #expect(await driver.activationCount == 2)
+        #expect(await driver.readCounts == (2, 3))
+        #expect(!model.isRefreshing)
+
+        await gate.release()
+        await blocked.value
+        // The held read belonged to the torn-down activation: its pump status is
+        // never written and it does not go on to read glucose.
+        #expect(await driver.readCounts == (2, 3))
+        #expect(model.latestPumpStatus == nil)
+        #expect(!model.isRefreshing)
+        await model.stop()
+    }
+
+    @Test @MainActor func cancelledActivationReadStillAttachesStreams() async throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let driver = StreamingHostDriver()
+        // Cancel the activating task from inside its read sequence, as a scene
+        // change can, so the sequence stops early on cancellation.
+        let model = HomeModel(driver: driver, demoIdentifiers: [], clock: HostAdjustableClock(now: now), scheduler: HostManualScheduler(),
+                              readGap: { _ in withUnsafeCurrentTask { $0?.cancel() } })
+        await Task { await model.activateIfNeeded() }.value
+        #expect(model.lifecycleState == .active)
+
+        let sample = try glucose(140, at: now)
+        await driver.emit(sample)
+        #expect(await eventually { model.latestGlucose == sample })
+        await model.stop()
+    }
+
+    @Test @MainActor func sceneTransitionsReadExactlyOncePerForeground() async {
+        let driver = HostTestDriver()
+        let model = HomeModel(driver: driver, demoIdentifiers: [], readGap: { _ in })
+        await model.setScenePhaseActive(true).value
+        await model.setScenePhaseActive(true).value
+        #expect(await driver.readCounts.0 == 1)
+
+        model.sceneBecameInactive()
+        await model.setScenePhaseActive(true).value
+        #expect(await driver.readCounts.0 == 2)
+
+        await model.setScenePhaseActive(false).value
+        await model.setScenePhaseActive(true).value
+        #expect(await driver.activationCount == 2)
+        #expect(await driver.readCounts.0 == 3)
+    }
+
+    @Test @MainActor func equalReadingKeepsAgeAndBadge() async throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let sample = try glucose(120, at: now)
+        let clock = HostAdjustableClock(now: now)
+        let driver = HostTestDriver(glucoseReads: [.value(sample), .value(sample)])
+        let model = HomeModel(driver: driver, demoIdentifiers: [], clock: clock, scheduler: HostManualScheduler(), readGap: { _ in })
+        await model.activateIfNeeded()
+        let before = model.heroState
+        let heldTimestamp = model.latestGlucose?.recordedAt
+        clock.advance(by: 120)
+        await model.refresh()
+        #expect(model.latestGlucose?.recordedAt == heldTimestamp)
+        #expect(model.heroState.badge == before.badge)
+    }
+
+    private func glucose(_ value: Double, at date: Date) throws -> GlucoseSample {
+        GlucoseSample(glucose: try Glucose(mgdl: value), recordedAt: date, trend: .steady)
+    }
+
     @Test func canonicalSafetyValidatorCanBeConstructed() {
         let validator = AppComposition.makeSafetyValidator()
         #expect(validator.limitsInForce.glucoseRange == SafetyConstants.glucoseValidRange)
@@ -283,6 +509,7 @@ private actor HostTestDriver: Driver {
     static let simulatedIdentifier = DriverIdentifier("com.glycemicgpt.simulated")!
     nonisolated let descriptor: DriverDescriptor
     private let glucose: HostGlucoseSource
+    private let pump: HostPumpSource?
     private let insulin = HostInsulinSource()
     private let activationFailure: DriverFailure?
     private let missing: Capability?
@@ -292,10 +519,13 @@ private actor HostTestDriver: Driver {
     private(set) var didDeactivate = false
 
     init(activationFailure: DriverFailure? = nil, missing: Capability? = nil, initialSample: GlucoseSample? = nil,
-         deactivationGate: HostDeactivationGate? = nil, activationGate: HostDeactivationGate? = nil) {
+         glucoseReads: [HostReadResult<GlucoseSample>] = [], pumpReads: [HostReadResult<PumpStatusSnapshot>]? = nil,
+         deactivationGate: HostDeactivationGate? = nil, activationGate: HostDeactivationGate? = nil,
+         pumpReadGate: HostReadGate? = nil) {
         self.activationFailure = activationFailure
         self.missing = missing
-        self.glucose = HostGlucoseSource(initialSample: initialSample)
+        self.glucose = HostGlucoseSource(initialSample: initialSample, scripted: glucoseReads)
+        self.pump = pumpReads.map { HostPumpSource(scripted: $0, gate: pumpReadGate) }
         self.deactivationGate = deactivationGate
         self.activationGate = activationGate
         self.descriptor = DriverDescriptor(
@@ -304,7 +534,7 @@ private actor HostTestDriver: Driver {
             displayName: "Host test Driver",
             transport: .inProcess,
             version: "1.0.0",
-            capabilities: [.glucoseSource, .insulinSource],
+            capabilities: pumpReads == nil ? [.glucoseSource, .insulinSource] : [.glucoseSource, .insulinSource, .pumpStatus],
             verification: .unverified
         )
     }
@@ -314,7 +544,8 @@ private actor HostTestDriver: Driver {
         return switch capability {
         case .glucoseSource: .glucoseSource(glucose)
         case .insulinSource: .insulinSource(insulin)
-        case .pumpStatus, .bgmSource, .dataSync, .doseCategoryProvider: nil
+        case .pumpStatus: pump.map(CapabilityPort.pumpStatus)
+        case .bgmSource, .dataSync, .doseCategoryProvider: nil
         }
     }
 
@@ -328,6 +559,8 @@ private actor HostTestDriver: Driver {
         didDeactivate = true
         await deactivationGate?.enter()
     }
+
+    var readCounts: (Int, Int) { get async { (glucose.readCount, pump?.readCount ?? 0) } }
 }
 
 private actor HostDeactivationGate {
@@ -353,10 +586,126 @@ private actor HostDeactivationGate {
     }
 }
 
+private actor HostGapController {
+    private var armed = false
+    private var entered = false
+    private var released = false
+    private var waiter: CheckedContinuation<Void, Never>?
+    private var releaseWaiter: CheckedContinuation<Void, Never>?
+    func arm() { armed = true }
+    func waitIfArmed() async {
+        guard armed else { return }
+        entered = true
+        waiter?.resume()
+        waiter = nil
+        if released { return }
+        await withCheckedContinuation { releaseWaiter = $0 }
+    }
+    func waitUntilEntered() async {
+        if entered { return }
+        await withCheckedContinuation { waiter = $0 }
+    }
+    func release() {
+        released = true
+        releaseWaiter?.resume()
+        releaseWaiter = nil
+    }
+}
+
+private final class HostGapRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [TimeInterval] = []
+    var values: [TimeInterval] { lock.lock(); defer { lock.unlock() }; return recorded }
+    func record(_ value: TimeInterval) { lock.lock(); recorded.append(value); lock.unlock() }
+}
+
+private final class HostRecordingLog: HomeLogging, @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [String] = []
+    var failures: [String] { lock.lock(); defer { lock.unlock() }; return recorded }
+    func refreshReadFailed(step: RefreshStep, failure: DriverFailure) {
+        lock.lock(); recorded.append("\(step.rawValue):\(failure.caseName)"); lock.unlock()
+    }
+}
+
+private enum HostReadResult<Value: Sendable>: Sendable {
+    case value(Value?)
+    case failure(DriverFailure)
+}
+
+private final class HostScriptedReads<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var results: [HostReadResult<Value>]
+    private var index = 0
+    private var count = 0
+    init(_ results: [HostReadResult<Value>]) { self.results = results }
+    var readCount: Int { lock.lock(); defer { lock.unlock() }; return count }
+    func next() throws(DriverFailure) -> Value? {
+        lock.lock(); defer { lock.unlock() }
+        count += 1
+        guard index < results.count else { return nil }
+        let result = results[index]
+        index += 1
+        return switch result {
+        case .value(let value): value
+        case .failure(let failure): throw failure
+        }
+    }
+}
+
 private struct HostGlucoseSource: GlucoseSource {
     let initialSample: GlucoseSample?
+    let reads: HostScriptedReads<GlucoseSample>
+    init(initialSample: GlucoseSample?, scripted: [HostReadResult<GlucoseSample>]) {
+        self.initialSample = initialSample
+        reads = HostScriptedReads(scripted.isEmpty ? [.value(initialSample)] : scripted)
+    }
     var readings: AsyncStream<GlucoseSample> { AsyncStream { $0.finish() } }
-    func latestReading() async throws(DriverFailure) -> GlucoseSample? { initialSample }
+    var readCount: Int { reads.readCount }
+    func latestReading() async throws(DriverFailure) -> GlucoseSample? { try reads.next() }
+}
+
+private struct HostPumpSource: PumpStatusSource {
+    let reads: HostScriptedReads<PumpStatusSnapshot>
+    let gate: HostReadGate?
+    init(scripted: [HostReadResult<PumpStatusSnapshot>], gate: HostReadGate? = nil) {
+        reads = HostScriptedReads(scripted)
+        self.gate = gate
+    }
+    var status: AsyncStream<PumpStatusSnapshot> { AsyncStream { $0.finish() } }
+    var readCount: Int { reads.readCount }
+    func latestStatus() async throws(DriverFailure) -> PumpStatusSnapshot? {
+        let value = try reads.next()
+        await gate?.holdIfArmed()
+        return value
+    }
+}
+
+/// Holds the first read that arrives after `arm()` until `release()`, and lets
+/// every other read through. That models one slow Driver read without stalling
+/// the reads that follow it.
+private actor HostReadGate {
+    private var armed = false
+    private var entered = false
+    private var enteredWaiter: CheckedContinuation<Void, Never>?
+    private var releaseWaiter: CheckedContinuation<Void, Never>?
+    func arm() { armed = true }
+    func holdIfArmed() async {
+        guard armed else { return }
+        armed = false
+        entered = true
+        enteredWaiter?.resume()
+        enteredWaiter = nil
+        await withCheckedContinuation { releaseWaiter = $0 }
+    }
+    func waitUntilEntered() async {
+        if entered { return }
+        await withCheckedContinuation { enteredWaiter = $0 }
+    }
+    func release() {
+        releaseWaiter?.resume()
+        releaseWaiter = nil
+    }
 }
 
 private struct HostInsulinSource: InsulinSource {

@@ -1,4 +1,5 @@
 import Testing
+import Foundation
 @testable import AppFeature
 import DriverAPI
 #if canImport(UIKit)
@@ -117,5 +118,41 @@ struct StatusRowColourTests {
     @Test func darkModeKeepsTheBrighterCautionAndError() {
         #expect(StatusColor.caution.rgb(dark: true) == StatusRGB(red: 0xEA, green: 0xB3, blue: 0x08))
         #expect(StatusColor.error.rgb(dark: true) == StatusRGB(red: 0xEF, green: 0x44, blue: 0x44))
+    }
+}
+
+@Suite("Hero age caption colour contrast")
+struct HeroAgeCaptionColourTests {
+    @Test func lightAgeColoursReachSmallTextContrastOnWhite() {
+        for color in [HeroColor.green, .amber, .red] {
+            guard let rgb = color.ageCaptionRGB(dark: false) else {
+                Issue.record("Expected a fixed light-mode age colour")
+                continue
+            }
+            #expect(contrast(rgb, .init(red: 255, green: 255, blue: 255)) >= 4.5)
+        }
+    }
+
+    @Test func darkModeKeepsTheExistingAgeColours() {
+        #expect(HeroColor.green.ageCaptionRGB(dark: true) == StatusRGB(red: 0x22, green: 0xC5, blue: 0x5E))
+        #expect(HeroColor.amber.ageCaptionRGB(dark: true) == StatusRGB(red: 0xEA, green: 0xB3, blue: 0x08))
+        #expect(HeroColor.red.ageCaptionRGB(dark: true) == StatusRGB(red: 0xEF, green: 0x44, blue: 0x44))
+    }
+
+    @Test func secondaryAgeCaptionUsesTheSystemSemanticColour() {
+        #expect(HeroColor.secondary.ageCaptionRGB(dark: false) == nil)
+        #expect(HeroColor.secondary.ageCaptionRGB(dark: true) == nil)
+    }
+
+    private func contrast(_ a: StatusRGB, _ b: StatusRGB) -> Double {
+        func luminance(_ value: StatusRGB) -> Double {
+            let channels = [value.red, value.green, value.blue].map { component -> Double in
+                let c = Double(component) / 255
+                return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4)
+            }
+            return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+        }
+        let values = [luminance(a), luminance(b)].sorted()
+        return (values[1] + 0.05) / (values[0] + 0.05)
     }
 }
