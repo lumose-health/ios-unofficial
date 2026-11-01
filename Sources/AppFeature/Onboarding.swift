@@ -50,11 +50,13 @@ public enum OnboardingCopy {
     public static let welcomeTitle = "GlycemicGPT"
     public static let welcomeSubtitle = "Your diabetes management companion"
     public static let welcomeBody = "A direct pump monitor on its own — your on-call endo when you connect a server."
+    public static let welcomePreviewNotice = "This preview shows demo data only. Pump connection and server features are coming to iOS."
     public static let featuresTitle = "What You Get"
     public static let safetyTitle = "Important Safety Information"
     public static let noTherapeuticWrites = "GlycemicGPT only reads from your pump. It never delivers a bolus, never changes your basal, and never changes a pump setting."
     public static let backendTitle = "Connect a Server (Optional)"
     public static let backendBody = "A server adds AI, meal analysis, and caregiver features. You can skip it and use the app as a direct pump monitor."
+    public static let backendPreviewNotice = "This preview can't connect to a pump or a server yet. Direct pump monitoring is coming to iOS."
     public static let serverURLLabel = "Server URL"
     public static let serverURLPlaceholder = "https://your-server.com"
     public static let testConnection = "Test Connection"
@@ -100,6 +102,14 @@ public enum OnboardingIdentifier {
     public static let email = "onboarding_email", password = "onboarding_password", loginError = "onboarding_login_error", signIn = "onboarding_sign_in"
     public static let noTherapeuticWrites = "onboarding_no_therapeutic_writes"
     public static let comingToIOS = "onboarding_coming_to_ios"
+    public static let previewNotice = "onboarding_preview_notice"
+}
+
+/// Whether onboarding shows the preview notice next to copy that describes pump
+/// monitoring and server features. It stays on while the app has no real pump
+/// driver or server backend; switch it off once both are available.
+public enum OnboardingPreview {
+    public static let showsNotice = true
 }
 
 public enum OnboardingSymbol {
@@ -135,11 +145,12 @@ public final class OnboardingModel {
     @ObservationIgnored private let backend: any OnboardingBackend
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private var connectionTask: Task<Void, Never>?
-    /// Starting at `.backend` or later is only valid for a returning user who already
-    /// acknowledged the safety information in a previous run, so it implies acknowledgement.
-    public init(backend: any OnboardingBackend, defaults: UserDefaults, startStage: OnboardingStage = .welcome) {
-        self.backend = backend; self.defaults = defaults; self.stage = startStage
-        self.safetyAcknowledged = startStage.rawValue >= OnboardingStage.backend.rawValue
+    /// A start stage after `.safety` is honored only when the caller passes an explicit
+    /// prior acknowledgement; without one, onboarding starts at `.safety`.
+    public init(backend: any OnboardingBackend, defaults: UserDefaults, startStage: OnboardingStage = .welcome, safetyAcknowledged: Bool = false) {
+        self.backend = backend; self.defaults = defaults
+        self.safetyAcknowledged = safetyAcknowledged
+        self.stage = startStage.rawValue > OnboardingStage.safety.rawValue && !safetyAcknowledged ? .safety : startStage
     }
     private var pastSafetyGate: Bool { stage.rawValue >= OnboardingStage.backend.rawValue && safetyAcknowledged }
     public func next() {

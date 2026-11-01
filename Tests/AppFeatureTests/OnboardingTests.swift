@@ -74,14 +74,14 @@ private actor GatedBackend: OnboardingBackend {
         #expect(model.connectionResult?.text == "Connection failed: offline")
         #expect(!model.connectionSucceeded)
         model.updateServerURL("https://other"); #expect(model.connectionResult == nil && !model.connectionSucceeded)
-        let unavailable = OnboardingModel(backend: UnavailableOnboardingBackend(), defaults: defaults, startStage: .backend)
+        let unavailable = OnboardingModel(backend: UnavailableOnboardingBackend(), defaults: defaults, startStage: .backend, safetyAcknowledged: true)
         unavailable.updateServerURL("https://server"); let unavailableTask = unavailable.testConnection()!; await unavailableTask.value
         #expect(unavailable.connectionResult?.text == "Connection failed: this build can't connect to a server yet")
     }
     @MainActor @Test func successAndEscapeHatchComplete() async {
         let (defaults, name) = makeDefaults(); defer { defaults.removePersistentDomain(forName: name) }
         let backend = BackendStub(connection: .connected)
-        let model = OnboardingModel(backend: backend, defaults: defaults, startStage: .backend)
+        let model = OnboardingModel(backend: backend, defaults: defaults, startStage: .backend, safetyAcknowledged: true)
         model.updateServerURL("https://server"); let task = model.testConnection()!; await task.value
         #expect(model.connectionResult?.text == "Connected successfully")
         model.next(); #expect(model.stage == .signIn)
@@ -110,13 +110,13 @@ private actor GatedBackend: OnboardingBackend {
     @MainActor @Test func signInValidationFailureAndSuccess() async {
         let (defaults, name) = makeDefaults(); defer { defaults.removePersistentDomain(forName: name) }
         let backend = BackendStub(signIn: .failed(message: "bad credentials"))
-        let model = OnboardingModel(backend: backend, defaults: defaults, startStage: .backend)
+        let model = OnboardingModel(backend: backend, defaults: defaults, startStage: .backend, safetyAcknowledged: true)
         #expect(model.signIn() == nil && model.loginError == OnboardingCopy.blankCredentials)
         model.updateEmail("a@example.com"); model.updatePassword("secret")
         let failed = model.signIn()!; await failed.value
         #expect(model.loginError == "bad credentials" && model.password.isEmpty)
         let success = BackendStub(signIn: .signedIn)
-        let second = OnboardingModel(backend: success, defaults: defaults, startStage: .backend)
+        let second = OnboardingModel(backend: success, defaults: defaults, startStage: .backend, safetyAcknowledged: true)
         second.updateEmail("a@example.com"); second.updatePassword("secret")
         let done = second.signIn()!; await done.value
         #expect(second.isFinished && second.password.isEmpty && OnboardingCompletion.isComplete(in: defaults))
@@ -137,14 +137,34 @@ private actor GatedBackend: OnboardingBackend {
         #expect(await backend.counts().1 == 0)
         model.acknowledgeSafety(); model.continueWithoutServer()
         #expect(model.isFinished && OnboardingCompletion.isComplete(in: defaults))
-        let resumed = OnboardingModel(backend: backend, defaults: defaults, startStage: .backend)
-        #expect(resumed.safetyAcknowledged)
+        let resumed = OnboardingModel(backend: backend, defaults: defaults, startStage: .backend, safetyAcknowledged: true)
+        #expect(resumed.safetyAcknowledged && resumed.stage == .backend)
         #expect(!OnboardingModel(backend: backend, defaults: defaults, startStage: .safety).safetyAcknowledged)
+    }
+    @MainActor @Test func laterStartWithoutAcknowledgementLandsOnSafety() async {
+        let (defaults, name) = makeDefaults(); defer { defaults.removePersistentDomain(forName: name) }
+        let backend = BackendStub(connection: .connected, signIn: .signedIn)
+        for start in [OnboardingStage.backend, .signIn] {
+            let model = OnboardingModel(backend: backend, defaults: defaults, startStage: start)
+            #expect(model.stage == .safety && !model.safetyAcknowledged)
+            model.updateEmail("a@example.com"); model.updatePassword("secret")
+            model.continueWithoutServer()
+            #expect(model.signIn() == nil)
+            #expect(!model.isFinished && !model.isSigningIn)
+        }
+        #expect(!OnboardingCompletion.isComplete(in: defaults))
+        #expect(await backend.counts().1 == 0)
+    }
+    @Test func previewNoticeIsShownWhileNoRealDriverOrBackend() {
+        #expect(OnboardingPreview.showsNotice)
+        #expect(OnboardingIdentifier.previewNotice == "onboarding_preview_notice")
+        #expect(OnboardingCopy.welcomePreviewNotice == "This preview shows demo data only. Pump connection and server features are coming to iOS.")
+        #expect(OnboardingCopy.backendPreviewNotice.contains("can't connect to a pump or a server"))
     }
     @MainActor @Test func staleConnectionResultIsDroppedAfterURLEdit() async {
         let (defaults, name) = makeDefaults(); defer { defaults.removePersistentDomain(forName: name) }
         let backend = GatedBackend()
-        let model = OnboardingModel(backend: backend, defaults: defaults, startStage: .backend)
+        let model = OnboardingModel(backend: backend, defaults: defaults, startStage: .backend, safetyAcknowledged: true)
         model.updateServerURL("https://first")
         let task = model.testConnection()!
         while !(await backend.isPending()) { await Task.yield() }

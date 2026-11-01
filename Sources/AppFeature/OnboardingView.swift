@@ -33,7 +33,13 @@ public struct OnboardingFlowView: View {
             Text(OnboardingCopy.welcomeTitle).font(.largeTitle.bold()).foregroundStyle(.primary)
             Text(OnboardingCopy.welcomeSubtitle).font(.title3)
             Text(OnboardingCopy.welcomeBody).font(.body).multilineTextAlignment(.center)
+            if OnboardingPreview.showsNotice { previewNotice(OnboardingCopy.welcomePreviewNotice).multilineTextAlignment(.center) }
         }.frame(maxWidth: .infinity).padding(.vertical, 32)
+    }
+    private func previewNotice(_ text: String) -> some View {
+        Text(text).font(.subheadline.weight(.semibold)).foregroundStyle(.primary)
+            .padding(12).frame(maxWidth: .infinity).background(.fill.secondary, in: RoundedRectangle(cornerRadius: 12))
+            .accessibilityIdentifier(OnboardingIdentifier.previewNotice)
     }
     private var features: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -70,6 +76,7 @@ public struct OnboardingFlowView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack { Image(systemName: "lock.shield").accessibilityHidden(true); Text(OnboardingCopy.backendTitle).font(.title2.bold()) }
             Text(OnboardingCopy.backendBody)
+            if OnboardingPreview.showsNotice { previewNotice(OnboardingCopy.backendPreviewNotice) }
             TextField(OnboardingCopy.serverURLPlaceholder, text: Binding(get: { model.serverURL }, set: { model.updateServerURL($0) })).textFieldStyle(.roundedBorder).autocorrectionDisabled().accessibilityLabel(OnboardingCopy.serverURLLabel).accessibilityIdentifier(OnboardingIdentifier.serverURL)
                 #if os(iOS)
                 .keyboardType(.URL).textInputAutocapitalization(.never).textContentType(.URL)
