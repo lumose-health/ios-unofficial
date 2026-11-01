@@ -173,6 +173,9 @@ public final class OnboardingModel {
     @ObservationIgnored private let authorizations: any OnboardingAuthorizations
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private var connectionTask: Task<Void, Never>?
+    @ObservationIgnored private var completionTask: Task<Void, Never>?
+    /// Bumped when completion starts so a sign-in result that arrives afterwards is dropped.
+    @ObservationIgnored private var signInEpoch = 0
     /// A start stage after `.safety` is honored only when the caller passes an explicit
     /// prior acknowledgement; without one, onboarding starts at `.safety`.
     public init(backend: any OnboardingBackend, authorizations: any OnboardingAuthorizations, defaults: UserDefaults, startStage: OnboardingStage = .welcome, safetyAcknowledged: Bool = false) {
@@ -223,19 +226,25 @@ public final class OnboardingModel {
         guard pastSafetyGate, !isSigningIn, !isFinished, !isCompletingSetup else { return nil }
         guard !email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !password.isEmpty else { loginError = OnboardingCopy.blankCredentials; password = ""; return nil }
         isSigningIn = true; loginError = nil
-        let url = serverURL, email = email, password = password
+        let url = serverURL, email = email, password = password, epoch = signInEpoch
         let task = Task { [weak self, backend] in
             let outcome = await backend.signIn(url: url, email: email, password: password)
             guard let self else { return }
-            self.password = ""; self.isSigningIn = false
+            self.password = ""
+            // Drop a result that arrives after completion has already started on another path.
+            guard self.signInEpoch == epoch else { return }
+            self.isSigningIn = false
             switch outcome { case .signedIn: await self.complete().value; case .failed(let message): self.loginError = message }
         }
         return task
     }
+    /// Starts completion once. Later calls, while running or after it finished, return the same task.
     private func complete() -> Task<Void, Never> {
+        if let completionTask { return completionTask }
+        signInEpoch += 1; isSigningIn = false
         isCompletingSetup = true
         let authorizations = authorizations, defaults = defaults
-        return Task { [weak self, authorizations, defaults] in
+        let task = Task { [weak self, authorizations, defaults] in
             let notification = await authorizations.requestNotificationAuthorization(options: .onboarding)
             let bluetooth = await authorizations.requestBluetoothAuthorization()
             guard let self else { return }
@@ -244,5 +253,7 @@ public final class OnboardingModel {
             self.isFinished = true
             self.isCompletingSetup = false
         }
+        completionTask = task
+        return task
     }
 }

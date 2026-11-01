@@ -62,6 +62,25 @@ private actor GatedBackend: OnboardingBackend {
     func release() { continuation?.resume(returning: .connected); continuation = nil }
 }
 
+private actor GatedSignInBackend: OnboardingBackend {
+    private var continuation: CheckedContinuation<SignInOutcome, Never>?
+    func testConnection(to url: String) async -> ConnectionTestOutcome { .connected }
+    func signIn(url: String, email: String, password: String) async -> SignInOutcome {
+        await withCheckedContinuation { continuation = $0 }
+    }
+    func isPending() -> Bool { continuation != nil }
+    func release(_ outcome: SignInOutcome) { continuation?.resume(returning: outcome); continuation = nil }
+}
+
+/// Counts writes of the onboarding completion flag.
+private final class CountingDefaults: UserDefaults, @unchecked Sendable {
+    private(set) var completionWrites = 0
+    override func set(_ value: Bool, forKey defaultName: String) {
+        if defaultName == OnboardingCompletion.key { completionWrites += 1 }
+        super.set(value, forKey: defaultName)
+    }
+}
+
 @Suite("Onboarding") struct OnboardingTests {
     @MainActor private func advanceToBackend(_ model: OnboardingModel) { model.next(); model.next(); model.acknowledgeSafety() }
     private func makeDefaults() -> (UserDefaults, String) { let name = "OnboardingTests-\(UUID())"; return (UserDefaults(suiteName: name)!, name) }
@@ -175,6 +194,25 @@ private actor GatedBackend: OnboardingBackend {
         #expect(escape.isFinished && escape.serverURL.isEmpty && escape.connectionResult == nil)
         #expect(OnboardingCompletion.isComplete(in: defaults))
         escape.continueWithoutServer(); #expect(escape.isFinished)
+    }
+    @MainActor @Test func lateSignInAfterServerlessCompletionDoesNotCompleteTwice() async {
+        let name = "OnboardingTests-\(UUID())"
+        let defaults = CountingDefaults(suiteName: name)!; defer { defaults.removePersistentDomain(forName: name) }
+        let backend = GatedSignInBackend()
+        let auth = RecordingAuthorizations(notification: .granted, bluetooth: .allowed)
+        let model = OnboardingModel(backend: backend, authorizations: auth, defaults: defaults, startStage: .signIn, safetyAcknowledged: true)
+        model.updateEmail("user@example.com"); model.updatePassword("secret")
+        let signIn = model.signIn()!
+        while !(await backend.isPending()) { await Task.yield() }
+        model.back(); #expect(model.stage == .backend)
+        let completion = model.continueWithoutServer()!
+        await completion.value
+        #expect(model.isFinished && defaults.completionWrites == 1)
+        await backend.release(.signedIn)
+        await signIn.value
+        #expect(await auth.recorded().0 == ["notification", "bluetooth"])
+        #expect(defaults.completionWrites == 1)
+        #expect(model.isFinished && !model.isSigningIn && model.loginError == nil && model.password.isEmpty)
     }
     @MainActor @Test func cancellationPreventsLateConnectionResult() async {
         let (defaults, name) = makeDefaults(); defer { defaults.removePersistentDomain(forName: name) }
