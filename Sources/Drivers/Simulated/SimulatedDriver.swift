@@ -87,10 +87,9 @@ public actor SimulatedDriver: Driver {
     /// for the same reason.
     private let registrationBox = RegistrationBox()
 
-    private nonisolated let glucoseStream: AsyncStream<GlucoseSample>
-    private let glucoseContinuation: AsyncStream<GlucoseSample>.Continuation
-    private nonisolated let insulinOnBoardStream: AsyncStream<InsulinOnBoardSample>
-    private let insulinOnBoardContinuation: AsyncStream<InsulinOnBoardSample>.Continuation
+    /// The capability streams for the current activation. Held outside the
+    /// actor's isolation because ``capability(_:)`` is `nonisolated`.
+    private nonisolated let streams = ActivationStreams(bufferLimit: SimulatedDriver.streamBufferLimit)
 
     /// - Parameter tickInterval: The wall-clock spacing between emissions.
     ///   ``SimulatedGenerator``'s model step is nominally five simulated
@@ -114,18 +113,6 @@ public actor SimulatedDriver: Driver {
         self.validator = validator
         self.tickInterval = tickInterval
         self.generator = SimulatedGenerator(seed: seed)
-
-        let glucoseMake = AsyncStream<GlucoseSample>.makeStream(
-            bufferingPolicy: .bufferingNewest(Self.streamBufferLimit)
-        )
-        self.glucoseStream = glucoseMake.stream
-        self.glucoseContinuation = glucoseMake.continuation
-
-        let insulinMake = AsyncStream<InsulinOnBoardSample>.makeStream(
-            bufferingPolicy: .bufferingNewest(Self.streamBufferLimit)
-        )
-        self.insulinOnBoardStream = insulinMake.stream
-        self.insulinOnBoardContinuation = insulinMake.continuation
     }
 
     deinit {
@@ -135,9 +122,9 @@ public actor SimulatedDriver: Driver {
     public nonisolated func capability(_ capability: Capability) -> CapabilityPort? {
         switch capability {
         case .glucoseSource:
-            return .glucoseSource(SimulatedGlucoseSourcePort(readings: glucoseStream, driver: self))
+            return .glucoseSource(SimulatedGlucoseSourcePort(readings: streams.glucose, driver: self))
         case .insulinSource:
-            return .insulinSource(SimulatedInsulinSourcePort(insulinOnBoard: insulinOnBoardStream, driver: self))
+            return .insulinSource(SimulatedInsulinSourcePort(insulinOnBoard: streams.insulinOnBoard, driver: self))
         case .pumpStatus, .bgmSource, .dataSync, .doseCategoryProvider:
             return nil
         }
@@ -158,6 +145,10 @@ public actor SimulatedDriver: Driver {
         // recovered Driver must not keep throwing it until its first new tick.
         glucoseFailure = nil
         insulinFailure = nil
+        // A consumer that cancelled mid-run terminated this activation's
+        // streams; without a teardown in between (failed -> activating) they
+        // would otherwise reach the next consumer already dead.
+        streams.renewIfTerminated()
         let registration = scheduler.scheduleRepeating(interval: tickInterval) { [weak self] in
             await self?.emitNextTick()
         }
@@ -167,6 +158,7 @@ public actor SimulatedDriver: Driver {
     public func deactivate() async {
         isActive = false
         registrationBox.cancel()
+        streams.finishAndRenew()
     }
 
     // MARK: - Reads the capability ports call back into
@@ -196,7 +188,7 @@ public actor SimulatedDriver: Driver {
             let sample = GlucoseSample(glucose: glucose, recordedAt: now, trend: trend(forDelta: tick.glucoseDeltaMgdl))
             latestGlucose = sample
             glucoseFailure = nil
-            glucoseContinuation.yield(sample)
+            streams.yield(sample)
         } catch {
             glucoseFailure = error
         }
@@ -204,7 +196,7 @@ public actor SimulatedDriver: Driver {
         do {
             let sample = try InsulinOnBoardSample(units: tick.insulinOnBoardUnits, calculatedAt: now)
             insulinFailure = nil
-            insulinOnBoardContinuation.yield(sample)
+            streams.yield(sample)
         } catch {
             insulinFailure = error
         }
@@ -278,5 +270,99 @@ private final class RegistrationBox: @unchecked Sendable {
         self.registration = nil
         lock.unlock()
         registration?.cancel()
+    }
+}
+
+/// The glucose and insulin-on-board streams for one activation.
+///
+/// Cancelling a `for await` consumer terminates an `AsyncStream` for good, and
+/// the platform cancels its consumers when it stops the Driver. So a stream
+/// lives for one activation: ``finishAndRenew()`` ends the current pair at
+/// teardown, which also ends any consumer loop still running, and stages a
+/// fresh pair for the next activation. Within an activation every read returns
+/// the same stream.
+private final class ActivationStreams: @unchecked Sendable {
+    private let lock = NSLock()
+    private let bufferLimit: Int
+    private var epoch = 0
+    private var terminated = false
+    private var glucosePair: (stream: AsyncStream<GlucoseSample>, continuation: AsyncStream<GlucoseSample>.Continuation)
+    private var insulinPair: (stream: AsyncStream<InsulinOnBoardSample>, continuation: AsyncStream<InsulinOnBoardSample>.Continuation)
+
+    init(bufferLimit: Int) {
+        self.bufferLimit = bufferLimit
+        glucosePair = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(bufferLimit))
+        insulinPair = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(bufferLimit))
+        watchTermination(epoch: 0)
+    }
+
+    var glucose: AsyncStream<GlucoseSample> {
+        lock.lock(); defer { lock.unlock() }
+        return glucosePair.stream
+    }
+
+    var insulinOnBoard: AsyncStream<InsulinOnBoardSample> {
+        lock.lock(); defer { lock.unlock() }
+        return insulinPair.stream
+    }
+
+    func yield(_ sample: GlucoseSample) {
+        lock.lock()
+        let continuation = glucosePair.continuation
+        lock.unlock()
+        continuation.yield(sample)
+    }
+
+    func yield(_ sample: InsulinOnBoardSample) {
+        lock.lock()
+        let continuation = insulinPair.continuation
+        lock.unlock()
+        continuation.yield(sample)
+    }
+
+    func finishAndRenew() {
+        renew(onlyIfTerminated: false)
+    }
+
+    func renewIfTerminated() {
+        renew(onlyIfTerminated: true)
+    }
+
+    /// The old pairs are held, and finished, outside the lock: `finish()` runs
+    /// the `onTermination` handler synchronously, and so does deallocating a
+    /// stream nothing else references. That handler takes the lock.
+    private func renew(onlyIfTerminated: Bool) {
+        lock.lock()
+        guard !onlyIfTerminated || terminated else {
+            lock.unlock()
+            return
+        }
+        let oldGlucose = glucosePair
+        let oldInsulin = insulinPair
+        epoch &+= 1
+        terminated = false
+        glucosePair = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(bufferLimit))
+        insulinPair = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(bufferLimit))
+        let current = epoch
+        lock.unlock()
+        watchTermination(epoch: current)
+        oldGlucose.continuation.finish()
+        oldInsulin.continuation.finish()
+    }
+
+    private func watchTermination(epoch: Int) {
+        lock.lock()
+        let glucose = glucosePair.continuation
+        let insulin = insulinPair.continuation
+        lock.unlock()
+        let handler: @Sendable (Any) -> Void = { [weak self] _ in self?.markTerminated(epoch: epoch) }
+        glucose.onTermination = { handler($0) }
+        insulin.onTermination = { handler($0) }
+    }
+
+    private func markTerminated(epoch: Int) {
+        lock.lock()
+        if epoch == self.epoch { terminated = true }
+        lock.unlock()
     }
 }

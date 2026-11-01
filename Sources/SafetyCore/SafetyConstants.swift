@@ -2,7 +2,8 @@ import Foundation
 
 /// The single definition site for every cross-target safety constant (AD-2, SI-4).
 ///
-/// Nothing else in `Sources/` may spell these values again — not a private copy,
+/// Nothing else in `Sources/` may spell these values again — except the two named
+/// 900-second CGM and Pump declarations here; no private copy,
 /// not an inline literal, not a "just this once" duplicate in a view model.
 /// `scripts/guards/safety_guards.sh` enforces that mechanically: a second code
 /// occurrence anywhere under `Sources/` fails the gate.
@@ -65,6 +66,14 @@ public enum SafetyConstants {
     /// `tooStale` (Android `FreshnessPolicy.CGM`, `Freshness.kt:111`:
     /// `tooStaleAfterMs = 15 * MINUTE_MS`).
     public static let cgmTooStaleAfter: TimeInterval = 900
+
+    /// Seconds before a pump metric becomes stale (Android `Freshness.kt:120`,
+    /// `FreshnessPolicy.PUMP`: `staleAfterMs = 15 * MINUTE_MS`).
+    public static let pumpStaleAfter: TimeInterval = 900
+
+    /// Seconds before a pump metric becomes too stale (Android `Freshness.kt:120`,
+    /// `FreshnessPolicy.PUMP`: `tooStaleAfterMs = 60 * MINUTE_MS`).
+    public static let pumpTooStaleAfter: TimeInterval = 3600
 
     /// Max future-dated skew, in seconds, the alert floor tolerates before
     /// refusing to treat a reading as fresh (Android

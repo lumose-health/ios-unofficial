@@ -227,6 +227,8 @@ CANON_SPEC="$CANON_SPEC;glucose upper bound:500:475:525"
 CANON_SPEC="$CANON_SPEC;Tandem epoch offset:1199145600:1000000000:1400000000"
 CANON_SPEC="$CANON_SPEC;CGM staleAfter (seconds):360:342:378"
 CANON_SPEC="$CANON_SPEC;CGM tooStaleAfter (seconds):900:855:945"
+CANON_SPEC="$CANON_SPEC;Pump staleAfter (seconds):900:855:945"
+CANON_SPEC="$CANON_SPEC;Pump tooStaleAfter (seconds):3600:3420:3780"
 CANON_SPEC="$CANON_SPEC;alert-floor max future skew (seconds):60:57:63"
 
 # Every spelling of "read the wall clock". A superset of the three AC 4 names:
@@ -410,6 +412,11 @@ EOF
 $classified
 EOF
 
+    # The two 900-second policies must remain separate named declarations.
+    expect_count "cgmTooStaleAfter: TimeInterval = 900" 0 1 canonical "CGM too-stale declaration"
+    expect_count "pumpStaleAfter: TimeInterval = 900" 0 1 canonical "Pump stale declaration"
+    expect_count "pumpTooStaleAfter: TimeInterval = 3600" 0 1 canonical "Pump too-stale declaration"
+
     # One thing the value rules cannot see: whether the bound is spelled
     # INCLUSIVELY. `20..<500` and `20..<501` decode to the same two canonical
     # literals as `20...500` while meaning something different — and an
@@ -519,6 +526,9 @@ dup-epoch-underscored|FAIL|Sources/SafetyCore/GuardProbe.swift|let epochCopy = 1
 dup-cgm-stale-after|FAIL|Sources/SafetyCore/GuardProbe.swift|let duplicateStaleAfter = 360
 drifted-cgm-stale-after|FAIL|Sources/SafetyCore/GuardProbe.swift|let staleAfterCopy = 355
 dup-cgm-too-stale-after|FAIL|Sources/SafetyCore/GuardProbe.swift|let duplicateTooStaleAfter = 900
+dup-pump-stale-after|FAIL|Sources/SafetyCore/GuardProbe.swift|let duplicatePumpStaleAfter = 900
+dup-pump-too-stale-after|FAIL|Sources/SafetyCore/GuardProbe.swift|let duplicatePumpTooStaleAfter = 3600
+both-named-900-declarations|PASS|
 drifted-cgm-too-stale-after|FAIL|Sources/SafetyCore/GuardProbe.swift|let tooStaleAfterCopy = 890
 dup-alert-floor-skew|FAIL|Sources/SafetyCore/GuardProbe.swift|let duplicateSkew = 60
 drifted-alert-floor-skew|FAIL|Sources/SafetyCore/GuardProbe.swift|let skewCopy = 59
@@ -704,7 +714,7 @@ self_test() {
         tmp=$(self_test_scratch)
 
         case "$name" in
-            control-clean) ;;
+            control-clean|both-named-900-declarations) ;;
             *) self_test_write "$tmp/$path" "$payload" ;;
         esac
 

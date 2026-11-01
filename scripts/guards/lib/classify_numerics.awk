@@ -19,8 +19,9 @@
 # Two rules, and it is worth being precise about what each one can and cannot do:
 #
 #   EXACT  A literal numerically EQUAL to a canonical constant is a definition of
-#          it, whatever spelling it wears. Each constant must have exactly one
-#          such literal under Sources/, and it must sit in the canonical file.
+#          it, whatever spelling it wears. Each declared constant has exactly one
+#          literal, in the canonical file; constants that share a value share
+#          that count.
 #          This rule is complete: there is no way to write an equal value that
 #          escapes it.
 #
@@ -47,14 +48,16 @@ BEGIN {
 
 {
     v = $4 + 0
+    matched = 0
 
     for (k = 1; k <= ncanon; k++) {
         if (v == cval[k]) {
             count[k]++
             sites[k] = sites[k] " " $1 ":" $2
-            next
+            matched = 1
         }
     }
+    if (matched) next
 
     for (k = 1; k <= ncanon; k++) {
         if (v >= clo[k] && v <= chi[k]) {
@@ -70,19 +73,28 @@ END {
         s = sites[k]
         sub(/^ /, "", s)
 
-        if (count[k] != 1) {
-            printf "V|%s (%s): expected exactly one literal with this value under Sources/, found %d%s — any literal equal to a canonical value counts as a definition, even in unrelated code; use SafetyConstants at the extra site(s), or express an unrelated number without a literal equal to the constant\n", \
-                cname[k], ctext[k], count[k], (s == "" ? "" : " at " s)
+        # Distinct named constants may share a value; each must still be its own
+        # literal in the canonical file, so expect one literal per declaration.
+        expected = 0
+        for (j = 1; j <= ncanon; j++) if (cval[j] == cval[k]) expected++
+        if (count[k] != expected) {
+            printf "V|%s (%s): expected %d literal(s) with this value under Sources/, found %d%s — use SafetyConstants at any extra site\n", \
+                cname[k], ctext[k], expected, count[k], (s == "" ? "" : " at " s)
             continue
         }
 
-        split(s, parts, ":")
-        if (parts[1] != canonical_file) {
-            printf "V|%s (%s): must be defined in %s, found at %s\n", cname[k], ctext[k], canonical_file, s
+        nsites = split(s, parts, " ")
+        invalid_site = 0
+        for (i = 1; i <= nsites; i++) {
+            split(parts[i], location, ":")
+            if (location[1] != canonical_file) invalid_site = 1
+        }
+        if (invalid_site) {
+            printf "V|%s (%s): every literal must be defined in %s, found at %s\n", cname[k], ctext[k], canonical_file, s
             continue
         }
 
-        printf "P|%s (%s) defined exactly once, at %s\n", cname[k], ctext[k], s
+        printf "P|%s (%s) defined %d time(s), at %s\n", cname[k], ctext[k], expected, s
     }
 
     # The end-of-run marker, after the last verdict. See the header: this is the

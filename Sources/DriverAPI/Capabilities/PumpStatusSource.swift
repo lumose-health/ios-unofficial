@@ -15,8 +15,9 @@ public protocol PumpStatusSource: Sendable {
 
     /// Hardware state as the pump reports it changing.
     ///
-    /// Single consumer, obtained once, same stream on every read; the contract
-    /// is stated in full on ``GlucoseSource/readings``.
+    /// Single consumer, same stream on every read within one activation, and
+    /// finished by ``Driver/deactivate()``; the contract is stated in full on
+    /// ``GlucoseSource/readings``.
     var status: AsyncStream<PumpStatusSnapshot> { get }
 
     /// The most recent state the Driver holds, or `nil` if it holds none.
