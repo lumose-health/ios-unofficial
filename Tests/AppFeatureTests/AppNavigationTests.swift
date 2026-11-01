@@ -66,6 +66,18 @@ struct AppNavigationTests {
         #expect(StartDestination.resolve(onboardingComplete: OnboardingCompletion.isComplete(in: defaults)) == .onboarding)
     }
 
+    @Test func onboardingCompletionReadsLaunchArgumentStrings() {
+        let suiteName = "AppNavigationTests-\(UUID())"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        // A `-onboardingComplete NO` launch argument arrives as a string, not a Bool.
+        defaults.set("NO", forKey: OnboardingCompletion.key)
+        #expect(!OnboardingCompletion.isComplete(in: defaults))
+        defaults.set("YES", forKey: OnboardingCompletion.key)
+        #expect(OnboardingCompletion.isComplete(in: defaults))
+    }
+
     @Test func detailRoutesHideTabBarAndHaveExpectedTitle() {
         let allHide = AppRoute.allCases.allSatisfy { $0.hidesTabBar }
         #expect(allHide)

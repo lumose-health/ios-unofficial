@@ -61,7 +61,7 @@ public enum OnboardingCompletion {
     public static let valueWhenUnset = true
 
     public static func isComplete(in defaults: UserDefaults) -> Bool {
-        defaults.object(forKey: key) as? Bool ?? valueWhenUnset
+        defaults.object(forKey: key) == nil ? valueWhenUnset : defaults.bool(forKey: key)
     }
 
     public static func record(_ complete: Bool, in defaults: UserDefaults) {
