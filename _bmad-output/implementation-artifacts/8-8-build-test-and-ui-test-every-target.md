@@ -20,7 +20,7 @@ max_cycles: 3
 
 # Story 8.8: Build, test and UI-test every target
 
-Status: review
+Status: done
 
 <!-- Route rationale (for the PM): CI workflow + local gate script, first CI the repo
 has ever had. Not safety-critical code, but a supply-chain and trust-boundary
