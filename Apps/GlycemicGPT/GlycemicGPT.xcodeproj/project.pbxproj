@@ -1,0 +1,31 @@
+// !$*UTF8*$!
+{
+ archiveVersion = 1;
+ classes = {};
+ objectVersion = 77;
+ objects = {
+  A10000000000000000000001 = {isa = PBXNativeTarget; buildConfigurationList = A10000000000000000000010; buildPhases = (A10000000000000000000020, A10000000000000000000021, A10000000000000000000022,); buildRules = (); dependencies = (); fileSystemSynchronizedGroups = (A10000000000000000000052,); name = GlycemicGPT; packageProductDependencies = (A10000000000000000000031, A10000000000000000000032,); productName = GlycemicGPT; productReference = A10000000000000000000040; productType = "com.apple.product-type.application"; };
+  A10000000000000000000002 = {isa = PBXProject; attributes = {BuildIndependentTargetsInParallel = YES; LastSwiftUpdateCheck = 2660; LastUpgradeCheck = 2660;}; buildConfigurationList = A10000000000000000000011; compatibilityVersion = "Xcode 16.0"; developmentRegion = en; hasScannedForEncodings = 0; knownRegions = (en, Base,); mainGroup = A10000000000000000000050; packageReferences = (A10000000000000000000030,); productRefGroup = A10000000000000000000051; projectDirPath = ""; projectRoot = ""; targets = (A10000000000000000000001,); };
+  A10000000000000000000020 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+  A10000000000000000000021 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000033, A10000000000000000000034,); runOnlyForDeploymentPostprocessing = 0; };
+  A10000000000000000000022 = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+  A10000000000000000000030 = {isa = XCLocalSwiftPackageReference; relativePath = ../..; };
+  A10000000000000000000031 = {isa = XCSwiftPackageProductDependency; package = A10000000000000000000030; productName = AppFeature; };
+  A10000000000000000000032 = {isa = XCSwiftPackageProductDependency; package = A10000000000000000000030; productName = SimulatedDriver; };
+  A10000000000000000000033 = {isa = PBXBuildFile; productRef = A10000000000000000000031; };
+  A10000000000000000000034 = {isa = PBXBuildFile; productRef = A10000000000000000000032; };
+  A10000000000000000000040 = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = GlycemicGPT.app; sourceTree = BUILT_PRODUCTS_DIR; };
+  A10000000000000000000050 = {isa = PBXGroup; children = (A10000000000000000000052, A10000000000000000000051,); sourceTree = "<group>"; };
+  A10000000000000000000051 = {isa = PBXGroup; children = (A10000000000000000000040,); name = Products; sourceTree = "<group>"; };
+  A10000000000000000000052 = {isa = PBXFileSystemSynchronizedRootGroup; path = App; sourceTree = "<group>"; };
+  A10000000000000000000010 = {isa = XCConfigurationList; buildConfigurations = (A10000000000000000000060, A10000000000000000000061, A10000000000000000000062,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+  A10000000000000000000011 = {isa = XCConfigurationList; buildConfigurations = (A10000000000000000000063, A10000000000000000000064, A10000000000000000000065,); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+  A10000000000000000000060 = {isa = XCBuildConfiguration; name = Debug; buildSettings = {ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor; CODE_SIGN_STYLE = Automatic; ENABLE_TESTABILITY = YES; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_UILaunchScreen_Generation = YES; IPHONEOS_DEPLOYMENT_TARGET = 17.0; ONLY_ACTIVE_ARCH = YES; PRODUCT_BUNDLE_IDENTIFIER = com.glycemicgpt.ios; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; SWIFT_TREAT_WARNINGS_AS_ERRORS = YES; SWIFT_VERSION = 6.0; TARGETED_DEVICE_FAMILY = 1;}; };
+  A10000000000000000000061 = {isa = XCBuildConfiguration; name = Development; buildSettings = {ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor; CODE_SIGN_STYLE = Automatic; ENABLE_TESTABILITY = YES; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_UILaunchScreen_Generation = YES; IPHONEOS_DEPLOYMENT_TARGET = 17.0; ONLY_ACTIVE_ARCH = YES; PRODUCT_BUNDLE_IDENTIFIER = com.glycemicgpt.ios; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; SWIFT_TREAT_WARNINGS_AS_ERRORS = YES; SWIFT_VERSION = 6.0; TARGETED_DEVICE_FAMILY = 1;}; };
+  A10000000000000000000062 = {isa = XCBuildConfiguration; name = Release; buildSettings = {ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor; CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_KEY_UILaunchScreen_Generation = YES; IPHONEOS_DEPLOYMENT_TARGET = 17.0; PRODUCT_BUNDLE_IDENTIFIER = com.glycemicgpt.ios; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SWIFT_TREAT_WARNINGS_AS_ERRORS = YES; SWIFT_VERSION = 6.0; TARGETED_DEVICE_FAMILY = 1;}; };
+  A10000000000000000000063 = {isa = XCBuildConfiguration; name = Debug; buildSettings = {ENABLE_TESTABILITY = YES; ONLY_ACTIVE_ARCH = YES; SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG; SWIFT_OPTIMIZATION_LEVEL = "-Onone";}; };
+  A10000000000000000000064 = {isa = XCBuildConfiguration; name = Development; buildSettings = {ENABLE_TESTABILITY = YES; ONLY_ACTIVE_ARCH = YES; SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG; SWIFT_OPTIMIZATION_LEVEL = "-Onone";}; };
+  A10000000000000000000065 = {isa = XCBuildConfiguration; name = Release; buildSettings = {}; };
+ };
+ rootObject = A10000000000000000000002;
+}

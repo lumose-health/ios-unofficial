@@ -32,6 +32,7 @@ let package = Package(
         .library(name: "DriverAPI", targets: ["DriverAPI"]),
         .library(name: "SimulatedDriver", targets: ["SimulatedDriver"]),
         .library(name: "Persistence", targets: ["Persistence"]),
+        .library(name: "AppFeature", targets: ["AppFeature"]),
     ],
     // The workspace's first and only external dependency (AD-6).
     //
@@ -104,6 +105,18 @@ let package = Package(
         .testTarget(
             name: "PersistenceTests",
             dependencies: ["Persistence", "DriverAPI", "SafetyCore"],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        // AppFeature owns presentation and hosting; its dependency ceiling keeps
+        // device composition in the thin application target.
+        .target(
+            name: "AppFeature",
+            dependencies: ["SafetyCore", "DriverAPI"],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .testTarget(
+            name: "AppFeatureTests",
+            dependencies: ["AppFeature", "DriverAPI", "SafetyCore"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
     ]
