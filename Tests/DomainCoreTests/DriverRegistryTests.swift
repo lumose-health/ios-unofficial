@@ -176,6 +176,52 @@ struct DriverRegistryTests {
         #expect(await a.deactivateCount == 0)
     }
 
+    @Test func runningUnpersistedDriverIsPersistedWithoutRerunningHook() async throws {
+        let a = TestDriver(id: "test.pump.alpha", capabilities: pump)
+        let b = TestDriver(id: "test.pump.bravo", capabilities: pump)
+        let store = RecordingSelectionStore()
+        let registry = try DriverRegistry(drivers: [a, b], store: store)
+        try await registry.activate(alphaID)
+        let bravo = bravoID
+        await registry.setTransitionFault { id, next in
+            id == bravo && next == .deactivating ? .cancelled : nil
+        }
+        store.saveFailure = .unwritable(detail: "injected")
+        _ = try? await registry.activate(bravoID)
+        #expect(await registry.lifecycleState(of: bravoID) == .active)
+        #expect(await registry.persistedSelection == [alphaID.rawValue])
+        await registry.setTransitionFault(nil)
+        store.saveFailure = nil
+        #expect(try await registry.activate(bravoID) == [alphaID])
+        #expect(await b.activateCount == 1)
+        #expect(store.current == [bravoID.rawValue])
+        #expect(await registry.lifecycleState(of: alphaID) == .notActivated)
+        #expect(await a.deactivateCount == 1)
+    }
+
+    @Test func runningPersistedDriverEvictsLiveLeftoverWithoutRerunningHook() async throws {
+        let c = TestDriver(id: "test.cgm.charlie", capabilities: [.glucoseSource])
+        let a = TestDriver(id: "test.pump.alpha", capabilities: pump)
+        let store = RecordingSelectionStore()
+        let registry = try DriverRegistry(drivers: [c, a], store: store)
+        let charlie = c.descriptor.identifier
+        try await registry.activate(charlie)
+        await registry.setTransitionFault { id, next in
+            id == charlie && next == .deactivating ? .cancelled : nil
+        }
+        _ = try? await registry.activate(alphaID)
+        #expect(await registry.lifecycleState(of: charlie) == .active)
+        #expect(store.current == [alphaID.rawValue])
+        await registry.setTransitionFault(nil)
+        let saves = store.savedSets
+        #expect(try await registry.activate(alphaID) == [charlie])
+        #expect(await a.activateCount == 1)
+        #expect(await c.deactivateCount == 1)
+        #expect(await registry.lifecycleState(of: charlie) == .notActivated)
+        #expect(await registry.lifecycleState(of: alphaID) == .active)
+        #expect(store.savedSets == saves)
+    }
+
     @Test func multiInstanceDriversCoexist() async throws {
         let a = TestDriver(id: "test.pump.alpha", capabilities: pump)
         let b1 = TestDriver(id: "test.bgm.one", capabilities: [.bgmSource])
@@ -292,16 +338,49 @@ struct DriverRegistryTests {
         #expect(try FileDriverSelectionStore(fileURL: url).load() == ["test.absent.old"])
     }
 
-    @Test func failedRestoreRemovesSelection() async throws {
+    @Test func permanentRestoreFailureRemovesSelection() async throws {
+        let store = RecordingSelectionStore([alphaID.rawValue])
+        let a = TestDriver(id: "test.pump.alpha", capabilities: pump)
+        await a.setFailure(.authenticationRejected)
+        let registry = try DriverRegistry(drivers: [a], store: store)
+        let report = await registry.restore()
+        #expect(report.failed == [RestoreFailure(id: alphaID, failure: .authenticationRejected)])
+        #expect(report.deferred.isEmpty)
+        #expect(store.current.isEmpty)
+        #expect(await registry.lifecycleState(of: alphaID) == .failed)
+        #expect(await registry.slots.glucose == nil)
+    }
+
+    @Test func transientRestoreFailureKeepsSelection() async throws {
         let store = RecordingSelectionStore([alphaID.rawValue])
         let a = TestDriver(id: "test.pump.alpha", capabilities: pump)
         await a.setFailure(.transportUnavailable)
         let registry = try DriverRegistry(drivers: [a], store: store)
         let report = await registry.restore()
-        #expect(report.failed == [RestoreFailure(id: alphaID, failure: .transportUnavailable)])
-        #expect(store.current.isEmpty)
+        #expect(report.deferred == [RestoreFailure(id: alphaID, failure: .transportUnavailable)])
+        #expect(report.failed.isEmpty)
+        #expect(report.restored.isEmpty)
+        #expect(store.savedSets.isEmpty)
+        #expect(store.current == [alphaID.rawValue])
         #expect(await registry.lifecycleState(of: alphaID) == .failed)
-        #expect(await registry.slots.glucose == nil)
+        // Known limit: the persisted, not-running Driver still names the slot.
+        #expect(await registry.slots.glucose == alphaID)
+    }
+
+    @Test func restoreRetriesDriverDeferredByTransientFailure() async throws {
+        let store = RecordingSelectionStore([alphaID.rawValue])
+        let a = TestDriver(id: "test.pump.alpha", capabilities: pump)
+        await a.setFailure(.connectionLost)
+        let registry = try DriverRegistry(drivers: [a], store: store)
+        #expect(await registry.restore().deferred == [RestoreFailure(id: alphaID, failure: .connectionLost)])
+        await a.setFailure(nil)
+        let report = await registry.restore()
+        #expect(report.restored == [alphaID])
+        #expect(report.deferred.isEmpty)
+        #expect(await a.activateCount == 2)
+        #expect(await registry.lifecycleState(of: alphaID) == .active)
+        #expect(store.current == [alphaID.rawValue])
+        #expect(store.savedSets.isEmpty)
     }
 
     @Test func staleSelectionIsRemovedAfterHookFailure() async throws {
@@ -333,15 +412,29 @@ struct DriverRegistryTests {
         let store = RecordingSelectionStore([alphaID.rawValue, bravoID.rawValue])
         let a = TestDriver(id: "test.pump.alpha", capabilities: pump)
         let b = TestDriver(id: "test.pump.bravo", capabilities: pump)
-        await a.setFailure(.transportUnavailable)
+        await a.setFailure(.notPaired)
         let registry = try DriverRegistry(drivers: [a, b], store: store)
         let report = await registry.restore()
-        #expect(report.failed == [RestoreFailure(id: alphaID, failure: .transportUnavailable)])
+        #expect(report.failed == [RestoreFailure(id: alphaID, failure: .notPaired)])
         #expect(report.restored == [bravoID])
         #expect(report.removedConflicts.isEmpty)
         #expect(store.current == [bravoID.rawValue])
         #expect(await b.activateCount == 1)
         #expect(await registry.slots.glucose == bravoID)
+    }
+
+    @Test func deferredClaimantKeepsSlotAgainstHigherClaimant() async throws {
+        let store = RecordingSelectionStore([alphaID.rawValue, bravoID.rawValue])
+        let a = TestDriver(id: "test.pump.alpha", capabilities: pump)
+        let b = TestDriver(id: "test.pump.bravo", capabilities: pump)
+        await a.setFailure(.timedOut)
+        let registry = try DriverRegistry(drivers: [a, b], store: store)
+        let report = await registry.restore()
+        #expect(report.deferred == [RestoreFailure(id: alphaID, failure: .timedOut)])
+        #expect(report.removedConflicts == [bravoID])
+        #expect(report.restored.isEmpty)
+        #expect(store.current == [alphaID.rawValue])
+        #expect(await b.activateCount == 0)
     }
 
     @Test func restoreReportsConflictRemovalFailure() async throws {
@@ -360,7 +453,7 @@ struct DriverRegistryTests {
         let store = RecordingSelectionStore([alphaID.rawValue, bravoID.rawValue])
         let a = TestDriver(id: "test.pump.alpha", capabilities: pump)
         let b = TestDriver(id: "test.pump.bravo", capabilities: pump)
-        await a.setFailure(.transportUnavailable)
+        await a.setFailure(.notPaired)
         let registry = try DriverRegistry(drivers: [a, b], store: store)
         store.saveFailure = .unwritable(detail: "injected")
         let first = await registry.restore()

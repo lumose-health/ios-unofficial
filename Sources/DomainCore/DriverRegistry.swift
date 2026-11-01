@@ -29,7 +29,13 @@ public struct RestoreFailure: Equatable, Sendable {
 public struct RestoreReport: Equatable, Sendable {
     public var restored: [DriverIdentifier] = []
     public var absentFromBuild: [String] = []
+    /// Drivers whose start failed permanently; their selection was cleared.
     public var failed: [RestoreFailure] = []
+    /// Drivers whose start failed transiently (see ``DriverFailure/isTransient``).
+    /// Their selection stays persisted and they stay out of `active`; a later
+    /// `restore()` starts them again. They keep their slot claim, so no other
+    /// persisted claimant is started in their place.
+    public var deferred: [RestoreFailure] = []
     /// Persisted claimants skipped because a lower id already holds the slot.
     public var removedConflicts: [DriverIdentifier] = []
     /// Skipped claimants and failed ids that are still persisted because the save failed.
@@ -72,6 +78,11 @@ public actor DriverRegistry {
         }
     }
 
+    /// Slots derived from the persisted selection (AD-2, AD-3), not from which
+    /// Drivers are running. A persisted Driver that is not running still names its
+    /// slot: one whose restore was deferred by a transient failure, or one whose
+    /// removal save failed. That is a known limit; the caller compares
+    /// ``lifecycleState(of:)`` to report such a slot as "not running".
     public var slots: DriverSlots {
         let known = Set(drivers.keys.filter { persisted.contains($0.rawValue) })
         return DriverSlots.derive(active: known, descriptors: descriptors)
@@ -140,7 +151,6 @@ public actor DriverRegistry {
         defer { leave() }
         guard let driver = drivers[id] else { throw .unknownDriver(id) }
         if let loadFailure { throw .selectionUnavailable(loadFailure) }
-        if let state = lifecycles[id]?.state, state == .active || state == .degraded { return [] }
         let incoming = driver.descriptor.capabilities.filter { $0.cardinality == .singleInstance }
         // A Driver left live but unpersisted (e.g. after `.evictionIncomplete`) still
         // holds the slot, so it is evicted alongside the persisted holders.
@@ -149,21 +159,31 @@ public actor DriverRegistry {
                 (persisted.contains($0.identifier.rawValue) ||
                     (lifecycles[$0.identifier]?.state ?? .notActivated) != .notActivated)
         }.map(\.identifier).sorted { $0.rawValue < $1.rawValue }
-        try advance(id, to: .activating)
-        do { try await driver.activate() }
-        catch {
-            try advance(id, to: .failed)
-            if persisted.contains(id.rawValue) { try? save(persisted.subtracting([id.rawValue])) }
-            throw .activationFailed(id, error)
+        let state = lifecycles[id]?.state
+        let running = state == .active || state == .degraded
+        // Already running is only settled when the selection names it and nothing
+        // else still holds its slot. Otherwise the hook is skipped (it already ran,
+        // and `active` cannot re-enter `activating`) and the save and eviction run.
+        if running && persisted.contains(id.rawValue) && conflicts.isEmpty { return [] }
+        if !running {
+            try advance(id, to: .activating)
+            do { try await driver.activate() }
+            catch {
+                try advance(id, to: .failed)
+                if persisted.contains(id.rawValue) { try? save(persisted.subtracting([id.rawValue])) }
+                throw .activationFailed(id, error)
+            }
+            try advance(id, to: .active)
         }
-        try advance(id, to: .active)
         // One write: the incoming Driver replaces every conflict, so no persisted
         // state ever holds both, and a failed write leaves the incumbents in place.
         let selection = persisted.union([id.rawValue]).subtracting(conflicts.map(\.rawValue))
         if selection != persisted {
             do { try save(selection) }
             catch {
-                guard case .persistenceFailed(let failure) = error else { throw error }
+                // A Driver that was already running keeps running: the call leaves
+                // things as it found them.
+                guard case .persistenceFailed(let failure) = error, !running else { throw error }
                 do { try await tearDown(id) }
                 catch { throw .persistenceFailedDriverStillLive(failure, live: id) }
                 throw error
@@ -198,8 +218,14 @@ public actor DriverRegistry {
     }
 
     /// Starts the persisted Drivers in raw-id order. A Driver whose single-instance
-    /// capability is already held by a running or lower restored Driver is not started;
-    /// it is removed from the selection with the failed ids in one save.
+    /// capability is already held by a running, lower restored or lower deferred
+    /// Driver is not started; it is removed from the selection with the permanently
+    /// failed ids in one save.
+    ///
+    /// A start that fails transiently (Bluetooth off, device out of range, timeout,
+    /// cancellation) does not clear the selection: the Driver stays persisted and
+    /// inactive, is reported in ``RestoreReport/deferred``, and is retried by the
+    /// next `restore()`. Until then it still names its slot (see ``slots``).
     public func restore() async -> RestoreReport {
         await enter()
         defer { leave() }
@@ -246,8 +272,13 @@ public actor DriverRegistry {
                 claimed.formUnion(singles)
             } catch let error as DriverFailure {
                 try? advance(id, to: .failed)
-                report.failed.append(RestoreFailure(id: id, failure: error))
-                dropped.append(id)
+                if error.isTransient {
+                    report.deferred.append(RestoreFailure(id: id, failure: error))
+                    claimed.formUnion(singles)
+                } else {
+                    report.failed.append(RestoreFailure(id: id, failure: error))
+                    dropped.append(id)
+                }
             } catch let error as DriverRegistryError {
                 if case .lifecycle(let failure) = error {
                     report.failed.append(RestoreFailure(id: id, failure: failure))

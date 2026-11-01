@@ -641,6 +641,8 @@ sure?"
   - `Tests/DomainCoreTests/FileDriverSelectionStoreTests.swift`
   - `Tests/DomainCoreTests/RegistryTestDrivers.swift`
   - `Tests/DomainCoreTests/DriverRegistryTests.swift`
+- `Sources/DriverAPI/DriverFailure.swift`
+- `Tests/DriverAPITests/DriverFailureTests.swift`
 - Modified:
   - `Package.swift`
   - `Sources/DriverAPI/Capability.swift`
@@ -694,6 +696,12 @@ Codex (GPT-6), cycle 1.
   - The enqueue and transition-fault seams and every check against them are compiled only under `#if DEBUG`; `swift build -c release` contains neither.
   - Known limit (noted, no code change): slots are derived from the persisted set. When a restore removal save fails, the slot can name a Driver that failed to start until the next restore. This is reported through `unremoved`/`selectionFailure`; how it is surfaced to the user is covered by the FR-33 distinguishable-error work in 1-12b.
   - Known limit (noted, no code change): a Driver stuck in `.deactivating` after a failed transition is reachable only through the DEBUG transition-fault seam.
+
+- PR triage fixes (2026-11-01):
+  - **FR-28 refinement (PM decision, safety).** The PRD's FR-28 consequence currently reads: "An activation failure returns a typed error, leaves the Driver inactive, writes no slot persistence, and (on the restore path) clears any stale persisted selection for it." Applied literally, a pump out of range or Bluetooth off during a background relaunch silently cost the user their pump selection. Refined: `DriverFailure.isTransient` classifies `transportUnavailable`, `connectionLost`, `timedOut` and `cancelled` as transient, everything else as permanent. On restore a permanent failure clears the selection as before; a transient failure keeps it persisted, leaves the Driver inactive (`.failed`), reports it in `RestoreReport.deferred`, and the next `restore()` retries it. A deferred Driver keeps its slot claim, so a higher persisted claimant is removed rather than started in its place. **A PRD revision-log entry for FR-28 is needed** to record this; the PRD text was not edited here.
+  - The persisted-but-not-running case (deferred restore, or failed removal save) still names its slot. This is the known limit above, now stated on `slots` and `restore()`; the follow-up surfaces it as "not running".
+  - `activate` on an already-running Driver returns early only when it is persisted and has no live conflicts. Otherwise the lifecycle hook and `activating` transition are skipped and the save and eviction run; a failed save then leaves the already-running Driver running.
+  - Sentry's slot-derivation-from-`persisted` finding is by design (AD-2/AD-3: no slot table); no change.
 
 ### File List
 
