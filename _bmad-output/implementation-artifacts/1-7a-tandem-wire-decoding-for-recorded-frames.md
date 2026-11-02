@@ -19,7 +19,7 @@ max_cycles: 3
 
 # Story 1.7a: Tandem wire decoding for recorded frames
 
-Status: in-progress
+Status: done
 
 <!-- Planning note (for the maintainer): epics.md Story 1.7 is split three ways because the whole of
 it is about 1,800 reviewable lines, over the 800-line budget. The split follows the layers:

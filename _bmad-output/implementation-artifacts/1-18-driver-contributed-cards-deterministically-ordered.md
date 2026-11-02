@@ -19,7 +19,7 @@ max_cycles: 3
 
 # Story 1.18: Driver-contributed cards, deterministically ordered
 
-Status: review
+Status: done
 
 > Depends on PR #23 being merged; dispatch after merge.
 > PR #23 (`feat/registry-lifecycle`) moves `HomeModel` onto `DriverRegistry`. Contributed cards
