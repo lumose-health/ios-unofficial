@@ -111,6 +111,7 @@ jobs:
           persist-credentials: false
       - name: Evaluate iOS result
         env:
+          GATE_NAME: iOS Gate
           DETECT_RESULT: ${{ needs.detect-changes.result }}
           SHOULD_BUILD: ${{ needs.detect-changes.outputs.should_build }}
           WORK_RESULT: ${{ needs.build.result }}

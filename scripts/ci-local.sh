@@ -16,6 +16,7 @@ XCODE_UITEST_OPTOUT=('Apps/GlycemicGPT/GlycemicGPT.xcodeproj:no UI-test target y
 # Entries are project-path:reason, for a scheme with no test action of its own
 # (its code is tested elsewhere). The project is still built.
 XCODE_TEST_OPTOUT=('Apps/GlycemicGPT/GlycemicGPT.xcodeproj:app code is tested through the package tests')
+REQUIRED_CHECKS=('Static Analysis Gate' 'Dependency Scan Gate' 'Workflow Lint' 'Workflow Security' 'iOS Gate')
 
 usage() {
   cat <<'EOF'
@@ -23,10 +24,26 @@ Usage: bash scripts/ci-local.sh <command>
   ios-gate       Build and test Swift, Drivers, guards, and declared Xcode targets
   ui-tests       Run declared XCUITest schemes on declared Simulator destinations
   gate-verdict   Evaluate DETECT_RESULT, SHOULD_BUILD, WORK_RESULT, EVENT_NAME
-  workflow-pins  Check action references under .github/workflows and .github/actions
+  static-analysis    Run safety and Driver guards and their self-tests
+  dependency-scan    Scan source with pinned OSV-Scanner
+  workflow-lint      Run actionlint, shellcheck, pins, policy and the roster checks
+  workflow-policy    Check required job and workflow structure offline
+  workflow-security  Run zizmor and the pull_request_target backstop
+  workflow-pins      Check action references under .github/workflows and .github/actions
+  required-checks    Compare docs/ci-checks.md and the develop ruleset with the roster
+  install-ci-tools   Install pinned Linux tools for workflow-lint, workflow-security
+                     or dependency-scan
   --self-test    Exercise the verdict and guard failure paths without Xcode
 
-Static analysis, dependency scan, and workflow security gates are not implemented here yet.
+Required checks on develop (also listed in docs/ci-checks.md):
+  Static Analysis Gate   static-analysis
+  Dependency Scan Gate   dependency-scan (needs osv-scanner 2.3.3)
+  Workflow Lint          workflow-lint (needs actionlint 1.7.7, shellcheck 0.10.0)
+  Workflow Security      workflow-security (needs zizmor 1.5.2)
+  iOS Gate               ios-gate
+
+CodeQL, Semgrep and gitleaks are not wired yet. OSV-Scanner --no-ignore also
+scans untracked local directories; CI uses a clean checkout.
 EOF
 }
 
@@ -34,18 +51,18 @@ header() { printf '\n== %s ==\n' "$1"; }
 fail() { printf 'ci-local: %s\n' "$1" >&2; return 1; }
 
 gate_verdict() {
-  local detect=${DETECT_RESULT:-} build=${WORK_RESULT:-} should=${SHOULD_BUILD:-} event=${EVENT_NAME:-}
+  local detect=${DETECT_RESULT:-} build=${WORK_RESULT:-} should=${SHOULD_BUILD:-} event=${EVENT_NAME:-} gate=${GATE_NAME:-iOS Gate}
   if [[ -z "$detect" || -z "$build" || -z "$should" || -z "$event" ]]; then fail 'gate input is empty'; return 1; fi
   if [[ "$detect" != success ]]; then fail "detect-changes result is ${detect:-empty}; gate fails"; return 1; fi
   if [[ "$event" == workflow_dispatch || "$event" == schedule ]]; then
     [[ "$build" == success ]] || { fail "${event} requires a successful build (got ${build:-empty})"; return 1; }
-    echo 'iOS Gate: build succeeded'; return 0
+    echo "$gate: work succeeded"; return 0
   fi
   if [[ "$event" != push && "$event" != pull_request ]]; then fail "unknown event ${event:-empty}"; return 1; fi
-  if [[ "$should" == false ]]; then echo 'iOS Gate: iOS paths unchanged; build skipped'; return 0; fi
+  if [[ "$should" == false ]]; then echo "$gate: relevant paths unchanged; work skipped"; return 0; fi
   if [[ "$should" != true ]]; then fail "should_build is ${should:-empty}; gate fails"; return 1; fi
   [[ "$build" == success ]] || { fail "required build is ${build:-empty}; gate fails"; return 1; }
-  echo 'iOS Gate: build succeeded'
+  echo "$gate: work succeeded"
 }
 
 pin_scan() {
@@ -84,6 +101,110 @@ pin_scan() {
     end
     exit(bad ? 1 : 0)
   '
+}
+
+require_tool() {
+  local tool=$1 version=$2 actual version_re
+  command -v "$tool" >/dev/null 2>&1 || { fail "$tool $version is required"; return 1; }
+  actual=$("$tool" --version 2>&1) || { fail "$tool $version is required"; return 1; }
+  version_re=${version//./\\.}
+  [[ "$actual" =~ (^|[^0-9.])${version_re}([^0-9.]|$) ]] || { fail "$tool $version is required (got $actual)"; return 1; }
+}
+
+static_analysis() {
+  bash scripts/guards/safety_guards.sh
+  bash scripts/guards/driver_guards.sh
+  bash scripts/guards/safety_guards.sh --self-test
+  bash scripts/guards/driver_guards.sh --self-test
+  echo 'CodeQL, Semgrep and gitleaks are not wired yet.'
+}
+
+dependency_scan() {
+  require_tool osv-scanner 2.3.3
+  # The SwiftPM Package.resolved extractor is not in OSV-Scanner's default
+  # plugin set; without it the scan finds no package sources and exits 128.
+  osv-scanner scan source --recursive --no-ignore --config=osv-scanner.toml \
+    --experimental-plugins=swift/packageresolved .
+}
+
+composite_secrets() {
+  local file line
+  if [[ ! -d .github/actions ]]; then echo 'composite-secrets: .github/actions is absent'; return 0; fi
+  while IFS= read -r file; do
+    while IFS= read -r line; do
+      [[ "$line" =~ ^[[:space:]]*# ]] && continue
+      if [[ "$line" =~ \$\{\{[[:space:]]*secrets\. ]]; then fail "$file: composite action secrets reference"; return 1; fi
+    done < "$file"
+  done < <(find .github/actions -type f | sort)
+}
+
+workflow_policy() { ruby scripts/lib/workflow_policy.rb policy "${1:-.github/workflows}"; }
+workflow_backstop() { ruby scripts/lib/workflow_policy.rb backstop .github/workflows; }
+required_checks() { ruby scripts/lib/workflow_policy.rb required-checks "${REQUIRED_CHECKS_DOC:-docs/ci-checks.md}" "${1:-}" "${REQUIRED_CHECKS[@]}"; }
+
+# The published roster must match REQUIRED_CHECKS. The ruleset comparison is
+# advisory here because only a maintainer can change the develop ruleset, and a
+# workflow that is red until then would block its own pull request. Run
+# `required-checks` directly for the strict comparison.
+workflow_lint() {
+  require_tool actionlint 1.7.7
+  require_tool shellcheck 0.10.0
+  actionlint -oneline "-shellcheck=$(command -v shellcheck)"
+  pin_scan
+  composite_secrets
+  workflow_policy
+  ruby scripts/lib/workflow_policy.rb roster-doc "${REQUIRED_CHECKS_DOC:-docs/ci-checks.md}" "${REQUIRED_CHECKS[@]}"
+  if ! ruby scripts/lib/workflow_policy.rb ruleset "${1:-}" "${REQUIRED_CHECKS[@]}"; then
+    echo '::warning title=Required checks::The develop ruleset does not require exactly the checks in docs/ci-checks.md.'
+  fi
+}
+
+workflow_security() {
+  require_tool zizmor 1.5.2
+  local -a paths=(.github/workflows/)
+  [[ ! -d .github/actions ]] || paths+=(.github/actions/)
+  zizmor --config zizmor.yml --min-severity=medium "${paths[@]}"
+  workflow_backstop
+}
+
+install_ci_tools() {
+  local target=${1:-} artifact hash url archive
+  [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]] || { fail 'install-ci-tools requires Linux x86_64'; return 1; }
+  case "$target" in workflow-lint|workflow-security|dependency-scan) ;; *) fail "unknown install-ci-tools target: $target"; return 1;; esac
+  mkdir -p .build/ci-tools
+  if [[ "$target" == workflow-lint ]]; then
+    url=https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz
+    hash=023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757
+    archive=.build/ci-tools/actionlint.tar.gz
+    curl -fsSL "$url" -o "$archive"
+    printf '%s  %s\n' "$hash" "$archive" | sha256sum -c -
+    tar -xzf "$archive" -C .build/ci-tools actionlint
+    url=https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz
+    hash=6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87
+    archive=.build/ci-tools/shellcheck.tar.xz
+    curl -fsSL "$url" -o "$archive"
+    printf '%s  %s\n' "$hash" "$archive" | sha256sum -c -
+    tar -xJf "$archive" -C .build/ci-tools shellcheck-v0.10.0/shellcheck
+    cp .build/ci-tools/shellcheck-v0.10.0/shellcheck .build/ci-tools/shellcheck
+  elif [[ "$target" == dependency-scan ]]; then
+    url=https://github.com/google/osv-scanner/releases/download/v2.3.3/osv-scanner_linux_amd64
+    hash=777b4bb7ddd10bdcc8a1aa398d37d05e91e866e7586f9cff3fca2f72b8153033
+    artifact=.build/ci-tools/osv-scanner
+    curl -fsSL "$url" -o "$artifact"
+    printf '%s  %s\n' "$hash" "$artifact" | sha256sum -c -
+    chmod +x "$artifact"
+  else
+    # pip refuses any artifact whose sha256 differs from the pinned manylinux wheel.
+    printf 'zizmor==1.5.2 --hash=sha256:0c5f656106c430748858ae459c41c9eed09a1e01e5f42015d80c8fe34740d173\n' > .build/ci-tools/zizmor-requirements.txt
+    python3 -m venv .build/ci-tools/zizmor-venv
+    .build/ci-tools/zizmor-venv/bin/pip install --quiet --disable-pip-version-check --no-deps --only-binary=:all: --require-hashes -r .build/ci-tools/zizmor-requirements.txt
+    ln -sf zizmor-venv/bin/zizmor .build/ci-tools/zizmor
+  fi
+  if [[ -n "${GITHUB_PATH:-}" ]]; then
+    printf '%s\n' "$ROOT/.build/ci-tools" >> "$GITHUB_PATH"
+  else
+    echo "install-ci-tools: add $ROOT/.build/ci-tools to PATH"
+  fi
 }
 
 driver_conditions() {
@@ -257,6 +378,22 @@ self_test() {
   assert_case unknown-event fail 'unknown event merge_group' env DETECT_RESULT=success SHOULD_BUILD=true WORK_RESULT=success EVENT_NAME=merge_group "$BASH" "$ROOT/scripts/ci-local.sh" gate-verdict
   assert_case garbage-should-build fail 'should_build is garbage' env DETECT_RESULT=success SHOULD_BUILD=garbage WORK_RESULT=success EVENT_NAME=pull_request "$BASH" "$ROOT/scripts/ci-local.sh" gate-verdict
   assert_case empty-values fail 'gate input is empty' env -u DETECT_RESULT -u SHOULD_BUILD -u WORK_RESULT -u EVENT_NAME "$BASH" "$ROOT/scripts/ci-local.sh" gate-verdict
+  assert_case dependency-skip pass '' env GATE_NAME='Dependency Scan Gate' DETECT_RESULT=success SHOULD_BUILD=false WORK_RESULT=skipped EVENT_NAME=pull_request "$BASH" "$ROOT/scripts/ci-local.sh" gate-verdict
+  assert_case dependency-schedule-skip fail 'schedule requires a successful build' env GATE_NAME='Dependency Scan Gate' DETECT_RESULT=success SHOULD_BUILD=false WORK_RESULT=skipped EVENT_NAME=schedule "$BASH" "$ROOT/scripts/ci-local.sh" gate-verdict
+  assert_case dependency-failure fail 'required build is failure' env GATE_NAME='Dependency Scan Gate' DETECT_RESULT=success SHOULD_BUILD=true WORK_RESULT=failure EVENT_NAME=pull_request "$BASH" "$ROOT/scripts/ci-local.sh" gate-verdict
+  ruby scripts/lib/workflow_policy_test.rb
+  mkdir -p "$fixture/secrets/.github/actions"
+  printf 'name: test\n# ${{ secrets.COMMENTED }}\n' > "$fixture/secrets/.github/actions/action.yml"
+  (cd "$fixture/secrets"; assert_case composite-comment pass '' composite_secrets)
+  printf 'run: ${{ secrets.EXPOSED }}\n' >> "$fixture/secrets/.github/actions/action.yml"
+  (cd "$fixture/secrets"; assert_case composite-hit fail 'composite action secrets reference' composite_secrets)
+  printf 'name: test\nrun: ${{secrets.TIGHT}}\n' > "$fixture/secrets/.github/actions/action.yml"
+  (cd "$fixture/secrets"; assert_case composite-hit-unspaced fail 'composite action secrets reference' composite_secrets)
+  rm -rf "$fixture/secrets/.github/actions"
+  (cd "$fixture/secrets"; assert_case composite-absent pass '' composite_secrets)
+  assert_case missing-actionlint fail 'actionlint 1.7.7 is required' env PATH=/usr/bin:/bin "$BASH" "$ROOT/scripts/ci-local.sh" workflow-lint
+  assert_case missing-zizmor fail 'zizmor 1.5.2 is required' env PATH=/usr/bin:/bin "$BASH" "$ROOT/scripts/ci-local.sh" workflow-security
+  assert_case missing-osv fail 'osv-scanner 2.3.3 is required' env PATH=/usr/bin:/bin "$BASH" "$ROOT/scripts/ci-local.sh" dependency-scan
   mkdir -p "$fixture/.github/workflows" "$fixture/.github/actions"
   (cd "$fixture"; printf 'steps:\n  - uses: a/b@v1.0.0\n' > .github/workflows/check.yml; assert_case action-tag fail 'unpinned action' pin_scan)
   (cd "$fixture"; printf 'steps:\n  - uses: a/b@1234abcd\n' > .github/workflows/check.yml; assert_case short-sha fail 'unpinned action' pin_scan)
@@ -298,6 +435,13 @@ case "${1:-}" in
   ui-tests) ui_tests ;;
   gate-verdict) gate_verdict ;;
   workflow-pins) pin_scan ;;
+  static-analysis) static_analysis ;;
+  dependency-scan) dependency_scan ;;
+  workflow-lint) workflow_lint "${2:-}" ;;
+  workflow-policy) workflow_policy "${2:-}" ;;
+  workflow-security) workflow_security ;;
+  required-checks) required_checks "${2:-}" ;;
+  install-ci-tools) install_ci_tools "${2:-}" ;;
   --self-test) self_test ;;
   '') usage ;;
   *) usage >&2; exit 2 ;;
