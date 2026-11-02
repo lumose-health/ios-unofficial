@@ -218,6 +218,17 @@ struct TraceReplayDriverTests {
         #expect(try await port.latestReading() == nil)
     }
 
+    @Test("A teardown before the first activation still leaves the next activation's streams live")
+    func deactivateBeforeFirstActivation() async throws {
+        let (driver, _, _) = try makeDriver()
+        await driver.deactivate()
+        try await driver.activate()
+        let port = try glucose(driver)
+        var iterator = port.readings.makeAsyncIterator()
+        let first = await iterator.next()
+        #expect(first != nil)
+    }
+
     @Test("Missing trace is a typed load failure")
     func missingTrace() async throws {
         let (driver, _, _) = try makeDriver(trace: .bundled(name: "missing"))

@@ -166,6 +166,9 @@ public actor TraceReplayDriver: Driver {
         latestGlucose = nil
         halt = nil
         streams.finish()
+        // The finished streams are spent, so the next activation must renew them
+        // even when no activation preceded this teardown.
+        hasActivated = true
     }
 
     func currentGlucose() throws(DriverFailure) -> GlucoseSample? {
