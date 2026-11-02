@@ -1,0 +1,27 @@
+name: Workflow Security
+on:
+  pull_request:
+  push:
+    branches: [develop, main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  # Pull requests share one group per ref so a new push cancels the stale run.
+  # Push, schedule and dispatch runs get their own group and are never cancelled,
+  # so every commit that lands on develop or main is checked.
+  group: workflow-security-${{ github.ref }}-${{ github.event_name == 'pull_request' && 'pr' || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  workflow-security:
+    name: Workflow Security
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - run: bash scripts/ci-local.sh install-ci-tools workflow-security
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/ci-local.sh workflow-security

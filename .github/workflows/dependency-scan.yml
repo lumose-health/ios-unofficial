@@ -1,0 +1,76 @@
+name: Dependency Scan
+on:
+  pull_request:
+  push:
+    branches: [develop, main]
+  workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * 1'
+permissions:
+  contents: read
+concurrency:
+  # Pull requests share one group per ref so a new push cancels the stale run.
+  # Push, schedule and dispatch runs get their own group and are never cancelled,
+  # so every commit that lands on develop or main is checked.
+  group: dependency-scan-${{ github.ref }}-${{ github.event_name == 'pull_request' && 'pr' || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  detect-dependencies:
+    name: Detect Dependency Changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      should_scan: ${{ steps.filter.outputs.deps || 'false' }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
+        id: filter
+        with:
+          # Pushes compare against the previous commit on the same branch;
+          # pull requests ignore base and use the PR diff.
+          base: ${{ github.ref }}
+          filters: |
+            deps:
+              - 'Package.swift'
+              - '**/Package.resolved'
+              - '**/Podfile.lock'
+              - '**/*.xcodeproj/project.pbxproj'
+              - 'osv-scanner.toml'
+              - '.github/workflows/dependency-scan.yml'
+              - 'scripts/ci-local.sh'
+  osv:
+    name: OSV-Scanner
+    needs: detect-dependencies
+    if: needs.detect-dependencies.outputs.should_scan == 'true' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - run: bash scripts/ci-local.sh install-ci-tools dependency-scan
+      - run: bash scripts/ci-local.sh dependency-scan
+  dependency-gate:
+    name: Dependency Scan Gate
+    needs: [detect-dependencies, osv]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Evaluate dependency result
+        env:
+          GATE_NAME: Dependency Scan Gate
+          DETECT_RESULT: ${{ needs.detect-dependencies.result }}
+          SHOULD_BUILD: ${{ needs.detect-dependencies.outputs.should_scan }}
+          WORK_RESULT: ${{ needs.osv.result }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: bash scripts/ci-local.sh gate-verdict

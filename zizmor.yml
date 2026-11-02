@@ -1,0 +1,3 @@
+# No audit allowlist entries. Any future entry needs one audit id, a written
+# rationale and the narrowest scope that works.
+rules: {}
