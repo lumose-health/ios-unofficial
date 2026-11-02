@@ -70,6 +70,10 @@ public struct OnboardingFlowView: View {
                 }.padding(12).frame(maxWidth: .infinity, alignment: .leading).background(.fill.tertiary, in: RoundedRectangle(cornerRadius: 12)).accessibilityElement(children: .combine)
             }
             Text(OnboardingCopy.noTherapeuticWrites).font(.subheadline).foregroundStyle(.primary).accessibilityIdentifier(OnboardingIdentifier.noTherapeuticWrites)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(OnboardingCopy.monitoringLimitsTitle).font(.subheadline.weight(.semibold))
+                ForEach(OnboardingCopy.monitoringLimits, id: \.self) { Text($0).font(.subheadline).foregroundStyle(.primary) }
+            }.padding(12).frame(maxWidth: .infinity, alignment: .leading).background(.fill.tertiary, in: RoundedRectangle(cornerRadius: 12)).accessibilityElement(children: .combine).accessibilityIdentifier(OnboardingIdentifier.monitoringLimits)
         }
     }
     private var backend: some View {
@@ -88,7 +92,7 @@ public struct OnboardingFlowView: View {
                 Text(result.text).font(.subheadline).foregroundStyle(result.isSuccess ? StatusColor.primary.swiftUIColor(colorScheme) : StatusColor.error.swiftUIColor(colorScheme)).accessibilityIdentifier(OnboardingIdentifier.connectionResult)
             }
             Text(OnboardingCopy.escapePrompt).font(.subheadline).foregroundStyle(.primary).frame(maxWidth: .infinity)
-            Button(OnboardingCopy.continueWithoutServer) { model.continueWithoutServer() }.buttonStyle(.borderless).frame(maxWidth: .infinity).accessibilityIdentifier(OnboardingIdentifier.continueWithoutServer)
+            Button(OnboardingCopy.continueWithoutServer) { _ = model.continueWithoutServer() }.buttonStyle(.borderless).frame(maxWidth: .infinity).accessibilityIdentifier(OnboardingIdentifier.continueWithoutServer)
         }
     }
     private var signIn: some View {
