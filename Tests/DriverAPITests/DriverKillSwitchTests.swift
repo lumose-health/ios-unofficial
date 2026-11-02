@@ -19,7 +19,7 @@ struct DriverKillSwitchTests {
         ]
         for id in appConfigurationIDs {
             let line = try #require(project.components(separatedBy: .newlines).first { $0.contains("\(id) = {isa = XCBuildConfiguration") })
-            #expect(line.contains(condition) == enabledValue, "\(id) must agree with Package.swift")
+            #expect(activeConditions(in: line).contains(condition) == enabledValue, "\(id) must agree with Package.swift")
         }
 
         let gatedDrivers = [(condition: condition, target: "TraceReplayDriver")]
@@ -29,4 +29,24 @@ struct DriverKillSwitchTests {
                     "\(gate.condition) must name a declared Driver target")
         }
     }
+
+    @Test func conditionMatchingUsesWholeTokensInTheConditionsSetting() {
+        let condition = "TRACE_REPLAY_DRIVER_ENABLED"
+        #expect(activeConditions(in: #"SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG TRACE_REPLAY_DRIVER_ENABLED";"#).contains(condition))
+        #expect(activeConditions(in: "SWIFT_ACTIVE_COMPILATION_CONDITIONS = TRACE_REPLAY_DRIVER_ENABLED;").contains(condition))
+        #expect(!activeConditions(in: "SWIFT_ACTIVE_COMPILATION_CONDITIONS = TRACE_REPLAY_DRIVER_ENABLED_EXTRA;").contains(condition))
+        #expect(!activeConditions(in: "OTHER_SWIFT_FLAGS = TRACE_REPLAY_DRIVER_ENABLED; SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;").contains(condition))
+        #expect(activeConditions(in: "SWIFT_VERSION = 6.0;").isEmpty)
+    }
+}
+
+/// The whitespace-separated tokens of the line's `SWIFT_ACTIVE_COMPILATION_CONDITIONS`
+/// setting, quoted or not. Empty when the line has no such setting.
+private func activeConditions(in line: String) -> Set<String> {
+    let key = "SWIFT_ACTIVE_COMPILATION_CONDITIONS = "
+    guard let start = line.range(of: key) else { return [] }
+    let rest = line[start.upperBound...]
+    guard let end = rest.firstIndex(of: ";") else { return [] }
+    let value = rest[..<end].trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+    return Set(value.split(separator: " ").map(String.init))
 }
