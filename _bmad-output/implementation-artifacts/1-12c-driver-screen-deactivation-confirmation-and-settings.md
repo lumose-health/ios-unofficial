@@ -19,7 +19,7 @@ max_cycles: 3
 
 # Story 1.12c: Drivers screen, deactivation confirmation and per-Driver settings
 
-Status: review
+Status: done
 
 > Depends on PR #23 being merged; dispatch after merge.
 > PR #23 (`feat/registry-lifecycle`, head b384d41 at writing, already merged with develop @ bf61006)
