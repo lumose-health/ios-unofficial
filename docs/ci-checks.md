@@ -53,4 +53,7 @@ CodeQL has its own runner because it competes with the guard self-tests for
 cores. When both ran on one runner the gate took 30m13s, against 16m40s before
 CodeQL was added: the traced build, which runs under Rosetta, took about 23
 minutes and the guard self-tests stretched from about 16.5 to 29.8 minutes.
-With separate jobs the gate takes as long as the slower of the two.
+With separate jobs the gate takes as long as the slower of the two: the first
+split run took 22m34s (CodeQL 22m11s, guards and secrets 19m59s), about six
+minutes more than before CodeQL was added. Almost all of that is the traced
+build under Rosetta, which is accepted as the cost of analysing the Swift code.
