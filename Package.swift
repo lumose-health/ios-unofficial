@@ -34,6 +34,7 @@ let package = Package(
         .library(name: "Persistence", targets: ["Persistence"]),
         .library(name: "DomainCore", targets: ["DomainCore"]),
         .library(name: "AppFeature", targets: ["AppFeature"]),
+        .library(name: "TandemWire", targets: ["TandemWire"]),
     ],
     // The workspace's first and only external dependency (AD-6).
     //
@@ -92,6 +93,19 @@ let package = Package(
         .testTarget(
             name: "SimulatedDriverTests",
             dependencies: ["SimulatedDriver", "DriverAPI", "SafetyCore"],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        // Both device readers share these decoders outside Drivers; their
+        // dependency closure stays within DriverAPI and SafetyCore (AD-3).
+        .target(
+            name: "TandemWire",
+            dependencies: ["DriverAPI", "SafetyCore"],
+            path: "Sources/Wire/Tandem",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .testTarget(
+            name: "TandemWireTests",
+            dependencies: ["TandemWire", "DriverAPI", "SafetyCore"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         // The on-device store, and the ONLY target allowed to see GRDB. Keeping

@@ -269,7 +269,7 @@ FIXED_CAST_TARGETS="Driver CapabilityPort"
 # The two trees a Driver's code can live in. DriverAPI is included because the
 # contract is where a write member would do the most damage: one there is
 # inherited by every Driver at once.
-SCAN_DIRS="Sources/DriverAPI Sources/Drivers"
+SCAN_DIRS="Sources/DriverAPI Sources/Drivers Sources/Wire"
 
 # ---------------------------------------------------------------------------
 # The deny-list: `words|why`, records separated by `;`.
@@ -903,7 +903,10 @@ self_test_add_catalog_entry() {
 self_test_symbol() {
     local name="$1" expect="$2" where="$3" payload="$4" tmp
     tmp=$(self_test_scratch)
-    if [ "$where" = "driver" ]; then
+    if [ "$where" = "wire" ]; then
+        mkdir -p "$tmp/Sources/Wire/Probe"
+        printf 'import Foundation\n%s\n' "$payload" > "$tmp/Sources/Wire/Probe/GuardProbe.swift"
+    elif [ "$where" = "driver" ]; then
         self_test_add_driver_target "$tmp" "Probe" "$payload"
         self_test_add_catalog_entry "$tmp" "Probe"
     else
@@ -1036,6 +1039,7 @@ self_test() {
 
     run_case self_test_symbol "deliver-verb-in-driver-api" FAIL api 'func deliverDose() {}'
     run_case self_test_symbol "deliver-verb-in-driver-target" FAIL driver 'func deliverDose() {}'
+    run_case self_test_symbol "deliver-verb-in-wire-target" FAIL wire 'func deliverDose() {}'
     run_case self_test_symbol "bolus-command-in-driver-target" FAIL driver 'func startBolus() {}'
     run_case self_test_symbol "bare-bolus-identifier" FAIL driver 'let bolus = 1'
     run_case self_test_symbol "set-basal-pair" FAIL driver 'func setBasalRate(_ rate: Double) {}'
