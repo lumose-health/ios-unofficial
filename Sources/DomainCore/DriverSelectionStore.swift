@@ -4,6 +4,7 @@ import Foundation
 public protocol DriverSelectionStore: Sendable {
     func load() throws(DriverSelectionStoreFailure) -> Set<String>
     func save(_ ids: Set<String>) throws(DriverSelectionStoreFailure)
+    func hasSavedSelection() -> Bool
 }
 
 public enum DriverSelectionStoreFailure: Error, Hashable, Sendable {
@@ -27,6 +28,10 @@ public struct FileDriverSelectionStore: DriverSelectionStore {
     public let fileURL: URL
 
     public init(fileURL: URL) { self.fileURL = fileURL }
+
+    public func hasSavedSelection() -> Bool {
+        FileManager.default.fileExists(atPath: fileURL.path)
+    }
 
     private struct SelectionFile: Codable {
         let activeDriverIDs: [String]

@@ -35,10 +35,15 @@ final class RecordingSelectionStore: DriverSelectionStore, @unchecked Sendable {
     private let lock = NSLock()
     private var ids: Set<String>
     private var saves: [Set<String>] = []
+    private var savedSelection: Bool
     var loadFailure: DriverSelectionStoreFailure?
     var saveFailure: DriverSelectionStoreFailure?
 
-    init(_ ids: Set<String> = []) { self.ids = ids }
+    init(_ ids: Set<String> = [], hasSavedSelection: Bool = true) {
+        self.ids = ids
+        self.savedSelection = hasSavedSelection
+    }
+    func hasSavedSelection() -> Bool { lock.withLock { savedSelection } }
     var savedSets: [Set<String>] { lock.withLock { saves } }
     var current: Set<String> { lock.withLock { ids } }
 
@@ -53,6 +58,7 @@ final class RecordingSelectionStore: DriverSelectionStore, @unchecked Sendable {
         defer { lock.unlock() }
         if let saveFailure { throw saveFailure }
         self.ids = ids
+        savedSelection = true
         saves.append(ids)
     }
 }

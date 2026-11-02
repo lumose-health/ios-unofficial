@@ -257,10 +257,10 @@ struct PackageManifestTests {
         ]))
     }
 
-    @Test("AppFeature depends on exactly SafetyCore and DriverAPI")
+    @Test("AppFeature depends on exactly SafetyCore, DriverAPI and DomainCore")
     func appFeatureDependencies() throws {
         let arguments = try #require(Self.targetArguments(named: "AppFeature", in: try Self.manifestSource()))
-        #expect(arguments.contains("dependencies:[\"SafetyCore\",\"DriverAPI\"]"))
+        #expect(arguments.contains("dependencies:[\"SafetyCore\",\"DriverAPI\",\"DomainCore\"]"))
     }
 
     @Test("DomainCore depends on exactly SafetyCore and DriverAPI")

@@ -118,16 +118,15 @@ let package = Package(
             dependencies: ["DomainCore", "DriverAPI", "SafetyCore"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
-        // AppFeature owns presentation and hosting; its dependency ceiling keeps
-        // device composition in the thin application target.
+        // AppFeature owns presentation and reads the registry; the application target composes devices.
         .target(
             name: "AppFeature",
-            dependencies: ["SafetyCore", "DriverAPI"],
+            dependencies: ["SafetyCore", "DriverAPI", "DomainCore"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .testTarget(
             name: "AppFeatureTests",
-            dependencies: ["AppFeature", "DriverAPI", "SafetyCore"],
+            dependencies: ["AppFeature", "DriverAPI", "SafetyCore", "DomainCore"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
     ]

@@ -46,13 +46,15 @@ public struct RestoreReport: Equatable, Sendable {
 /// Owns lifecycle transitions and the persisted active selection.
 public actor DriverRegistry {
     private let drivers: [DriverIdentifier: any Driver]
-    private let descriptors: [DriverDescriptor]
+    public nonisolated let descriptors: [DriverDescriptor]
+    public nonisolated let initialSlots: DriverSlots
     private let store: any DriverSelectionStore
     private var persisted: Set<String>
     private var loadFailure: DriverSelectionStoreFailure?
     private var lifecycles: [DriverIdentifier: DriverLifecycle]
     private var isBusy = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var observers: [UUID: AsyncStream<Void>.Continuation] = [:]
     #if DEBUG
     private var onEnqueue: (@Sendable () -> Void)?
     private var transitionFault: (@Sendable (DriverIdentifier, DriverLifecycleState) -> DriverFailure?)?
@@ -70,11 +72,15 @@ public actor DriverRegistry {
         self.lifecycles = Dictionary(uniqueKeysWithValues: byID.keys.map { ($0, DriverLifecycle()) })
         self.store = store
         do {
-            self.persisted = try store.load()
+            let loaded = try store.load()
+            self.persisted = loaded
             self.loadFailure = nil
+            let known = Set(byID.keys.filter { loaded.contains($0.rawValue) })
+            self.initialSlots = DriverSlots.derive(active: known, descriptors: self.descriptors)
         } catch {
             self.persisted = []
             self.loadFailure = error
+            self.initialSlots = DriverSlots.derive(active: [], descriptors: self.descriptors)
         }
     }
 
@@ -90,8 +96,48 @@ public actor DriverRegistry {
 
     public var persistedSelection: Set<String> { persisted }
 
+    /// Yields after any lifecycle transition or selection save. Consecutive
+    /// changes may coalesce into one element, so an observer re-reads the state
+    /// it cares about rather than counting elements.
+    public func changes() -> AsyncStream<Void> {
+        let (stream, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        let id = UUID()
+        observers[id] = continuation
+        continuation.onTermination = { [weak self] _ in
+            Task { await self?.removeObserver(id) }
+        }
+        return stream
+    }
+
+    private func removeObserver(_ id: UUID) { observers[id] = nil }
+
+    private func notifyChanged() {
+        for continuation in observers.values { continuation.yield() }
+    }
+
     public func lifecycleState(of id: DriverIdentifier) -> DriverLifecycleState? {
         lifecycles[id]?.state
+    }
+
+    /// Reads one selected slot without waiting for lifecycle operations on other Drivers.
+    public func port(for capability: Capability) async throws(CapabilityReadError) -> HeldPort {
+        guard capability.cardinality == .singleInstance else { throw .notSingleInstance(capability) }
+        while true {
+            if Task.isCancelled { throw .cancelled }
+            guard let holder = slots.holder(of: capability) else { throw .noActiveDriver(capability) }
+            let state = lifecycles[holder]?.state ?? .notActivated
+            guard state == .active || state == .degraded else {
+                throw .holderNotRunning(holder, capability, state)
+            }
+            guard let driver = drivers[holder] else { throw .noActiveDriver(capability) }
+            let port = await driver.capability(capability)
+            if Task.isCancelled { throw .cancelled }
+            let currentState = lifecycles[holder]?.state ?? .notActivated
+            guard slots.holder(of: capability) == holder,
+                  currentState == .active || currentState == .degraded else { continue }
+            guard let port, port.capability == capability else { throw .portUnavailable(holder, capability) }
+            return HeldPort(holder: holder, port: port)
+        }
     }
 
     #if DEBUG
@@ -126,12 +172,14 @@ public actor DriverRegistry {
         do { try lifecycle.advance(to: next) }
         catch { throw .lifecycle(error) }
         lifecycles[id] = lifecycle
+        notifyChanged()
     }
 
     private func save(_ ids: Set<String>) throws(DriverRegistryError) {
         do { try store.save(ids) }
         catch { throw .persistenceFailed(error) }
         persisted = ids
+        notifyChanged()
     }
 
     private func tearDown(_ id: DriverIdentifier) async throws(DriverRegistryError) {
