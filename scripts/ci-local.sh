@@ -131,7 +131,8 @@ composite_secrets() {
   local file line
   if [[ ! -d .github/actions ]]; then echo 'composite-secrets: .github/actions is absent'; return 0; fi
   while IFS= read -r file; do
-    while IFS= read -r line; do
+    # The -n test keeps a last line that has no trailing newline.
+    while IFS= read -r line || [ -n "$line" ]; do
       [[ "$line" =~ ^[[:space:]]*# ]] && continue
       if [[ "$line" =~ \$\{\{[[:space:]]*secrets\. ]]; then fail "$file: composite action secrets reference"; return 1; fi
     done < "$file"
@@ -389,6 +390,8 @@ self_test() {
   (cd "$fixture/secrets"; assert_case composite-hit fail 'composite action secrets reference' composite_secrets)
   printf 'name: test\nrun: ${{secrets.TIGHT}}\n' > "$fixture/secrets/.github/actions/action.yml"
   (cd "$fixture/secrets"; assert_case composite-hit-unspaced fail 'composite action secrets reference' composite_secrets)
+  printf 'name: test\nrun: ${{ secrets.NO_NEWLINE }}' > "$fixture/secrets/.github/actions/action.yml"
+  (cd "$fixture/secrets"; assert_case composite-hit-no-newline fail 'composite action secrets reference' composite_secrets)
   rm -rf "$fixture/secrets/.github/actions"
   (cd "$fixture/secrets"; assert_case composite-absent pass '' composite_secrets)
   assert_case missing-actionlint fail 'actionlint 1.7.7 is required' env PATH=/usr/bin:/bin "$BASH" "$ROOT/scripts/ci-local.sh" workflow-lint

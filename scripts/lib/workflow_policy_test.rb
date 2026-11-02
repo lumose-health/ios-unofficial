@@ -15,13 +15,19 @@ module PolicyTest
     target
   end
 
-  def self.mutate(dir, file, label, expected)
+  def self.mutate(dir, file, label, expected, allow = WorkflowPolicy::SHELL_OVERRIDES)
     target = copy_fixture(dir)
     path = File.join(target, file)
     doc = YAML.safe_load(File.read(path), aliases: false)
     yield doc
     File.write(path, YAML.dump(doc))
-    check(label, expected, WorkflowPolicy.policy(target))
+    errors = WorkflowPolicy.policy(target, allow)
+    if expected.nil?
+      raise "#{label}: expected no errors, got #{errors.inspect}" unless errors.empty?
+      puts "self-test: #{label}: pass"
+    else
+      check(label, expected, errors)
+    end
     FileUtils.rm_rf(target)
   end
 
@@ -34,6 +40,23 @@ module PolicyTest
       mutate(dir, 'static-analysis.yml', 'missing-roster', 'Static Analysis Gate: expected exactly one') { |doc| doc['jobs'].clear }
       mutate(dir, 'static-analysis.yml', 'duplicate-roster', 'Static Analysis Gate: expected exactly one') { |doc| doc['jobs']['copy'] = doc['jobs']['static-analysis'].dup }
       mutate(dir, 'static-analysis.yml', 'required-continue-on-error', 'continue-on-error forbidden') { |doc| doc['jobs']['static-analysis']['continue-on-error'] = true }
+      mutate(dir, 'static-analysis.yml', 'required-step-continue-on-error', 'continue-on-error forbidden on step 1') { |doc| doc['jobs']['static-analysis']['steps'][1]['continue-on-error'] = true }
+      mutate(dir, 'dependency-scan.yml', 'gate-step-continue-on-error', 'continue-on-error forbidden on step 1') { |doc| doc['jobs']['dependency-gate']['steps'][1]['continue-on-error'] = true }
+      mutate(dir, 'dependency-scan.yml', 'needed-job-continue-on-error', 'osv: continue-on-error forbidden on a job Dependency Scan Gate needs') { |doc| doc['jobs']['osv']['continue-on-error'] = true }
+      mutate(dir, 'ios.yml', 'detect-job-continue-on-error', 'detect-changes: continue-on-error forbidden on a job iOS Gate needs') { |doc| doc['jobs']['detect-changes']['continue-on-error'] = true }
+      mutate(dir, 'ios.yml', 'needed-step-continue-on-error', 'build: continue-on-error forbidden on step 2') { |doc| doc['jobs']['build']['steps'][2]['continue-on-error'] = true }
+      mutate(dir, 'dependency-scan.yml', 'transitive-needs-continue-on-error', 'prep: continue-on-error forbidden on a job Dependency Scan Gate needs') do |doc|
+        doc['jobs']['prep'] = { 'runs-on' => 'ubuntu-latest', 'timeout-minutes' => 5, 'continue-on-error' => true, 'steps' => [{ 'run' => 'true' }] }
+        doc['jobs']['osv']['needs'] = ['detect-dependencies', 'prep']
+      end
+      mutate(dir, 'ios.yml', 'unneeded-job-continue-on-error', nil) { |doc| doc['jobs']['ui-tests']['continue-on-error'] = true }
+      mutate(dir, 'dependency-scan.yml', 'gate-verdict-step-if', 'gate-verdict step must not have if') { |doc| doc['jobs']['dependency-gate']['steps'].last['if'] = 'success()' }
+      mutate(dir, 'static-analysis.yml', 'workflow-default-shell', 'static-analysis.yml:defaults: shell or working-directory override') { |doc| doc['defaults'] = { 'run' => { 'shell' => 'sh' } } }
+      mutate(dir, 'ios.yml', 'job-default-workdir', 'ios.yml:ios-gate.defaults: shell or working-directory override') { |doc| doc['jobs']['ios-gate']['defaults'] = { 'run' => { 'working-directory' => 'scripts' } } }
+      mutate(dir, 'workflow-lint.yml', 'step-shell', 'workflow-lint.yml:workflow-lint.steps[2]: shell or working-directory override') { |doc| doc['jobs']['workflow-lint']['steps'][2]['shell'] = 'sh' }
+      mutate(dir, 'dependency-scan.yml', 'step-workdir', 'dependency-scan.yml:osv.steps[1]: shell or working-directory override') { |doc| doc['jobs']['osv']['steps'][1]['working-directory'] = 'scripts' }
+      mutate(dir, 'static-analysis.yml', 'allowlisted-shell', nil, { 'static-analysis.yml:defaults' => 'needs POSIX sh for the fixture' }) { |doc| doc['defaults'] = { 'run' => { 'shell' => 'sh' } } }
+      mutate(dir, 'static-analysis.yml', 'allowlist-blank-reason', 'static-analysis.yml:defaults: shell or working-directory override', { 'static-analysis.yml:defaults' => ' ' }) { |doc| doc['defaults'] = { 'run' => { 'shell' => 'sh' } } }
       mutate(dir, 'static-analysis.yml', 'unconditional-if', 'unconditional check has if or needs') { |doc| doc['jobs']['static-analysis']['if'] = 'always()' }
       mutate(dir, 'dependency-scan.yml', 'aggregation-if', 'requires if: always()') { |doc| doc['jobs']['dependency-gate']['if'] = 'success()' }
       mutate(dir, 'dependency-scan.yml', 'aggregation-needs', 'requires detect and work needs') { |doc| doc['jobs']['dependency-gate']['needs'] = ['osv'] }

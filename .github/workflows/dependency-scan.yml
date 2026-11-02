@@ -9,8 +9,11 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: dependency-scan-${{ github.ref }}
-  cancel-in-progress: true
+  # Pull requests share one group per ref so a new push cancels the stale run.
+  # Push, schedule and dispatch runs get their own group and are never cancelled,
+  # so every commit that lands on develop or main is checked.
+  group: dependency-scan-${{ github.ref }}-${{ github.event_name == 'pull_request' && 'pr' || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   detect-dependencies:
     name: Detect Dependency Changes
@@ -29,10 +32,13 @@ jobs:
         if: github.event_name == 'push' || github.event_name == 'pull_request'
         id: filter
         with:
+          # Pushes compare against the previous commit on the same branch;
+          # pull requests ignore base and use the PR diff.
+          base: ${{ github.ref }}
           filters: |
             deps:
               - 'Package.swift'
-              - 'Package.resolved'
+              - '**/Package.resolved'
               - '**/Podfile.lock'
               - '**/*.xcodeproj/project.pbxproj'
               - 'osv-scanner.toml'

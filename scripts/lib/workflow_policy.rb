@@ -8,6 +8,10 @@ module WorkflowPolicy
   ROSTER = ['Static Analysis Gate', 'Dependency Scan Gate', 'Workflow Lint', 'Workflow Security', 'iOS Gate'].freeze
   AGGREGATE = ['Dependency Scan Gate', 'iOS Gate'].freeze
   NEEDS = { 'Dependency Scan Gate' => ['detect-dependencies', 'osv'], 'iOS Gate' => ['detect-changes', 'build'] }.freeze
+  # A shell or working-directory override in a roster workflow changes how
+  # every gate command runs. Each allowed override is listed here by
+  # 'file:location' (as the policy error prints it) with a non-empty reason.
+  SHELL_OVERRIDES = {}.freeze
   SOURCE = { 'Static Analysis Gate' => 'static-analysis.yml', 'Dependency Scan Gate' => 'dependency-scan.yml', 'Workflow Lint' => 'workflow-lint.yml', 'Workflow Security' => 'workflow-security.yml', 'iOS Gate' => 'ios.yml' }.freeze
 
   def self.load_yaml(file, errors)
@@ -37,7 +41,44 @@ module WorkflowPolicy
     end
   end
 
-  def self.policy(dir)
+  def self.needs_of(job)
+    needs = job.is_a?(Hash) ? job['needs'] : nil
+    needs.is_a?(Array) ? needs.map(&:to_s) : (needs ? [needs.to_s] : [])
+  end
+
+  # Every job a roster job depends on, directly or through other jobs.
+  def self.upstream(jobs, id)
+    seen = []
+    queue = needs_of(jobs[id])
+    until queue.empty?
+      dep = queue.shift
+      next if seen.include?(dep)
+      seen << dep
+      queue.concat(needs_of(jobs[dep]))
+    end
+    seen
+  end
+
+  def self.shell_overrides(file, doc, allow, errors)
+    locations = []
+    locations << ['defaults', doc['defaults']]
+    (doc['jobs'] || {}).each do |id, job|
+      next unless job.is_a?(Hash)
+      locations << ["#{id}.defaults", job['defaults']]
+      (job['steps'] || []).each_with_index do |step, index|
+        locations << ["#{id}.steps[#{index}]", { 'run' => step }] if step.is_a?(Hash)
+      end
+    end
+    locations.each do |location, defaults|
+      run = defaults.is_a?(Hash) ? defaults['run'] : nil
+      next unless run.is_a?(Hash) && (run.key?('shell') || run.key?('working-directory'))
+      key = "#{File.basename(file)}:#{location}"
+      next unless allow[key].to_s.strip.empty?
+      errors << "#{key}: shell or working-directory override needs an allowlisted reason"
+    end
+  end
+
+  def self.policy(dir, allow = SHELL_OVERRIDES)
     errors = []
     found = Hash.new { |hash, key| hash[key] = [] }
     files = Dir.glob(File.join(dir, '*.{yml,yaml}')).sort
@@ -61,6 +102,7 @@ module WorkflowPolicy
         errors << "#{file}: missing jobs"
         next
       end
+      shell_overrides(file, doc, allow, errors) if SOURCE.value?(File.basename(file))
       jobs.each do |id, job|
         next unless job.is_a?(Hash)
         name = job['name']
@@ -81,6 +123,17 @@ module WorkflowPolicy
         errors << "#{file}:#{id}: wrong workflow for #{name}" unless File.basename(file) == SOURCE[name]
         errors << "#{file}:#{id}: pull_request trigger missing" unless pr
         errors << "#{file}:#{id}: continue-on-error forbidden" if job.key?('continue-on-error')
+        ([id] + upstream(jobs, id)).each do |dep|
+          upstream_job = jobs[dep]
+          unless upstream_job.is_a?(Hash)
+            errors << "#{file}:#{id}: needs unknown job #{dep}"
+            next
+          end
+          errors << "#{file}:#{dep}: continue-on-error forbidden on a job #{name} needs" if dep != id && upstream_job.key?('continue-on-error')
+          (upstream_job['steps'] || []).each_with_index do |step, index|
+            errors << "#{file}:#{dep}: continue-on-error forbidden on step #{index}" if step.is_a?(Hash) && step.key?('continue-on-error')
+          end
+        end
         if AGGREGATE.include?(name)
           value = job['if'].to_s.gsub(/\A\$\{\{\s*|\s*\}\}\z/, '').strip
           errors << "#{file}:#{id}: requires if: always()" unless value == 'always()'
@@ -89,6 +142,7 @@ module WorkflowPolicy
           verdict = (job['steps'] || []).find { |step| step.is_a?(Hash) && step['run'].to_s.strip == 'bash scripts/ci-local.sh gate-verdict' }
           errors << "#{file}:#{id}: missing gate-verdict step" unless verdict
           if verdict
+            errors << "#{file}:#{id}: gate-verdict step must not have if" if verdict.key?('if')
             env = verdict['env'] || {}
             %w[DETECT_RESULT SHOULD_BUILD WORK_RESULT EVENT_NAME GATE_NAME].each { |key| errors << "#{file}:#{id}: missing #{key} env" unless env.key?(key) }
           end
