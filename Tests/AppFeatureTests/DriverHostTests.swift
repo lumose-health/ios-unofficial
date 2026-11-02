@@ -452,7 +452,8 @@ struct DriverHostTests {
         #expect(model.latestGlucose == nil)
         // The held sequence stopped after its pump read and never read glucose.
         #expect(await driver.readCounts == (0, 1))
-        #expect(model.source == .noActiveDriver)
+        // The reconnect after the registry change runs in its own task, so wait for it to settle.
+        #expect(await eventually { model.source == .noActiveDriver })
         #expect(model.ports == nil)
     }
 
