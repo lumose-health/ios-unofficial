@@ -12,8 +12,8 @@ struct DriverCatalogTests {
     /// registration here.
     @Test("The catalog registers the Simulated Driver, the first Driver to ship")
     func catalogRegistersSimulatedDriver() throws {
-        #expect(DriverCatalog.entries.count == 1)
-        #expect(DriverCatalog.rows().count == 1)
+        #expect(DriverCatalog.entries.count == 2)
+        #expect(DriverCatalog.rows().count == 2)
         let entry = try #require(DriverCatalog.entries.first)
         #expect(entry.targetName == "SimulatedDriver")
         #expect(entry.transport == .inProcess)
@@ -32,8 +32,16 @@ struct DriverCatalogTests {
         let simulated = try #require(DriverIdentifier("com.glycemicgpt.simulated"))
         #expect(DriverCatalog.entry(for: simulated)?.targetName == "SimulatedDriver")
 
+        let trace = try #require(DriverIdentifier("com.glycemicgpt.trace-replay"))
+        let traceEntry = try #require(DriverCatalog.entry(for: trace))
+        #expect(traceEntry.targetName == "TraceReplayDriver")
+        #expect(traceEntry.displayName == "Trace-Replay Driver")
+        #expect(traceEntry.transport == .inProcess)
+        #expect(traceEntry.version == "1.0.0")
+        #expect(traceEntry.capabilities == [.glucoseSource, .insulinSource])
+        #expect(traceEntry.verification == .beta)
         for capability in [Capability.glucoseSource, .insulinSource] {
-            #expect(DriverCatalog.entries(providing: capability).map(\.targetName) == ["SimulatedDriver"])
+            #expect(DriverCatalog.entries(providing: capability).map(\.targetName) == ["SimulatedDriver", "TraceReplayDriver"])
         }
         for capability in Capability.allCases where capability != .glucoseSource && capability != .insulinSource {
             #expect(DriverCatalog.entries(providing: capability).isEmpty, "\(capability)")

@@ -35,6 +35,7 @@ let package = Package(
         .library(name: "DomainCore", targets: ["DomainCore"]),
         .library(name: "AppFeature", targets: ["AppFeature"]),
         .library(name: "TandemWire", targets: ["TandemWire"]),
+        .library(name: "TraceReplayDriver", targets: ["TraceReplayDriver"]),
     ],
     // The workspace's first and only external dependency (AD-6).
     //
@@ -106,6 +107,20 @@ let package = Package(
         .testTarget(
             name: "TandemWireTests",
             dependencies: ["TandemWire", "DriverAPI", "SafetyCore"],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .target(
+            name: "TraceReplayDriver",
+            dependencies: ["DriverAPI", "SafetyCore", "TandemWire"],
+            path: "Sources/Drivers/TraceReplay",
+            exclude: ["README.md"],
+            resources: [.copy("Traces")],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .testTarget(
+            name: "TraceReplayDriverTests",
+            dependencies: ["TraceReplayDriver", "DriverAPI", "SafetyCore", "TandemWire"],
+            resources: [.copy("Traces")],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         // The on-device store, and the ONLY target allowed to see GRDB. Keeping

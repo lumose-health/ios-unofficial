@@ -1,0 +1,26 @@
+{
+  "format": "glycemicgpt-trace",
+  "version": 1,
+  "vendor": "tandem",
+  "description": "Synthesized Tandem current-status session: CGM EGV and Control-IQ IOB responses covering the egvStatusId gate, the IOB selector byte and absolute-bound rejection.",
+  "pumpTimeZone": "America/Chicago",
+  "provenance": {
+    "source": "synthesized",
+    "method": "Every value invented; no capture was used. Frames built from the documented cargo layouts with CRC-16/CCITT-FALSE.",
+    "reviewedBy": null
+  },
+  "frames": [
+    {"channel": "currentStatus", "receivedAt": "2025-01-15T14:00:05Z", "notifications": ["000123010880e80d207b000100561f"], "note": "VALID reading"},
+    {"channel": "currentStatus", "receivedAt": "2025-01-15T14:00:07Z", "notifications": ["01026d0211c4090000201c0000b80b0000dc", "00020500000069a7"], "note": "selector 0, Control-IQ off: Mudaliar 2500 mU, Swan-6hr 1500 mU"},
+    {"channel": "currentStatus", "receivedAt": "2025-01-15T14:05:05Z", "notifications": ["0003230308ace90d2083000100ec09"], "note": "VALID reading"},
+    {"channel": "currentStatus", "receivedAt": "2025-01-15T14:05:07Z", "notifications": ["01046d0411c4090000f41a0000b80b0000dc", "0004050000011fa4"], "note": "selector 1, Control-IQ on: Swan-6hr selected"},
+    {"channel": "currentStatus", "receivedAt": "2025-01-15T14:10:05Z", "notifications": ["0005230508d8ea0d20340002001fe8"], "note": "LOW status still carries a value"},
+    {"channel": "currentStatus", "receivedAt": "2025-01-15T14:15:05Z", "notifications": ["000623060804ec0d209a0103008a93"], "note": "HIGH status still carries a value"},
+    {"channel": "currentStatus", "receivedAt": "2025-01-15T14:20:05Z", "notifications": ["000723070830ed0d208c0000004253"], "note": "INVALID status: in range, discarded"},
+    {"channel": "currentStatus", "receivedAt": "2025-01-15T14:25:05Z", "notifications": ["00082308085cee0d2096000400b6fe"], "note": "UNAVAILABLE status: in range, discarded"},
+    {"channel": "currentStatus", "receivedAt": "2025-01-15T14:25:07Z", "notifications": ["01096d0911c4090000c8190000b80b0000dc", "000905000002f6a2"], "note": "unknown selector 2: falls back to Mudaliar"},
+    {"channel": "currentStatus", "receivedAt": "2025-01-15T14:30:05Z", "notifications": ["000a230a0888ef0d200f000100c86b"], "note": "below the absolute bound: rejected, never clamped"},
+    {"channel": "currentStatus", "receivedAt": "2025-01-15T14:35:05Z", "notifications": ["000b230b08b4f00d20620203002286"], "note": "above the absolute bound: rejected, never clamped"},
+    {"channel": "currentStatus", "receivedAt": "2025-01-15T14:40:05Z", "notifications": ["000c230c08e0f10d2076000100e43f"], "note": "VALID reading"}
+  ]
+}

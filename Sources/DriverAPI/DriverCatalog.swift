@@ -16,9 +16,9 @@ import Foundation
 /// one. Nothing here reads a build flag — exclusion happens by removing an entry
 /// and its target together, in one change.
 ///
-/// ## The first entry
+/// ## Entries
 ///
-/// `SimulatedDriver` is the first Driver to ship, and the first
+/// `SimulatedDriver` was the first Driver to ship. Each Driver has one
 /// registration here: `scripts/guards/driver_guards.sh` fails when a target
 /// under `Sources/Drivers/` has no entry here, and when an entry names a
 /// target the manifest does not declare.
@@ -39,6 +39,15 @@ public enum DriverCatalog {
             version: "1.0.0",
             capabilities: [.glucoseSource, .insulinSource],
             verification: .unverified
+        ),
+        DriverDescriptor(
+            identifier: DriverIdentifier("com.glycemicgpt.trace-replay")!,
+            targetName: "TraceReplayDriver",
+            displayName: "Trace-Replay Driver",
+            transport: .inProcess,
+            version: "1.0.0",
+            capabilities: [.glucoseSource, .insulinSource],
+            verification: .beta
         ),
     ]
 
