@@ -56,9 +56,8 @@ public enum StartDestination: Sendable, Equatable {
 
 public enum OnboardingCompletion {
     public static let key = "onboardingComplete"
-    /// This remains true only until onboarding ships; onboarding must then set
-    /// this explicitly, with a migration decision for existing installs.
-    public static let valueWhenUnset = true
+    /// An unset key means onboarding was never finished.
+    public static let valueWhenUnset = false
 
     public static func isComplete(in defaults: UserDefaults) -> Bool {
         defaults.object(forKey: key) == nil ? valueWhenUnset : defaults.bool(forKey: key)

@@ -9,6 +9,7 @@ import DomainCore
 struct GlycemicGPTApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @State private var model: HomeModel
+    @State private var onboarding: OnboardingModel
     private let startDestination: StartDestination
 
     init() {
@@ -24,11 +25,12 @@ struct GlycemicGPTApp: App {
         }
         _model = State(initialValue: HomeModel(registry: registry, awaitStartup: { await startup.value },
                                               demoIdentifiers: [SimulatedDriver.identifier]))
+        _onboarding = State(initialValue: OnboardingModel(backend: UnavailableOnboardingBackend(), authorizations: SystemOnboardingAuthorizations(), defaults: .standard))
     }
 
     var body: some Scene {
         WindowGroup {
-            AppShell(startDestination: startDestination)
+            AppShell(startDestination: startDestination, onboarding: onboarding)
                 .task { await model.setScenePhaseActive(true).value }
             .environment(model)
             .onChange(of: scenePhase) { _, phase in

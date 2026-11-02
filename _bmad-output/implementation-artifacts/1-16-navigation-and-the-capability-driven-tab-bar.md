@@ -19,7 +19,7 @@ max_cycles: 3
 
 # Story 1.16: Navigation and the capability-driven tab bar
 
-Status: review
+Status: done
 
 <!-- Planning note (for the maintainer): depends on 1.13a, 1.13b and 1.14, all merged to develop
 (44934d0). Runs in parallel with 1.15 (pull to refresh); see "Interaction with the pull-to-refresh

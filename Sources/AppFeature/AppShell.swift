@@ -2,23 +2,31 @@ import SwiftUI
 
 public struct AppShell: View {
     private let startDestination: StartDestination
+    private let onboarding: OnboardingModel
 
-    public init(startDestination: StartDestination) {
+    public init(startDestination: StartDestination, onboarding: OnboardingModel) {
         self.startDestination = startDestination
+        self.onboarding = onboarding
     }
 
     public var body: some View {
-        DemoDataBannerRoot { AppRootView(startDestination: startDestination) }
+        DemoDataBannerRoot { AppRootView(startDestination: startDestination, onboarding: onboarding) }
     }
 }
 
 struct AppRootView: View {
-    let startDestination: StartDestination
+    @State private var destination: StartDestination
+    let onboarding: OnboardingModel
+
+    init(startDestination: StartDestination, onboarding: OnboardingModel) {
+        _destination = State(initialValue: startDestination)
+        self.onboarding = onboarding
+    }
 
     var body: some View {
-        switch startDestination {
+        switch destination {
         case .main: MainTabView()
-        case .onboarding: OnboardingPlaceholderView()
+        case .onboarding: OnboardingFlowView(model: onboarding, onFinished: { destination = .main })
         }
     }
 }
@@ -130,13 +138,6 @@ private struct PlaceholderView<Extra: View>: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    }
-}
-
-private struct OnboardingPlaceholderView: View {
-    var body: some View {
-        PlaceholderView(identifier: "placeholder.onboarding", title: nil, messages: ["Setup isn't available in this build yet."])
-            .hideTabBarOnIOS()
     }
 }
 

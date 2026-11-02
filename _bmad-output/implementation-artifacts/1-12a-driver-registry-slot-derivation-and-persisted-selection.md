@@ -17,7 +17,7 @@ gates:
 max_cycles: 3
 ---
 
-Status: review
+Status: done
 
 > **SPLIT. This file is Story 1.12a only: the registry, slot derivation and persistence.**
 > The whole of epics.md Story 1.12 is about 1,800 reviewable lines, well over the 800-line

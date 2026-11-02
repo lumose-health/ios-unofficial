@@ -7,6 +7,11 @@ import UIKit
 import AppKit
 #endif
 
+private struct NavigationAuthorizations: OnboardingAuthorizations {
+    func requestNotificationAuthorization(options: NotificationAuthorizationOptions) async -> NotificationAuthorizationOutcome { .granted }
+    func requestBluetoothAuthorization() async -> BluetoothAuthorizationOutcome { .allowed }
+}
+
 @Suite("App navigation")
 struct AppNavigationTests {
     private var configuredBackend: BackendConfiguration {
@@ -57,7 +62,8 @@ struct AppNavigationTests {
 
         #expect(OnboardingCompletion.key == "onboardingComplete")
         #expect(OnboardingCompletion.isComplete(in: defaults) == OnboardingCompletion.valueWhenUnset)
-        #expect(StartDestination.resolve(onboardingComplete: OnboardingCompletion.isComplete(in: defaults)) == .main)
+        #expect(OnboardingCompletion.valueWhenUnset == false)
+        #expect(StartDestination.resolve(onboardingComplete: OnboardingCompletion.isComplete(in: defaults)) == .onboarding)
 
         OnboardingCompletion.record(true, in: defaults)
         #expect(OnboardingCompletion.isComplete(in: defaults))
@@ -85,8 +91,12 @@ struct AppNavigationTests {
     }
 
     @MainActor @Test func shellKeepsBannerAtRootForBothDestinations() {
-        let mainBody = AppShell(startDestination: .main).body
-        let onboardingBody = AppShell(startDestination: .onboarding).body
+        let suiteName = "AppNavigationShell-\(UUID())"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = OnboardingModel(backend: UnavailableOnboardingBackend(), authorizations: NavigationAuthorizations(), defaults: defaults)
+        let mainBody = AppShell(startDestination: .main, onboarding: model).body
+        let onboardingBody = AppShell(startDestination: .onboarding, onboarding: model).body
         #expect(String(describing: type(of: mainBody)).hasPrefix("DemoDataBannerRoot<"))
         #expect(String(describing: type(of: onboardingBody)).hasPrefix("DemoDataBannerRoot<"))
     }
