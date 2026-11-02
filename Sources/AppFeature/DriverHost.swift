@@ -29,10 +29,14 @@ public struct HomeSourceMessage: Sendable, Equatable {
         self.identifier = identifier
     }
 
-    public static func make(source: HomeSource, displayName: (DriverIdentifier) -> String?) -> Self? {
+    /// `hasCachedGlucose` keeps a reconnect from hiding a reading that is
+    /// already on screen: "Starting…" appears only when nothing is cached.
+    public static func make(source: HomeSource, hasCachedGlucose: Bool = false,
+                            displayName: (DriverIdentifier) -> String?) -> Self? {
         switch source {
         case .connected: return nil
         case .pending:
+            if hasCachedGlucose { return nil }
             return Self(title: "Starting…",
                         body: "Connecting to your data source.",
                         identifier: "home.starting")
@@ -159,6 +163,11 @@ public final class HomeModel {
                 await self.validateConnection()
             }
         }
+    }
+
+    /// What Home shows in place of the dashboard, or nil to show the dashboard.
+    public var sourceMessage: HomeSourceMessage? {
+        HomeSourceMessage.make(source: source, hasCachedGlucose: latestGlucose != nil, displayName: displayName(of:))
     }
 
     public var footerMessage: String? {
@@ -334,7 +343,7 @@ public final class HomeModel {
 
     private func streamEnded(generation: Int) {
         guard generation == connectionGeneration else { return }
-        dropConnection()
+        dropConnection(keepCache: true)
     }
 
     /// Drops the connection when its glucose holder is no longer the running
@@ -346,10 +355,13 @@ public final class HomeModel {
         let state = await registry.lifecycleState(of: ports.identifier)
         guard generation == connectionGeneration, self.ports != nil else { return }
         if holder == ports.identifier, state == .active || state == .degraded { return }
-        dropConnection()
+        dropConnection(keepCache: holder == ports.identifier)
     }
 
-    private func dropConnection() {
+    /// With `keepCache`, the cached values stay on screen at their true age
+    /// while Home reconnects to the same holder. A different holder never
+    /// inherits them, so they are cleared before anything is shown.
+    private func dropConnection(keepCache: Bool) {
         connectionGeneration &+= 1
         refreshGeneration = nil
         foregroundReadSatisfied = false
@@ -357,7 +369,14 @@ public final class HomeModel {
         streamTasks.removeAll()
         ports = nil
         lifecycleState = .notActivated
+        if !keepCache {
+            cacheHolder = nil
+            latestGlucose = nil
+            latestIOB = nil
+            latestPumpStatus = nil
+        }
         source = .pending
+        refreshHero()
         guard wantsActive else { return }
         if connecting { reconnectAfterConnect = true }
         else { Task { [weak self] in await self?.connect() } }

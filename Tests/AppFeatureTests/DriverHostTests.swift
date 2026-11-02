@@ -247,6 +247,7 @@ struct DriverHostTests {
         let message = HomeSourceMessage.make(source: model.source, displayName: model.displayName(of:))
         #expect(message?.identifier == "home.starting")
         #expect(message?.title == "Starting…")
+        #expect(model.sourceMessage?.identifier == "home.starting")
         await gate.release()
         await connecting.value
         #expect(model.source == .connected(driver.descriptor.identifier))
@@ -283,6 +284,56 @@ struct DriverHostTests {
         let older = try glucose(110, at: now.addingTimeInterval(-120))
         await next.emit(older)
         #expect(await eventually { model.latestGlucose == older })
+        await model.setScenePhaseActive(false).value
+    }
+
+    @Test @MainActor func sameHolderReconnectKeepsCachedValuesOnHome() async throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let clock = HostAdjustableClock(now: now)
+        let scheduler = HostManualScheduler()
+        let gate = HostReadGate()
+        let driver = StreamingHostDriver(glucoseReadGate: gate)
+        let id = driver.descriptor.identifier
+        let store = HostSelectionStore([id.rawValue])
+        let registry = try DriverRegistry(drivers: [driver], store: store)
+        let model = HomeModel(registry: registry, awaitStartup: {
+            await DriverStartup.run(registry: registry, store: store, firstLaunchDefault: nil)
+        }, demoIdentifiers: [], clock: clock, scheduler: scheduler, readGap: { _ in })
+        await model.setScenePhaseActive(true).value
+        #expect(model.source == .connected(id))
+
+        let sample = try glucose(120, at: now)
+        let iob = try InsulinOnBoardSample(units: 1.5, calculatedAt: now)
+        let status = try PumpStatusSnapshot(batteryFraction: 0.6, observedAt: now)
+        await driver.emit(sample)
+        await driver.emit(iob)
+        await driver.emit(status)
+        #expect(await eventually {
+            model.latestGlucose == sample && model.latestIOB == iob && model.latestPumpStatus == status
+        })
+
+        // The glucose stream ends while the Driver stays active; the reconnect's
+        // read is held so the in-between state can be checked.
+        await gate.arm()
+        await driver.endGlucoseStream()
+        await gate.waitUntilEntered()
+        #expect(model.source == .pending)
+        #expect(model.sourceMessage == nil)
+        #expect(model.latestGlucose == sample)
+        #expect(model.latestIOB == iob)
+        #expect(model.latestPumpStatus == status)
+        clock.advance(by: 120)
+        await scheduler.tick()
+        #expect(model.heroState.valueText == "120")
+        #expect(model.heroState.ageCaption == "2m ago")
+
+        await gate.release()
+        #expect(await eventually { model.source == .connected(id) })
+        #expect(model.sourceMessage == nil)
+        #expect(model.latestGlucose == sample)
+        #expect(model.latestIOB == iob)
+        #expect(model.latestPumpStatus == status)
+        #expect(await driver.activationCount == 1)
         await model.setScenePhaseActive(false).value
     }
 
@@ -923,18 +974,20 @@ private actor StreamingHostDriver: Driver {
         verification: .unverified
     )
     private let deactivationGate: HostDeactivationGate?
+    private let glucoseReadGate: HostReadGate?
     private(set) var activationCount = 0
     private var glucose = AsyncStream<GlucoseSample>.makeStream()
     private var insulin = AsyncStream<InsulinOnBoardSample>.makeStream()
     private var pump = AsyncStream<PumpStatusSnapshot>.makeStream()
 
-    init(deactivationGate: HostDeactivationGate? = nil) {
+    init(deactivationGate: HostDeactivationGate? = nil, glucoseReadGate: HostReadGate? = nil) {
         self.deactivationGate = deactivationGate
+        self.glucoseReadGate = glucoseReadGate
     }
 
     func capability(_ capability: Capability) -> CapabilityPort? {
         switch capability {
-        case .glucoseSource: .glucoseSource(StreamGlucosePort(readings: glucose.stream))
+        case .glucoseSource: .glucoseSource(StreamGlucosePort(readings: glucose.stream, gate: glucoseReadGate))
         case .insulinSource: .insulinSource(StreamInsulinPort(insulinOnBoard: insulin.stream))
         case .pumpStatus: .pumpStatus(StreamPumpPort(status: pump.stream))
         case .bgmSource, .dataSync, .doseCategoryProvider: nil
@@ -955,6 +1008,13 @@ private actor StreamingHostDriver: Driver {
         await deactivationGate?.enter()
     }
 
+    /// Ends the current glucose stream without deactivating, and gives the
+    /// next connection a fresh one.
+    func endGlucoseStream() {
+        glucose.continuation.finish()
+        glucose = AsyncStream.makeStream()
+    }
+
     func emit(_ sample: GlucoseSample) { glucose.continuation.yield(sample) }
     func emit(_ sample: InsulinOnBoardSample) { insulin.continuation.yield(sample) }
     func emit(_ status: PumpStatusSnapshot) { pump.continuation.yield(status) }
@@ -962,7 +1022,11 @@ private actor StreamingHostDriver: Driver {
 
 private struct StreamGlucosePort: GlucoseSource {
     let readings: AsyncStream<GlucoseSample>
-    func latestReading() async throws(DriverFailure) -> GlucoseSample? { nil }
+    var gate: HostReadGate?
+    func latestReading() async throws(DriverFailure) -> GlucoseSample? {
+        await gate?.holdIfArmed()
+        return nil
+    }
 }
 
 private struct StreamInsulinPort: InsulinSource {

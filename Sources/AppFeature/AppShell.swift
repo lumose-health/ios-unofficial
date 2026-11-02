@@ -66,7 +66,7 @@ struct MainTabView: View {
         switch tab {
         case .home:
             Group {
-                if let message = HomeSourceMessage.make(source: model.source, displayName: model.displayName(of:)) {
+                if let message = model.sourceMessage {
                     VStack(spacing: 12) {
                         Text(message.title).font(.headline)
                         Text(message.body).foregroundStyle(.primary)
