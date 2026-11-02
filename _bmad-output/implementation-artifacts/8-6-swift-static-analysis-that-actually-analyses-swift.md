@@ -323,7 +323,7 @@ xcodebuild build -project Apps/GlycemicGPT/GlycemicGPT.xcodeproj -scheme Glycemi
   `SHELL_OVERRIDES` is empty, so add no `shell:` or `working-directory:`.
 - `.github/workflows/ios.yml` has the Xcode selection step
   (`sudo xcode-select -s "/Applications/Xcode_$(cat .xcode-version).app"`) and
-  `actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1`. Copy both.
+  the SHA-pinned `actions/upload-artifact` step (v7.0.1). Copy both.
 - `.gitignore` already ignores `.build/`.
 
 ### Why these tools and not others
