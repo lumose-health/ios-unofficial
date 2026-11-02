@@ -211,6 +211,9 @@ done
 #                      arm the alert floor. Same caveats as the CGM bands: a
 #                      full round-minute drift (120) is outside it, and an
 #                      unrelated ordinary integer landing in 57...63 is flagged.
+#   alert-floor cooldown ±5% (1710...1890): catches a nearby hand-edited
+#                      re-alarm delay while leaving unrelated durations outside
+#                      the Backend's 30-minute deduplication window alone.
 #                      The FreshnessMonitor tick clamp (2, 30) is deliberately
 #                      NOT pinned here: those are internal cadence tuning, not a
 #                      cross-target alarm gate, and bands around integers that
@@ -230,6 +233,7 @@ CANON_SPEC="$CANON_SPEC;CGM tooStaleAfter (seconds):900:855:945"
 CANON_SPEC="$CANON_SPEC;Pump staleAfter (seconds):900:855:945"
 CANON_SPEC="$CANON_SPEC;Pump tooStaleAfter (seconds):3600:3420:3780"
 CANON_SPEC="$CANON_SPEC;alert-floor max future skew (seconds):60:57:63"
+CANON_SPEC="$CANON_SPEC;alert-floor cooldown (seconds):1800:1710:1890"
 
 # Every spelling of "read the wall clock". A superset of the three AC 4 names:
 # the extras are the same act under another name, and leaving them out would let
@@ -532,6 +536,8 @@ both-named-900-declarations|PASS|
 drifted-cgm-too-stale-after|FAIL|Sources/SafetyCore/GuardProbe.swift|let tooStaleAfterCopy = 890
 dup-alert-floor-skew|FAIL|Sources/SafetyCore/GuardProbe.swift|let duplicateSkew = 60
 drifted-alert-floor-skew|FAIL|Sources/SafetyCore/GuardProbe.swift|let skewCopy = 59
+dup-alert-floor-cooldown|FAIL|Sources/SafetyCore/GuardProbe.swift|let duplicateCooldown = 1800
+drifted-alert-floor-cooldown|FAIL|Sources/SafetyCore/GuardProbe.swift|let cooldownCopy = 1799
 alert-floor-skew-minute-drift-uncaught|PASS|Sources/SafetyCore/GuardProbe.swift|let skewMinuteDrift = 120
 cgm-stale-after-minute-drift-uncaught|PASS|Sources/SafetyCore/GuardProbe.swift|let staleAfterMinuteDrift = 420
 cgm-too-stale-after-minute-drift-uncaught|PASS|Sources/SafetyCore/GuardProbe.swift|let tooStaleAfterMinuteDrift = 840

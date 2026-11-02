@@ -144,7 +144,7 @@ let package = Package(
         ),
         .testTarget(
             name: "DomainCoreTests",
-            dependencies: ["DomainCore", "DriverAPI", "SafetyCore"],
+            dependencies: ["DomainCore", "DriverAPI", "SafetyCore", "SimulatedDriver"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         // AppFeature owns presentation and reads the registry; the application target composes devices.
