@@ -52,6 +52,7 @@ public actor DriverRegistry {
     private var persisted: Set<String>
     private var loadFailure: DriverSelectionStoreFailure?
     private var lifecycles: [DriverIdentifier: DriverLifecycle]
+    private var activationEpochs: [DriverIdentifier: Int] = [:]
     private var isBusy = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
     private var observers: [UUID: AsyncStream<Void>.Continuation] = [:]
@@ -62,9 +63,12 @@ public actor DriverRegistry {
 
     public init(drivers: [any Driver], store: any DriverSelectionStore) throws(DriverRegistryError) {
         var byID: [DriverIdentifier: any Driver] = [:]
+        // Per-Driver files are named from the identifier, and a case-insensitive
+        // volume would let two identifiers differing only in case share one.
+        var folded: Set<String> = []
         for driver in drivers {
             let id = driver.descriptor.identifier
-            guard byID[id] == nil else { throw .duplicateIdentifier(id) }
+            guard folded.insert(id.rawValue.lowercased()).inserted else { throw .duplicateIdentifier(id) }
             byID[id] = driver
         }
         self.drivers = byID
@@ -95,6 +99,17 @@ public actor DriverRegistry {
     }
 
     public var persistedSelection: Set<String> { persisted }
+
+    /// Why the persisted selection could not be loaded, or nil once it has been.
+    /// While this is set, ``persistedSelection`` is empty rather than the saved choice.
+    public var selectionLoadFailure: DriverSelectionStoreFailure? { loadFailure }
+
+    /// Counts how many times a Driver has started activating. A deactivation
+    /// followed by an activation changes it even when an observer sees the two
+    /// as one coalesced change, so ports captured earlier can be told apart.
+    public func activationEpoch(of id: DriverIdentifier) -> Int {
+        activationEpochs[id] ?? 0
+    }
 
     /// Yields after any lifecycle transition or selection save. Consecutive
     /// changes may coalesce into one element, so an observer re-reads the state
@@ -172,6 +187,7 @@ public actor DriverRegistry {
         do { try lifecycle.advance(to: next) }
         catch { throw .lifecycle(error) }
         lifecycles[id] = lifecycle
+        if next == .activating { activationEpochs[id, default: 0] &+= 1 }
         notifyChanged()
     }
 
@@ -285,6 +301,9 @@ public actor DriverRegistry {
             } catch {
                 loadFailure = error
             }
+            // A selection that becomes readable but is empty starts nothing, so
+            // observers would otherwise never learn it can be read again.
+            if loadFailure != failure { notifyChanged() }
         }
         if let loadFailure {
             report.selectionFailure = loadFailure

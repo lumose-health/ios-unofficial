@@ -69,8 +69,13 @@ public enum OnboardingCompletion {
 }
 
 public enum AppRoute: Hashable, CaseIterable, Sendable {
-    case licenses
+    case licenses, drivers
 
-    public var title: String { "Open Source Licenses" }
+    public var title: String {
+        switch self {
+        case .licenses: "Open Source Licenses"
+        case .drivers: "Drivers"
+        }
+    }
     public var hidesTabBar: Bool { true }
 }

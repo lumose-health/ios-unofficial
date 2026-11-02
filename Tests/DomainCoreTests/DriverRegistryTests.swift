@@ -9,6 +9,21 @@ struct DriverRegistryTests {
     private var alphaID: DriverIdentifier { DriverIdentifier("test.pump.alpha")! }
     private var bravoID: DriverIdentifier { DriverIdentifier("test.pump.bravo")! }
 
+    @Test func deactivationPreservesDriverSettingsFile() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let settings = FileDriverSettingsStore(directory: directory)
+        let key = DriverSettingKey("display.mode")!
+        try settings.save(.text("compact"), for: key, driver: alphaID)
+        let driver = TestDriver(id: "test.pump.alpha", capabilities: pump)
+        let registry = try DriverRegistry(drivers: [driver], store: RecordingSelectionStore())
+        try await registry.activate(alphaID)
+        try await registry.deactivate(alphaID)
+        #expect(FileManager.default.fileExists(atPath: directory.appendingPathComponent(alphaID.rawValue + ".json").path))
+        try await registry.activate(alphaID)
+        #expect(settings.settings(for: alphaID).text(for: key) == "compact")
+    }
+
     @Test func swapKeepsSlotOccupied() async throws {
         let a = TestDriver(id: "test.pump.alpha", capabilities: pump)
         let b = TestDriver(id: "test.pump.bravo", capabilities: pump)
@@ -300,6 +315,13 @@ struct DriverRegistryTests {
         let a = TestDriver(id: "test.pump.alpha", capabilities: pump)
         do { _ = try DriverRegistry(drivers: [a, a], store: RecordingSelectionStore()); Issue.record("duplicate accepted") }
         catch { #expect(error == .duplicateIdentifier(alphaID)) }
+    }
+
+    @Test func identifiersDifferingOnlyInCaseFailAtInit() {
+        let a = TestDriver(id: "test.pump.alpha", capabilities: pump)
+        let b = TestDriver(id: "Test.Pump.Alpha", capabilities: pump)
+        do { _ = try DriverRegistry(drivers: [a, b], store: RecordingSelectionStore()); Issue.record("case collision accepted") }
+        catch { #expect(error == .duplicateIdentifier(b.descriptor.identifier)) }
     }
 
     @Test func relaunchRestoresSelectionAndPersistsDeactivation() async throws {

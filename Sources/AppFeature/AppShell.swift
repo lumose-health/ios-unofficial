@@ -65,7 +65,10 @@ struct MainTabView: View {
         NavigationStack(path: pathBinding(for: tab)) {
             tabRoot(tab)
                 .navigationDestination(for: AppRoute.self) { route in
-                    LicenseDestination(route: route)
+                    switch route {
+                    case .licenses: LicenseDestination(route: route)
+                    case .drivers: DriversScreen()
+                    }
                 }
         }
     }
@@ -90,6 +93,8 @@ struct MainTabView: View {
         case .alerts: PlaceholderView(identifier: "placeholder.alerts", title: tab.title, messages: ["Alerts aren't available in this build yet.", "This build does not alert on glucose. Use your CGM's own app or receiver for alarms."])
         case .settings:
             PlaceholderView(identifier: "placeholder.settings", title: tab.title, messages: ["Settings aren't available in this build yet.", "Pump pairing isn't available in this build yet."]) {
+                NavigationLink(value: AppRoute.drivers) { Text("Drivers") }
+                    .accessibilityIdentifier("settings.drivers")
                 NavigationLink(value: AppRoute.licenses) {
                     Text("Open Source Licenses")
                 }
