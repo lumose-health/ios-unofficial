@@ -49,6 +49,15 @@ public enum DriverCatalog {
             capabilities: [.glucoseSource, .insulinSource],
             verification: .beta
         ),
+        DriverDescriptor(
+            identifier: DriverIdentifier("com.glycemicgpt.tandem")!,
+            targetName: "TandemDriver",
+            displayName: "Tandem Insulin Pump",
+            transport: .bluetoothLowEnergy,
+            version: "1.0.0",
+            capabilities: [.glucoseSource, .insulinSource, .pumpStatus],
+            verification: .unverified
+        ),
     ]
 
     /// The entry with this identifier, or `nil`.

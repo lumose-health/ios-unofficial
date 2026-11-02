@@ -2,10 +2,11 @@
 //
 // glycemicgpt-ios-unofficial — package manifest.
 //
-// This manifest grows one target at a time (AD-2). Today it declares SafetyCore,
+// This manifest grows one target at a time (AD-2). It declares SafetyCore,
 // the keystone every later target depends on; DriverAPI, the closed set of
 // Capability ports every Driver implements; SimulatedDriver, the first Driver;
-// Persistence, the on-device store, and DomainCore, the registry. UI and the watch target
+// TandemWire and the Trace-Replay and Tandem Drivers built on it; Persistence, the
+// on-device store, and DomainCore, the registry. UI and the watch target
 // arrive with their own work. Empty scaffolding is deliberately absent — a
 // directory that exists before it has an owner invites drift.
 //
@@ -36,6 +37,7 @@ let package = Package(
         .library(name: "AppFeature", targets: ["AppFeature"]),
         .library(name: "TandemWire", targets: ["TandemWire"]),
         .library(name: "TraceReplayDriver", targets: ["TraceReplayDriver"]),
+        .library(name: "TandemDriver", targets: ["TandemDriver"]),
     ],
     // The workspace's first and only external dependency (AD-6).
     //
@@ -121,6 +123,17 @@ let package = Package(
             name: "TraceReplayDriverTests",
             dependencies: ["TraceReplayDriver", "DriverAPI", "SafetyCore", "TandemWire"],
             resources: [.copy("Traces")],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .target(
+            name: "TandemDriver",
+            dependencies: ["DriverAPI", "SafetyCore", "TandemWire"],
+            path: "Sources/Drivers/Tandem",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .testTarget(
+            name: "TandemDriverTests",
+            dependencies: ["TandemDriver", "DriverAPI", "SafetyCore", "TandemWire"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         // The on-device store, and the ONLY target allowed to see GRDB. Keeping
