@@ -1,3 +1,4 @@
+#if TRACE_REPLAY_DRIVER_ENABLED
 import Foundation
 import DriverAPI
 import TandemWire
@@ -116,3 +117,4 @@ private extension KeyedDecodingContainer where Key == TraceKey {
         guard Set(allKeys.map(\.stringValue)) == keys else { throw TraceFormatError.invalid }
     }
 }
+#endif

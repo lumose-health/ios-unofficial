@@ -1,3 +1,4 @@
+#if TRACE_REPLAY_DRIVER_ENABLED
 import Foundation
 import Testing
 import DriverAPI
@@ -80,3 +81,4 @@ struct TraceFileTests {
         }
     }
 }
+#endif
