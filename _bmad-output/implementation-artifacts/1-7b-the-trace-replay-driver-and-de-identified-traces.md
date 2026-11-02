@@ -19,7 +19,7 @@ max_cycles: 3
 
 # Story 1.7b: The Trace-Replay Driver and de-identified traces
 
-Status: review
+Status: done
 
 <!-- Planning note (for the maintainer): second of three parts of epics.md Story 1.7 (the split is
 explained in 1-7a's planning note). DEPENDS ON 1.7a merged to develop: this Driver replays frames

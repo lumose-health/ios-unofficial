@@ -1,3 +1,4 @@
+#if TRACE_REPLAY_DRIVER_ENABLED
 import Foundation
 import Testing
 import DriverAPI
@@ -235,3 +236,4 @@ struct TraceReplayDriverTests {
         await #expect(throws: DriverFailure.decodeFailed(detail: "trace file")) { try await driver.activate() }
     }
 }
+#endif

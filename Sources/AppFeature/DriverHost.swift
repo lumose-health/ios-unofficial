@@ -565,6 +565,10 @@ public final class HomeModel {
 }
 
 public enum AppComposition {
+    public static func demoIdentifiers(for descriptors: [DriverDescriptor]) -> Set<DriverIdentifier> {
+        Set(descriptors.filter { $0.transport == .inProcess }.map(\.identifier))
+    }
+
     public static var driverSelectionFileURL: URL {
         URL.applicationSupportDirectory.appending(path: "DriverSelection/selection.json")
     }

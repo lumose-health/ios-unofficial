@@ -17,7 +17,7 @@ gates:
 max_cycles: 3
 ---
 
-Status: review
+Status: done
 
 > PR #20 merged 2026-11-01; dispatch now.
 > PR #20 (`feat/driver-registry`): `DomainCore`, `DriverRegistry`, `DriverSlots` and

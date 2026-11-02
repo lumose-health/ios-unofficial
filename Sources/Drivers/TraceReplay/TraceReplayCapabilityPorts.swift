@@ -1,3 +1,4 @@
+#if TRACE_REPLAY_DRIVER_ENABLED
 import Foundation
 import DriverAPI
 
@@ -63,3 +64,4 @@ final class TraceReplayStreams: @unchecked Sendable {
         oldInsulin.finish()
     }
 }
+#endif

@@ -18,7 +18,24 @@
 // requirement and an extra `StrictConcurrency` upcoming-feature flag would be a
 // no-op restating it.
 
+import Foundation
 import PackageDescription
+
+// Turning this off removes Trace-Replay from composition and its resources;
+// composition remains subtractive only. The Xcode app target must carry
+// TRACE_REPLAY_DRIVER_ENABLED exactly when this is true.
+let traceReplayDriverEnabled = true
+// GLYCEMICGPT_ALL_DRIVERS=1 is set only by the every-Driver build in
+// scripts/ci-local.sh, so that build compiles and tests each Driver with its
+// resources whatever the committed switch says. Shipped builds never set it.
+let everyDriverBuild = ProcessInfo.processInfo.environment["GLYCEMICGPT_ALL_DRIVERS"] == "1"
+let traceReplayDriverCompiled = traceReplayDriverEnabled || everyDriverBuild
+let traceReplayDriverSettings: [SwiftSetting] = traceReplayDriverCompiled
+    ? [.define("TRACE_REPLAY_DRIVER_ENABLED")]
+    : []
+let traceReplayDriverResources: [Resource] = traceReplayDriverCompiled
+    ? [.copy("Traces")]
+    : []
 
 let package = Package(
     name: "GlycemicGPT",
@@ -72,12 +89,12 @@ let package = Package(
         .target(
             name: "DriverAPI",
             dependencies: ["SafetyCore"],
-            swiftSettings: [.swiftLanguageMode(.v6)]
+            swiftSettings: [.swiftLanguageMode(.v6)] + traceReplayDriverSettings
         ),
         .testTarget(
             name: "DriverAPITests",
             dependencies: ["DriverAPI", "SafetyCore"],
-            swiftSettings: [.swiftLanguageMode(.v6)]
+            swiftSettings: [.swiftLanguageMode(.v6)] + traceReplayDriverSettings
         ),
         // The first Driver: no device, no network, so everything above the
         // driver boundary is buildable and demonstrable without hardware.
@@ -114,14 +131,14 @@ let package = Package(
             dependencies: ["DriverAPI", "SafetyCore", "TandemWire"],
             path: "Sources/Drivers/TraceReplay",
             exclude: ["README.md"],
-            resources: [.copy("Traces")],
-            swiftSettings: [.swiftLanguageMode(.v6)]
+            resources: traceReplayDriverResources,
+            swiftSettings: [.swiftLanguageMode(.v6)] + traceReplayDriverSettings
         ),
         .testTarget(
             name: "TraceReplayDriverTests",
             dependencies: ["TraceReplayDriver", "DriverAPI", "SafetyCore", "TandemWire"],
-            resources: [.copy("Traces")],
-            swiftSettings: [.swiftLanguageMode(.v6)]
+            resources: traceReplayDriverResources,
+            swiftSettings: [.swiftLanguageMode(.v6)] + traceReplayDriverSettings
         ),
         // The on-device store, and the ONLY target allowed to see GRDB. Keeping
         // the SQL vendor behind one target is what makes it replaceable: a
