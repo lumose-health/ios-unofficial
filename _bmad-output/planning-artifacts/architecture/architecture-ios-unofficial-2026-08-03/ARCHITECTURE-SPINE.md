@@ -7,7 +7,7 @@ paradigm: 'hexagonal (ports and adapters) with an actor-guarded device edge'
 scope: 'iPhone app, Apple Watch app, widget and complication extensions, compile-time-linked pump Drivers, encrypted local store, optional self-hosted Backend'
 status: final
 created: '2026-08-03'
-updated: '2026-11-01'
+updated: '2026-11-02'
 binds: ['FR-1..FR-237', 'SI-1..SI-12', 'NFR-1..NFR-34']
 sources: ['_bmad-output/planning-artifacts/prds/prd-ios-unofficial-2026-08-01/prd.md', '_bmad-output/planning-artifacts/prds/prd-ios-unofficial-2026-08-01/addendum.md']
 companions: []
@@ -75,7 +75,8 @@ graph TD
 
 - **Binds:** all
 - **Prevents:** cyclic graphs; a Driver acquiring its own storage or network path.
-- **Rule:** a Driver may depend **only** on `DriverAPI` and `SafetyCore`. Nothing depends on an app target. The graph above is asserted by a CI check over the resolved package manifest.
+- **Rule:** a Driver may depend **only** on `DriverAPI`, `SafetyCore`, and vendor wire targets under `Sources/Wire/` whose own dependencies are **only** `DriverAPI` and `SafetyCore`. A Driver's transitive closure is therefore always `{DriverAPI, SafetyCore}` plus pure protocol code. A wire target holds parsing, framing and mapping for one vendor's protocol, shared by the Drivers that speak it (for example a live Bluetooth Driver and the Trace-Replay Driver). It never holds storage, networking, Bluetooth or lifecycle. Nothing depends on an app target. The graph above is asserted by a CI check over the resolved package manifest.
+- **Amended 2026-11-02:** wire targets were added so that two Drivers can share one protocol implementation without either one depending on the other, and without widening what a Driver can reach.
 
 ### AD-4 — Swift 6 strict concurrency; the device edge is an actor
 
