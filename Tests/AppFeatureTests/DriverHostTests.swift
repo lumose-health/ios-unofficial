@@ -192,6 +192,57 @@ struct DriverHostTests {
         #expect(await eventually { model.source == .noActiveDriver && model.ports == nil })
     }
 
+    @Test @MainActor func registryReactivationReconnectsWithoutSceneChange() async throws {
+        let sample = GlucoseSample(glucose: try Glucose(mgdl: 120), recordedAt: Date(), trend: .steady)
+        let driver = HostTestDriver(glucoseReads: [.value(sample), .value(sample)])
+        let store = HostSelectionStore([driver.descriptor.identifier.rawValue])
+        let registry = try DriverRegistry(drivers: [driver], store: store)
+        let model = HomeModel(registry: registry, awaitStartup: {
+            await DriverStartup.run(registry: registry, store: store, firstLaunchDefault: nil)
+        }, demoIdentifiers: [driver.descriptor.identifier], scheduler: HostManualScheduler())
+        await model.setScenePhaseActive(true).value
+        #expect(model.source == .connected(driver.descriptor.identifier))
+        try await registry.deactivate(driver.descriptor.identifier)
+        #expect(await eventually { model.source == .noActiveDriver && !model.isDemo })
+        try await registry.activate(driver.descriptor.identifier)
+        #expect(await eventually { model.source == .connected(driver.descriptor.identifier) && model.isDemo && model.latestGlucose == sample })
+        #expect(await driver.activationCount == 2)
+    }
+
+    @Test @MainActor func deactivationDuringHeldActivationReadIsFollowed() async throws {
+        let gate = HostReadGate()
+        let driver = StreamingHostDriver(glucoseReadGate: gate)
+        let id = driver.descriptor.identifier
+        let store = HostSelectionStore([id.rawValue])
+        let registry = try DriverRegistry(drivers: [driver], store: store)
+        let model = HomeModel(registry: registry, awaitStartup: {
+            await DriverStartup.run(registry: registry, store: store, firstLaunchDefault: nil)
+        }, demoIdentifiers: [], scheduler: HostManualScheduler(), readGap: { _ in })
+        await model.setScenePhaseActive(true).value
+        #expect(model.source == .connected(id))
+        try await registry.deactivate(id)
+        #expect(await eventually { model.source == .noActiveDriver && model.ports == nil })
+
+        // The activation-time read is held and never released while Home must
+        // keep following the registry.
+        await gate.arm()
+        try await registry.activate(id)
+        await gate.waitUntilEntered()
+        try await registry.deactivate(id)
+        #expect(await eventually { model.source == .noActiveDriver && model.ports == nil })
+
+        try await registry.activate(id)
+        #expect(await eventually { model.source == .connected(id) && model.ports != nil })
+        #expect(await driver.activationCount == 3)
+
+        // The abandoned read finishing late changes nothing.
+        await gate.release()
+        await driver.emit(try glucose(120, at: Date()))
+        #expect(await eventually { model.latestGlucose != nil })
+        #expect(model.source == .connected(id))
+        await model.setScenePhaseActive(false).value
+    }
+
     @Test @MainActor func transientSelectionLoadFailureShowsWillRetryAndForegroundRestores() async throws {
         let seedTarget = HostTestDriver()
         let selected = StreamingHostDriver()
@@ -218,6 +269,27 @@ struct DriverHostTests {
         // The first-launch default never replaces a selection that was only unreadable.
         #expect(await seedTarget.activationCount == 0)
         #expect(store.savedIDs == [selected.descriptor.identifier.rawValue])
+        await model.setScenePhaseActive(false).value
+    }
+
+    @Test @MainActor func startupFailureStopsApplyingAfterTheUserChangesDrivers() async throws {
+        let failing = HostTestDriver(activationFailure: .authenticationRejected)
+        let working = StreamingHostDriver()
+        let store = HostSelectionStore([failing.descriptor.identifier.rawValue])
+        let registry = try DriverRegistry(drivers: [failing, working], store: store)
+        let model = HomeModel(registry: registry, awaitStartup: {
+            await DriverStartup.run(registry: registry, store: store, firstLaunchDefault: nil)
+        }, demoIdentifiers: [], scheduler: HostManualScheduler())
+        await model.setScenePhaseActive(true).value
+        #expect(model.source == .startFailed(failing.descriptor.identifier, .authenticationRejected))
+
+        try await registry.activate(working.descriptor.identifier)
+        #expect(await eventually { model.source == .connected(working.descriptor.identifier) })
+        try await registry.deactivate(working.descriptor.identifier)
+        #expect(await eventually { model.source == .noActiveDriver && model.ports == nil })
+        let message = HomeSourceMessage.make(source: model.source, displayName: model.displayName(of:))
+        #expect(message?.identifier == "home.no-glucose-source")
+        #expect(message?.title == "No glucose source")
         await model.setScenePhaseActive(false).value
     }
 
@@ -382,7 +454,8 @@ struct DriverHostTests {
         #expect(model.latestGlucose == nil)
         // The held sequence stopped after its pump read and never read glucose.
         #expect(await driver.readCounts == (0, 1))
-        #expect(model.source == .noActiveDriver)
+        // The reconnect after the registry change runs in its own task, so wait for it to settle.
+        #expect(await eventually { model.source == .noActiveDriver })
         #expect(model.ports == nil)
     }
 

@@ -116,13 +116,27 @@ public final class HomeModel {
     // went inactive cannot mark the next foreground as already read.
     private var inactiveTransitions = 0
     private var wantsActive = false
-    private var connecting = false
+    // The token of the `connect()` call that owns connecting, if any. A call
+    // whose token was cleared has been abandoned and stops at its next check.
+    private var runningConnect: Int?
+    private var connectTokens = 0
+    private var connecting: Bool { runningConnect != nil }
     private var connectionGeneration = 0
     private var refreshGeneration: Int?
     private var startupOutcome: DriverStartupOutcome?
-    // Set when a connection is dropped while `connect()` is running, so that
-    // call connects again instead of a second one racing it.
-    private var reconnectAfterConnect = false
+    // The registry's selection and activation epochs when the startup outcome
+    // was read. Once they move, the user has changed Drivers and the outcome no
+    // longer describes what is running.
+    private var startupSnapshot: RegistrySnapshot?
+    private var startupSuperseded = false
+    // The glucose holder's activation epoch when its ports were read. A
+    // deactivate and activate that coalesce into one registry change still
+    // move the epoch, so ports from the earlier activation are not kept.
+    private var portsEpoch: Int?
+    // Set when a running glucose holder appears while `connect()` is running
+    // without ports. It reconnects only if that call ends without a connection,
+    // so the changes made by its own startup never cause a second read.
+    private var connectIfStillUnconnected = false
     // The Driver whose values are cached. A different holder never inherits them.
     private var cacheHolder: DriverIdentifier?
     // These handles are mutated on the main actor and only read outside it during deinit.
@@ -236,28 +250,62 @@ public final class HomeModel {
     }
 
     private func connect() async {
-        guard !connecting else { return }
-        connecting = true
-        defer { connecting = false }
+        guard runningConnect == nil else { return }
+        connectTokens &+= 1
+        let token = connectTokens
+        runningConnect = token
+        defer { if runningConnect == token { runningConnect = nil } }
         repeat {
-            reconnectAfterConnect = false
+            connectIfStillUnconnected = false
             await connectOnce()
-        } while reconnectAfterConnect && wantsActive
+        } while runningConnect == token && wantsActive && connectIfStillUnconnected && ports == nil
     }
 
-    private func loadStartupOutcome() async -> DriverStartupOutcome {
-        guard let previous = startupOutcome else { return await awaitStartup() }
-        guard previous.report.selectionFailure?.isTransient == true else { return previous }
-        return await DriverStartup.retryRestore(registry: registry)
+    private struct RegistrySnapshot: Equatable {
+        let selection: Set<String>
+        let epochs: [DriverIdentifier: Int]
+    }
+
+    private func registrySnapshot() async -> RegistrySnapshot {
+        var epochs: [DriverIdentifier: Int] = [:]
+        for descriptor in registry.descriptors {
+            epochs[descriptor.identifier] = await registry.activationEpoch(of: descriptor.identifier)
+        }
+        return RegistrySnapshot(selection: await registry.persistedSelection, epochs: epochs)
+    }
+
+    /// Returns the startup outcome and whether it was read just now. A transient
+    /// selection failure is retried on every connect.
+    private func loadStartupOutcome() async -> (DriverStartupOutcome, fresh: Bool) {
+        guard let previous = startupOutcome else { return (await awaitStartup(), true) }
+        guard previous.report.selectionFailure?.isTransient == true else { return (previous, false) }
+        return (await DriverStartup.retryRestore(registry: registry), true)
     }
 
     private func connectOnce() async {
         startTickerIfNeeded()
         refreshHero()
         let generation = connectionGeneration
-        let outcome = await loadStartupOutcome()
+        let (outcome, fresh) = await loadStartupOutcome()
         guard generation == connectionGeneration else { return }
         startupOutcome = outcome
+        let snapshot = await registrySnapshot()
+        guard generation == connectionGeneration else { return }
+        if fresh {
+            startupSnapshot = snapshot
+            startupSuperseded = false
+        } else if snapshot != startupSnapshot {
+            startupSuperseded = true
+        }
+        // Startup failures describe the Drivers as startup left them, and stop
+        // applying after the first change the user makes.
+        let startupReport: RestoreReport? = startupSuperseded ? nil : outcome.report
+        // Read before the port, so a later activation can only look newer than
+        // the ports it produced, never older.
+        var epochBeforePort: (holder: DriverIdentifier, epoch: Int)?
+        if let slotHolder = await registry.slots.holder(of: .glucoseSource) {
+            epochBeforePort = (slotHolder, await registry.activationEpoch(of: slotHolder))
+        }
         let glucoseHeld: HeldPort
         do { glucoseHeld = try await registry.port(for: .glucoseSource) }
         catch {
@@ -266,15 +314,15 @@ public final class HomeModel {
             if error == .noActiveDriver(.glucoseSource) {
                 if let failure = outcome.report.selectionFailure, failure.isTransient {
                     source = .selectionDeferred(failure)
-                } else if let failed = glucoseFailure(in: outcome.report.failed) {
+                } else if let failed = glucoseFailure(in: startupReport?.failed ?? []) {
                     source = .startFailed(failed.id, failed.failure)
-                } else if let deferred = glucoseFailure(in: outcome.report.deferred) {
+                } else if let deferred = glucoseFailure(in: startupReport?.deferred ?? []) {
                     source = .deferred(deferred.id, deferred.failure)
-                } else if let seedError = outcome.seedError, let target = outcome.seedTarget {
+                } else if !startupSuperseded, let seedError = outcome.seedError, let target = outcome.seedTarget {
                     source = .seedFailed(target, seedError)
                 } else { source = .noActiveDriver }
             } else if case .holderNotRunning(let id, _, _) = error,
-                      let deferred = outcome.report.deferred.first(where: { $0.id == id }) {
+                      let deferred = startupReport?.deferred.first(where: { $0.id == id }) {
                 source = .deferred(id, deferred.failure)
             } else { source = .unavailable(error) }
             ports = nil
@@ -289,6 +337,7 @@ public final class HomeModel {
             refreshHero()
             return
         }
+        guard generation == connectionGeneration else { return }
         guard case .glucoseSource(let glucose) = glucoseHeld.port else {
             source = .unavailable(.portUnavailable(glucoseHeld.holder, .glucoseSource))
             isDemo = false
@@ -326,6 +375,7 @@ public final class HomeModel {
         let activePorts = ActiveDriverPorts(identifier: glucoseHeld.holder, glucoseSource: glucose,
                                             insulinSource: insulin, pumpStatusSource: pump)
         ports = activePorts
+        portsEpoch = epochBeforePort?.holder == glucoseHeld.holder ? epochBeforePort?.epoch : nil
         slotErrors = errors
         lifecycleState = await registry.lifecycleState(of: glucoseHeld.holder) ?? .notActivated
         guard generation == connectionGeneration else { return }
@@ -384,12 +434,25 @@ public final class HomeModel {
     /// Drops the connection when its glucose holder is no longer the running
     /// holder of the slot. A failed read on the same holder never gets here.
     private func validateConnection() async {
-        guard let ports else { return }
+        guard let ports else {
+            // A Driver activated elsewhere, such as from Settings, is picked up
+            // here without waiting for the next foreground.
+            guard wantsActive else { return }
+            guard let holder = await registry.slots.holder(of: .glucoseSource) else { return }
+            let state = await registry.lifecycleState(of: holder)
+            guard wantsActive, self.ports == nil, state == .active || state == .degraded else { return }
+            // Not awaited: this runs on the registry observer, which must keep
+            // following changes even if the Driver's first read never returns.
+            if connecting { connectIfStillUnconnected = true }
+            else { Task { [weak self] in await self?.connect() } }
+            return
+        }
         let generation = connectionGeneration
         let holder = await registry.slots.holder(of: .glucoseSource)
         let state = await registry.lifecycleState(of: ports.identifier)
+        let epoch = await registry.activationEpoch(of: ports.identifier)
         guard generation == connectionGeneration, self.ports != nil else { return }
-        if holder == ports.identifier, state == .active || state == .degraded { return }
+        if holder == ports.identifier, state == .active || state == .degraded, epoch == portsEpoch { return }
         dropConnection(keepCache: holder == ports.identifier)
     }
 
@@ -403,6 +466,7 @@ public final class HomeModel {
         for task in streamTasks { task.cancel() }
         streamTasks.removeAll()
         ports = nil
+        portsEpoch = nil
         cancelCardReload()
         driverCards = []
         lifecycleState = .notActivated
@@ -414,9 +478,12 @@ public final class HomeModel {
         }
         source = .pending
         refreshHero()
+        // A connect still in flight is abandoned rather than waited on: it may be
+        // held by a read that never returns, and everything it does from here
+        // is checked against the generation bumped above.
+        runningConnect = nil
         guard wantsActive else { return }
-        if connecting { reconnectAfterConnect = true }
-        else { Task { [weak self] in await self?.connect() } }
+        Task { [weak self] in await self?.connect() }
     }
 
     public func refresh() async {

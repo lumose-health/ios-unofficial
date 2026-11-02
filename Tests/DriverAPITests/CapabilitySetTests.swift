@@ -60,8 +60,14 @@ struct CapabilitySetTests {
     /// conform with captured limits. A replacement for it — any driver-implementable
     /// protocol that supplies safety state — fails this assertion the moment it is
     /// declared, wherever in the target it is put.
+    ///
+    /// `DriverSettings` is the one other: a Driver's read-only view of its own
+    /// settings. The platform implements it in `DomainCore`, it has only a read
+    /// member, and its values never take part in glucose or dose validation, so
+    /// it supplies no safety state.
     static let expectedNonPortProtocols: Set<String> = [
         "Driver",
+        "DriverSettings",
     ]
 
     @Test("There are exactly six Capabilities, and they are these six")

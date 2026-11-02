@@ -88,6 +88,7 @@ struct AppNavigationTests {
         let allHide = AppRoute.allCases.allSatisfy { $0.hidesTabBar }
         #expect(allHide)
         #expect(AppRoute.licenses.title == "Open Source Licenses")
+        #expect(AppRoute.drivers.title == "Drivers")
     }
 
     @MainActor @Test func shellKeepsBannerAtRootForBothDestinations() {
