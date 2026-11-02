@@ -13,8 +13,8 @@ concurrency:
   group: static-analysis-${{ github.ref }}-${{ github.event_name == 'pull_request' && 'pr' || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
-  static-analysis:
-    name: Static Analysis Gate
+  guards:
+    name: Guards and Secrets
     runs-on: macos-26
     # The guard self-tests alone take about 17 minutes on this runner.
     timeout-minutes: 30
@@ -22,4 +22,53 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-      - run: bash scripts/ci-local.sh static-analysis
+      - name: Install gitleaks
+        run: bash scripts/ci-local.sh install-ci-tools secrets-scan
+      - run: bash scripts/ci-local.sh static-guards
+      - name: Upload gitleaks report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: gitleaks-results
+          path: .build/static-analysis/gitleaks.json
+          if-no-files-found: warn
+          retention-days: 30
+
+  codeql:
+    name: CodeQL Swift
+    runs-on: macos-26
+    # The traced build runs under Rosetta and took about 23 minutes when it shared a runner.
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Select pinned Xcode
+        run: sudo xcode-select -s "/Applications/Xcode_$(cat .xcode-version).app"
+      - name: Install CodeQL
+        run: bash scripts/ci-local.sh install-ci-tools swift-analysis
+      - run: bash scripts/ci-local.sh swift-analysis
+      - name: Upload CodeQL results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: codeql-results
+          path: .build/static-analysis/*.sarif
+          if-no-files-found: warn
+          retention-days: 30
+
+  static-analysis:
+    name: Static Analysis Gate
+    needs: [guards, codeql]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Evaluate static analysis results
+        env:
+          GATE_NAME: Static Analysis Gate
+          NEEDS_RESULTS: guards=${{ needs.guards.result }} codeql=${{ needs.codeql.result }}
+        run: bash scripts/ci-local.sh needs-verdict

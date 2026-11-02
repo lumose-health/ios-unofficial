@@ -57,7 +57,16 @@ module PolicyTest
       mutate(dir, 'dependency-scan.yml', 'step-workdir', 'dependency-scan.yml:osv.steps[1]: shell or working-directory override') { |doc| doc['jobs']['osv']['steps'][1]['working-directory'] = 'scripts' }
       mutate(dir, 'static-analysis.yml', 'allowlisted-shell', nil, { 'static-analysis.yml:defaults' => 'needs POSIX sh for the fixture' }) { |doc| doc['defaults'] = { 'run' => { 'shell' => 'sh' } } }
       mutate(dir, 'static-analysis.yml', 'allowlist-blank-reason', 'static-analysis.yml:defaults: shell or working-directory override', { 'static-analysis.yml:defaults' => ' ' }) { |doc| doc['defaults'] = { 'run' => { 'shell' => 'sh' } } }
-      mutate(dir, 'static-analysis.yml', 'unconditional-if', 'unconditional check has if or needs') { |doc| doc['jobs']['static-analysis']['if'] = 'always()' }
+      mutate(dir, 'workflow-lint.yml', 'unconditional-if', 'unconditional check has if or needs') { |doc| doc['jobs']['workflow-lint']['if'] = 'always()' }
+      mutate(dir, 'static-analysis.yml', 'all-of-if', 'requires if: always()') { |doc| doc['jobs']['static-analysis']['if'] = 'success()' }
+      mutate(dir, 'static-analysis.yml', 'all-of-needs', 'requires needs guards, codeql') { |doc| doc['jobs']['static-analysis']['needs'] = ['guards'] }
+      mutate(dir, 'static-analysis.yml', 'all-of-needed-if', 'codeql: job Static Analysis Gate needs must not have if') { |doc| doc['jobs']['codeql']['if'] = "github.event_name == 'push'" }
+      mutate(dir, 'static-analysis.yml', 'all-of-run', 'missing needs-verdict step') { |doc| doc['jobs']['static-analysis']['steps'].last['run'] = 'echo pass' }
+      mutate(dir, 'static-analysis.yml', 'all-of-step-if', 'needs-verdict step must not have if') { |doc| doc['jobs']['static-analysis']['steps'].last['if'] = 'success()' }
+      mutate(dir, 'static-analysis.yml', 'all-of-results', 'NEEDS_RESULTS must be') { |doc| doc['jobs']['static-analysis']['steps'].last['env']['NEEDS_RESULTS'] = 'guards=${{ needs.guards.result }}' }
+      mutate(dir, 'static-analysis.yml', 'all-of-needed-continue-on-error', 'codeql: continue-on-error forbidden on a job Static Analysis Gate needs') { |doc| doc['jobs']['codeql']['continue-on-error'] = true }
+      mutate(dir, 'static-analysis.yml', 'all-of-needed-step-continue-on-error', 'guards: continue-on-error forbidden on step 2') { |doc| doc['jobs']['guards']['steps'][2]['continue-on-error'] = true }
+      mutate(dir, 'static-analysis.yml', 'all-of-run-needs', 'needs. in run') { |doc| doc['jobs']['static-analysis']['steps'].last['run'] += ' # needs.codeql.result' }
       mutate(dir, 'dependency-scan.yml', 'aggregation-if', 'requires if: always()') { |doc| doc['jobs']['dependency-gate']['if'] = 'success()' }
       mutate(dir, 'dependency-scan.yml', 'aggregation-needs', 'requires detect and work needs') { |doc| doc['jobs']['dependency-gate']['needs'] = ['osv'] }
       mutate(dir, 'dependency-scan.yml', 'aggregation-run', 'missing gate-verdict step') { |doc| doc['jobs']['dependency-gate']['steps'].last['run'] = 'echo pass' }
