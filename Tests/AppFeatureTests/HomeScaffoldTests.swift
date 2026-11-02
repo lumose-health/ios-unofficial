@@ -1,12 +1,32 @@
 import Testing
 import AppFeature
 import DriverAPI
+import DomainCore
 
 @Suite("Home scaffold")
 struct HomeScaffoldTests {
     @Test func cardOrderAndOmission() {
         #expect(HomeScaffoldModel.order.map(\.rawValue) == ["statusRow", "glucoseHero", "recentMeal", "glucoseTrend", "timeInRange", "cgmStats", "insulinSummary", "recentBoluses", "driverCards", "footer"])
         #expect(HomeScaffoldModel.omittedWithoutData == [.recentMeal])
+    }
+
+    @Test func platformPrioritiesAndContributionLayout() {
+        for card in HomeCard.allCases {
+            if card == .driverCards || card == .footer { #expect(HomeScaffoldModel.priority(of: card) == nil) }
+            else if let priority = HomeScaffoldModel.priority(of: card) {
+                #expect(HomeScaffoldModel.platformPriorities.contains(priority))
+            }
+        }
+        let driver = DriverIdentifier("test.cards.demo")!
+        let cards = (0..<3).map { index in
+            ContributedCard(driver: driver, card: DashboardCardDescriptor(id: "card\(index)", title: "Card", priority: 100 + index, elements: []))
+        }
+        for supplied in [Array(cards.prefix(0)), Array(cards.prefix(1)), cards] {
+            let layout = HomeScaffoldModel.layout(contributed: supplied)
+            #expect(layout.last == .footer)
+            #expect(!layout.contains(.platform(.recentMeal)))
+            #expect(layout.filter { if case .driver = $0 { return true }; return false }.count == supplied.count)
+        }
     }
 
     @Test func footerStringsAndLifecycleMapping() {
