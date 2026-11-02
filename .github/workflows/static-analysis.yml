@@ -1,0 +1,25 @@
+name: Static Analysis
+on:
+  pull_request:
+  push:
+    branches: [develop, main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  # Pull requests share one group per ref so a new push cancels the stale run.
+  # Push, schedule and dispatch runs get their own group and are never cancelled,
+  # so every commit that lands on develop or main is checked.
+  group: static-analysis-${{ github.ref }}-${{ github.event_name == 'pull_request' && 'pr' || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  static-analysis:
+    name: Static Analysis Gate
+    runs-on: macos-26
+    # The guard self-tests alone take about 17 minutes on this runner.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - run: bash scripts/ci-local.sh static-analysis

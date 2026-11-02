@@ -1,0 +1,6 @@
+# First scan, 2026-11-01, OSV-Scanner 2.3.3 on a clean checkout: no known
+# vulnerabilities. It read two Package.resolved files (the root package and the
+# app workspace), each resolving one package, GRDB.swift 7.11.1. OSV-Scanner
+# 2.3.3 reports SwiftPM packages as unscannable, so today the scan covers
+# CocoaPods and other lockfiles if they appear but not SwiftPM advisories.
+# No ignored vulnerabilities.

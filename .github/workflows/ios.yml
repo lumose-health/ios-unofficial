@@ -12,7 +12,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: ios-${{ github.ref }}
+  # Pull requests share one group per ref so a new push cancels the stale run.
+  # Push, schedule and dispatch runs get their own group and are never cancelled,
+  # so every commit that lands on develop or main is checked.
+  group: ios-${{ github.ref }}-${{ github.event_name == 'pull_request' && 'pr' || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -111,6 +114,7 @@ jobs:
           persist-credentials: false
       - name: Evaluate iOS result
         env:
+          GATE_NAME: iOS Gate
           DETECT_RESULT: ${{ needs.detect-changes.result }}
           SHOULD_BUILD: ${{ needs.detect-changes.outputs.should_build }}
           WORK_RESULT: ${{ needs.build.result }}
