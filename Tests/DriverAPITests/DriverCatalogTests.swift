@@ -12,8 +12,13 @@ struct DriverCatalogTests {
     /// registration here.
     @Test("The catalog registers the Simulated Driver, the first Driver to ship")
     func catalogRegistersSimulatedDriver() throws {
+        #if TRACE_REPLAY_DRIVER_ENABLED
         #expect(DriverCatalog.entries.count == 2)
         #expect(DriverCatalog.rows().count == 2)
+        #else
+        #expect(DriverCatalog.entries.count == 1)
+        #expect(DriverCatalog.rows().count == 1)
+        #endif
         let entry = try #require(DriverCatalog.entries.first)
         #expect(entry.targetName == "SimulatedDriver")
         #expect(entry.transport == .inProcess)
@@ -32,6 +37,7 @@ struct DriverCatalogTests {
         let simulated = try #require(DriverIdentifier("com.glycemicgpt.simulated"))
         #expect(DriverCatalog.entry(for: simulated)?.targetName == "SimulatedDriver")
 
+        #if TRACE_REPLAY_DRIVER_ENABLED
         let trace = try #require(DriverIdentifier("com.glycemicgpt.trace-replay"))
         let traceEntry = try #require(DriverCatalog.entry(for: trace))
         #expect(traceEntry.targetName == "TraceReplayDriver")
@@ -46,6 +52,10 @@ struct DriverCatalogTests {
         for capability in Capability.allCases where capability != .glucoseSource && capability != .insulinSource {
             #expect(DriverCatalog.entries(providing: capability).isEmpty, "\(capability)")
         }
+        #else
+        let trace = try #require(DriverIdentifier("com.glycemicgpt.trace-replay"))
+        #expect(DriverCatalog.entry(for: trace) == nil)
+        #endif
     }
 
     /// Registration means MEMBERSHIP in ``DriverCatalog/entries``, and this is the
@@ -88,7 +98,11 @@ struct DriverCatalogTests {
             "directories under Sources/Drivers/ \(directories.sorted()), manifest paths name \(manifestDirectories.sorted())"
         )
 
+        #if TRACE_REPLAY_DRIVER_ENABLED
         let declaredNames = Set(manifestTargets.map(\.name))
+        #else
+        let declaredNames = Set(manifestTargets.map(\.name).filter { $0 != "TraceReplayDriver" })
+        #endif
         let registered = Set(DriverCatalog.entries.map(\.targetName))
         #expect(declaredNames == registered, "manifest target names \(declaredNames.sorted()), catalog entries \(registered.sorted())")
     }

@@ -22,6 +22,11 @@ The list between the markers must match `REQUIRED_CHECKS` in
 | Workflow Security | `workflow-security.yml` | zizmor 1.5.2 at medium severity and above, plus a check that no `pull_request_target` workflow checks out the pull request head. | `bash scripts/ci-local.sh workflow-security` |
 | iOS Gate | `ios.yml` | The Swift package, Driver, guard and Xcode builds and tests when iOS paths change. | `bash scripts/ci-local.sh ios-gate` |
 
+The iOS Gate's every-Driver build sets `GLYCEMICGPT_ALL_DRIVERS=1`. `Package.swift`
+reads it and compiles every Driver with its resources, even one whose committed
+build switch is off. Shipped and app builds never set it, so a Driver switched
+off there stays out of the build.
+
 `Dependency Scan Gate` and `iOS Gate` always report. When nothing relevant
 changed they pass and say the work was skipped; a failed or cancelled work job
 fails them. None of the five needs a repository secret, so they give the same
