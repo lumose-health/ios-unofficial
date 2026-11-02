@@ -89,15 +89,20 @@ development_status:
   1-9-complete-first-time-tandem-pairing: backlog
   1-10-reconnect-indefinitely-and-survive-backgrounding: backlog
   1-11-recover-from-a-broken-pairing: backlog
-  1-12-activate-deactivate-and-persist-driver-selection: backlog
+  # 1-12 split: 1-12a registry (#20), 1-12b lifecycle on the registry, 1-12c confirmation/settings/events.
+  1-12a-driver-registry-slot-derivation-and-persisted-selection: done
+  1-12b-registry-owns-driver-lifecycle-and-no-active-driver-error: in-progress
+  1-12c-deactivation-confirmation-settings-and-events: backlog
   # 1-13 split at story creation (2026-10-30): ~1,600 reviewable lines combined, over the
   # PR budget. 1-13b stacks on 1-13a.
   1-13a-app-shell-demo-banner-and-home-scaffold: done
   1-13b-the-glucose-hero: done
   1-14-the-status-row-pump-link-and-what-it-does-not-claim: done
-  1-15-refresh-without-losing-what-i-already-had: backlog
-  1-16-navigation-and-the-capability-driven-tab-bar: backlog
-  1-17-first-run-welcome-safety-and-getting-to-a-working-monitor: backlog
+  1-15-refresh-without-losing-what-i-already-had: done
+  1-16-navigation-and-the-capability-driven-tab-bar: done
+  # 1-17 split: 1-17a flow/safety/Backend stage (#19), 1-17b permissions + monitoring warning (#21).
+  1-17a-first-run-welcome-safety-and-backend-stage: done
+  1-17b-permissions-and-the-monitoring-limits-warning: done
   1-18-driver-contributed-cards-deterministically-ordered: backlog
   1-19-reach-pairing-from-settings-with-driver-supplied-copy: backlog
   1-20-see-connection-status-without-opening-the-app: backlog
@@ -192,3 +197,9 @@ development_status:
 #   2026-11-01  #13 1-13b glucose hero + per-activation driver streams + skew bound  squash -> develop
 #   2026-11-01  #14 8-13 planning docs rewrite for project TestFlight distribution  squash -> develop
 #   2026-11-01  #15 1-14 status row + immediate first demo sample + contrast fix   squash -> develop
+#   2026-11-01  #16 tracker sync + PRD section drafts marked superseded          squash -> develop
+#   2026-11-01  #17 1-16 tab navigation + capability-driven tab bar + accent       squash -> develop
+#   2026-11-01  #18 1-15 refresh keeps cached values + honest card placeholders    squash -> develop
+#   2026-11-01  #19 1-17a onboarding: unskippable safety + server-optional Backend squash -> develop
+#   2026-11-01  #20 1-12a driver registry: derived slots + persisted active set    squash -> develop
+#   2026-11-01  #21 1-17b onboarding permissions + what-stops-monitoring warning   squash -> develop

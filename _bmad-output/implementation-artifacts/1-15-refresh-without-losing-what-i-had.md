@@ -19,7 +19,7 @@ max_cycles: 3
 
 # Story 1.15: Refresh without losing what I already had
 
-Status: review
+Status: done
 
 <!-- Planning note (for the maintainer): depends on 1.13a, 1.13b and 1.14, all merged to develop
 (44934d0). Estimate: ~450-600 reviewable lines over ~7 files, more than half of it tests. Inside

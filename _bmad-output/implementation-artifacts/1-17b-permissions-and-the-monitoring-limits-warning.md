@@ -17,7 +17,7 @@ gates:
 max_cycles: 3
 ---
 
-Status: review
+Status: done
 
 > **Depends on PR #19 being merged; dispatch after merge.** This builds on the onboarding flow
 > from PR #19 (`feat/onboarding`): `OnboardingModel`, its private `complete()`, `OnboardingFlowView`
