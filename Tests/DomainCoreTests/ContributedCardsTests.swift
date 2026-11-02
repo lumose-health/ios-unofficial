@@ -22,6 +22,30 @@ struct ContributedCardsTests {
         #expect(logs.allSatisfy { !$0.contains("Title") })
     }
 
+    @Test(arguments: [
+        ("Glucose 110 mg/dL", true),
+        ("2.5 U", true),
+        ("Pump \u{FF13}", true),
+        ("Connected", false),
+    ])
+    func cardTextWithAnyDecimalDigitIsRefusedWhole(text: String, refused: Bool) {
+        let asTitle = card("title", title: text)
+        let asLabel = DashboardCardDescriptor(id: "label", title: "Status", priority: 100,
+                                              elements: [.label(text: text, style: .body)])
+        let asBadge = DashboardCardDescriptor(id: "badge", title: "Status", priority: 100,
+                                              elements: [.statusBadge(text: text, color: .info)])
+        var logs: [String] = []
+        let result = DashboardCardValidation.accepted([asTitle, asLabel, asBadge], from: alpha) { logs.append($0) }
+        if refused {
+            #expect(result.isEmpty)
+            #expect(logs.count == 3)
+            #expect(logs.allSatisfy { $0 == "Driver \(alpha.rawValue) card refused: digit in card text" })
+        } else {
+            #expect(result == [asTitle, asLabel, asBadge])
+            #expect(logs.isEmpty)
+        }
+    }
+
     @Test func orderUsesPriorityThenRawDriverAndCardIds() {
         let input = [
             ContributedCard(driver: bravo, card: card("z", priority: 110)),
@@ -70,6 +94,26 @@ struct ContributedCardsTests {
         let cards = await registry.contributedCards(timeout: .milliseconds(50))
         #expect(cards.map(\.card.id) == ["active"])
         await gate.open()
+    }
+
+    @Test func aDriverThatIgnoresCancellationHasAtMostOneCardQueryOutstanding() async throws {
+        let hung = TestDriver(id: "test.cards.hung", capabilities: [])
+        let registry = try DriverRegistry(drivers: [hung], store: RecordingSelectionStore())
+        let gate = Gate()
+        await hung.setCards([card("stale")], gate: gate)
+        try await registry.activate(hung.descriptor.identifier)
+        for _ in 0..<5 {
+            #expect(await registry.contributedCards(timeout: .milliseconds(10)).isEmpty)
+        }
+        #expect(await hung.cardsCallCount == 1)
+        #expect(await registry.hasCardQueryInFlight(hung.descriptor.identifier))
+
+        await hung.setCards([card("fresh")])
+        await gate.open()
+        await eventually { await !registry.hasCardQueryInFlight(hung.descriptor.identifier) }
+        #expect(await !registry.hasCardQueryInFlight(hung.descriptor.identifier))
+        #expect(await registry.contributedCards().map(\.card.id) == ["fresh"])
+        #expect(await hung.cardsCallCount == 2)
     }
 
     @Test func cancellingACardReadReturnsWithoutWaitingForDrivers() async throws {

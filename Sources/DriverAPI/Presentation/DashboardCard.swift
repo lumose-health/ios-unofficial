@@ -2,7 +2,9 @@ import Foundation
 
 /// Declarative card data only. The platform renders, validates, orders and labels
 /// each card. A card must not carry a glucose or dose value until the platform
-/// defines a rule for displaying that value safely.
+/// defines a safe element for displaying numeric values. Until then the platform
+/// refuses, whole, any card whose title or element text contains a decimal digit
+/// in any script, ASCII or otherwise; digits are never stripped to make a card fit.
 public struct DashboardCardDescriptor: Hashable, Sendable, Identifiable {
     /// Driver cards appear at or after this priority; platform cards come first.
     public static let minimumDriverPriority = 100

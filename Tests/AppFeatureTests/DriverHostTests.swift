@@ -551,9 +551,13 @@ struct DriverHostTests {
         await model.setScenePhaseActive(true).value
         await gate.waitUntilEntered()
 
+        // The Driver is still answering the first read, so a refresh does not call it again
+        // and shows no cards from it.
         await driver.setCards([DashboardCardDescriptor(id: "fresh", title: "Fresh", priority: 100, elements: [])])
         await model.refresh()
-        #expect(await eventually { model.driverCards.map(\.card.id) == ["fresh"] })
+        try await Task.sleep(nanoseconds: 20_000_000)
+        #expect(model.driverCards.isEmpty)
+        #expect(await driver.cardReadCount == 1)
 
         await gate.release()
         var finished = false
@@ -562,9 +566,12 @@ struct DriverHostTests {
             if !finished { try await Task.sleep(nanoseconds: 1_000_000) }
         }
         #expect(finished)
-        // Let any reload still holding the stale answer try to publish it.
+        // Let the read that held the stale answer try to publish it.
         try await Task.sleep(nanoseconds: 20_000_000)
-        #expect(model.driverCards.map(\.card.id) == ["fresh"])
+        #expect(model.driverCards.isEmpty)
+
+        await model.refresh()
+        #expect(await eventually { model.driverCards.map(\.card.id) == ["fresh"] })
     }
 
     @Test @MainActor func refreshFailureKeepsCachedReadingAndLogsOnlyStep() async throws {

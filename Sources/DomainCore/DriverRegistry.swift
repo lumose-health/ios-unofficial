@@ -56,6 +56,9 @@ public actor DriverRegistry {
     private var isBusy = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
     private var observers: [UUID: AsyncStream<Void>.Continuation] = [:]
+    /// Drivers whose `dashboardCards()` call has not returned yet. At most one
+    /// call per Driver is outstanding, even when the Driver ignores cancellation.
+    private var cardQueriesInFlight: Set<DriverIdentifier> = []
     #if DEBUG
     private var onEnqueue: (@Sendable () -> Void)?
     private var transitionFault: (@Sendable (DriverIdentifier, DriverLifecycleState) -> DriverFailure?)?
@@ -143,15 +146,19 @@ public actor DriverRegistry {
     /// Reads cards from running Drivers and applies platform validation. Each
     /// Driver is queried concurrently; one that does not answer within
     /// `timeout`, or that stops providing before it answers, contributes nothing.
-    /// Cancelling the caller ends the read at once.
+    /// A Driver whose call from an earlier read is still running is not called
+    /// again and contributes nothing to this read; when that call finally
+    /// returns its result is discarded. Cancelling the caller ends the read at once.
     public func contributedCards(timeout: Duration = DriverRegistry.dashboardCardsTimeout) async -> [ContributedCard] {
         let providing: [(id: DriverIdentifier, driver: any Driver)] = descriptors.compactMap { descriptor in
             let id = descriptor.identifier
-            guard let driver = drivers[id], isProvidingCards(lifecycles[id]?.state) else { return nil }
+            guard let driver = drivers[id], isProvidingCards(lifecycles[id]?.state),
+                  !cardQueriesInFlight.contains(id) else { return nil }
             return (id, driver)
         }
         guard !providing.isEmpty else { return [] }
-        let replies = await Self.collectCards(from: providing, timeout: timeout)
+        for (id, _) in providing { cardQueriesInFlight.insert(id) }
+        let replies = await collectCards(from: providing, timeout: timeout)
         var result: [ContributedCard] = []
         for (id, _) in providing {
             guard let cards = replies[id], isProvidingCards(lifecycles[id]?.state) else { continue }
@@ -163,14 +170,29 @@ public actor DriverRegistry {
         return ContributedCard.ordered(result)
     }
 
-    private static func collectCards(
+    private func cardQueryReturned(_ id: DriverIdentifier) {
+        cardQueriesInFlight.remove(id)
+    }
+
+    #if DEBUG
+    /// Test seam: whether a `dashboardCards()` call to this Driver is still running.
+    func hasCardQueryInFlight(_ id: DriverIdentifier) -> Bool { cardQueriesInFlight.contains(id) }
+    #endif
+
+    private func collectCards(
         from providing: [(id: DriverIdentifier, driver: any Driver)], timeout: Duration
     ) async -> [DriverIdentifier: [DashboardCardDescriptor]] {
         let (stream, continuation) = AsyncStream<(DriverIdentifier, [DashboardCardDescriptor])>.makeStream()
         // Unstructured on purpose: a task group waits for every child, so one
-        // Driver that never returns would hold the whole read open.
+        // Driver that never returns would hold the whole read open. Each query
+        // frees its Driver's slot only when the Driver returns; a reply that
+        // arrives after this read has finished goes nowhere.
         let queries = providing.map { entry in
-            Task { continuation.yield((entry.id, await entry.driver.dashboardCards())) }
+            Task { [weak self] in
+                let cards = await entry.driver.dashboardCards()
+                continuation.yield((entry.id, cards))
+                await self?.cardQueryReturned(entry.id)
+            }
         }
         let deadline = Task {
             try? await Task.sleep(for: timeout)

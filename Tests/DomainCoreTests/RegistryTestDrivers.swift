@@ -11,6 +11,7 @@ actor TestDriver: Driver {
     var onDeactivate: (@Sendable () async -> Void)?
     var cards: [DashboardCardDescriptor] = []
     var cardsGate: Gate?
+    private(set) var cardsCallCount = 0
 
     init(id: String, capabilities: Set<Capability>, transport: DriverTransport = .inProcess) {
         descriptor = DriverDescriptor(identifier: DriverIdentifier(id)!, targetName: "TestDriver",
@@ -20,6 +21,7 @@ actor TestDriver: Driver {
 
     func capability(_ capability: Capability) -> CapabilityPort? { nil }
     func dashboardCards() async -> [DashboardCardDescriptor] {
+        cardsCallCount += 1
         if let cardsGate { await cardsGate.wait() }
         return cards
     }
