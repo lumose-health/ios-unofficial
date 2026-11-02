@@ -13,8 +13,8 @@ import Foundation
 /// That closes a specific hole. A runtime registration path is a place a
 /// Capability can appear that no reviewer saw, and AD-17 requires composition to
 /// be SUBTRACTIVE only: a build configuration may exclude a Driver, never add
-/// one. Nothing here reads a build flag — exclusion happens by removing an entry
-/// and its target together, in one change.
+/// one. The Trace-Replay entry may be removed by its one compile-time condition;
+/// that is the only condition allowed here. No build setting adds a Driver.
 ///
 /// ## Entries
 ///
@@ -24,6 +24,11 @@ import Foundation
 /// target the manifest does not declare.
 public enum DriverCatalog {
 
+    // Swift has no `#if` inside an array literal, so the whole declaration is
+    // conditional. The full list comes first because the registration guard
+    // reads the first `entries` literal; the second differs only by omitting the
+    // compiled-out Driver.
+    #if TRACE_REPLAY_DRIVER_ENABLED
     /// The Drivers in this build.
     ///
     /// A `let`, not a `var`: the catalog is not mutable at runtime, by anyone,
@@ -59,6 +64,30 @@ public enum DriverCatalog {
             verification: .unverified
         ),
     ]
+    #else
+    /// The Drivers in this build: the list above without the Trace-Replay
+    /// Driver, which this build compiles out.
+    public static let entries: [DriverDescriptor] = [
+        DriverDescriptor(
+            identifier: DriverIdentifier("com.glycemicgpt.simulated")!,
+            targetName: "SimulatedDriver",
+            displayName: "Simulated Driver",
+            transport: .inProcess,
+            version: "1.0.0",
+            capabilities: [.glucoseSource, .insulinSource],
+            verification: .unverified
+        ),
+        DriverDescriptor(
+            identifier: DriverIdentifier("com.glycemicgpt.tandem")!,
+            targetName: "TandemDriver",
+            displayName: "Tandem Insulin Pump",
+            transport: .bluetoothLowEnergy,
+            version: "1.0.0",
+            capabilities: [.glucoseSource, .insulinSource, .pumpStatus],
+            verification: .unverified
+        ),
+    ]
+    #endif
 
     /// The entry with this identifier, or `nil`.
     public static func entry(for identifier: DriverIdentifier) -> DriverDescriptor? {

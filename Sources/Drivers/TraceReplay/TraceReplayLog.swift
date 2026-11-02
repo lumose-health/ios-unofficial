@@ -1,3 +1,4 @@
+#if TRACE_REPLAY_DRIVER_ENABLED
 import Foundation
 import OSLog
 import TandemWire
@@ -27,3 +28,4 @@ public struct OSTraceReplayLog: TraceReplayLogging {
         logger.error("frame \(frame) halted: \(detail, privacy: .public)")
     }
 }
+#endif

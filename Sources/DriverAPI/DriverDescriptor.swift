@@ -74,8 +74,9 @@ public enum VerificationStatus: String, CaseIterable, Hashable, Sendable {
     /// been run against real hardware by anyone.
     case protocolCompatible
 
-    /// Exercised on real hardware, with known gaps — the state the Medtronic
-    /// Driver ships in.
+    /// Implemented, with a named element not yet proven. For Drivers without
+    /// hardware to validate against, including Simulated and Trace-Replay, this
+    /// status is permanent.
     case beta
 
     /// Exercised on real hardware across the whole Capability set it claims.

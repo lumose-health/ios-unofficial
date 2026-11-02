@@ -5,7 +5,7 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 
 # Add Driver compilation conditions here when a Driver first uses one.
-ALL_DRIVER_CONDITIONS=()
+ALL_DRIVER_CONDITIONS=(TRACE_REPLAY_DRIVER_ENABLED)
 # Entries are SDK:project-path:scheme. List each scheme when its project lands.
 XCODE_BUILD_SCHEMES=('iphonesimulator:Apps/GlycemicGPT/GlycemicGPT.xcodeproj:GlycemicGPT')
 # Entries are project-path:scheme and project-path:reason, respectively.
@@ -433,8 +433,10 @@ ios_gate() {
   driver_conditions
   if [[ -z "${ALL_DRIVER_CONDITIONS[@]+present}" ]]; then echo 'No Driver conditions declared; building and testing every Driver target again'; fi
   for condition in "${ALL_DRIVER_CONDITIONS[@]+"${ALL_DRIVER_CONDITIONS[@]}"}"; do flags+=(-Xswiftc "-D${condition}"); done
-  swift build --scratch-path .build/all-drivers --build-tests --disable-automatic-resolution -Xswiftc -warnings-as-errors "${flags[@]+"${flags[@]}"}"
-  swift test --scratch-path .build/all-drivers --skip-build "${flags[@]+"${flags[@]}"}"
+  # GLYCEMICGPT_ALL_DRIVERS=1 makes Package.swift compile every Driver with its
+  # resources even when its committed switch is off; -D alone cannot add those.
+  GLYCEMICGPT_ALL_DRIVERS=1 swift build --scratch-path .build/all-drivers --build-tests --disable-automatic-resolution -Xswiftc -warnings-as-errors "${flags[@]+"${flags[@]}"}"
+  GLYCEMICGPT_ALL_DRIVERS=1 swift test --scratch-path .build/all-drivers --skip-build "${flags[@]+"${flags[@]}"}"
   header 'Safety guards'; bash scripts/guards/safety_guards.sh; bash scripts/guards/safety_guards.sh --self-test
   header 'Driver guards'; bash scripts/guards/driver_guards.sh; bash scripts/guards/driver_guards.sh --self-test
   header 'Xcode targets'; run_xcode_builds

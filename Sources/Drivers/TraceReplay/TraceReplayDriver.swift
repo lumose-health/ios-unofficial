@@ -1,3 +1,4 @@
+#if TRACE_REPLAY_DRIVER_ENABLED
 import Foundation
 import DriverAPI
 import SafetyCore
@@ -180,3 +181,4 @@ public actor TraceReplayDriver: Driver {
         return []
     }
 }
+#endif

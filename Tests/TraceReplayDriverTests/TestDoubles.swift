@@ -1,3 +1,4 @@
+#if TRACE_REPLAY_DRIVER_ENABLED
 import SafetyCore
 import Foundation
 @testable import TraceReplayDriver
@@ -16,3 +17,4 @@ final class RecordingTraceLog: TraceReplayLogging, @unchecked Sendable {
 }
 
 struct FixedTraceClock: Clock { let now: Date }
+#endif

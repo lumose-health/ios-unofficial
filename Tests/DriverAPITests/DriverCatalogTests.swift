@@ -12,8 +12,13 @@ struct DriverCatalogTests {
     /// registration here.
     @Test("The catalog registers the Simulated Driver, the first Driver to ship")
     func catalogRegistersSimulatedDriver() throws {
+        #if TRACE_REPLAY_DRIVER_ENABLED
         #expect(DriverCatalog.entries.count == 3)
         #expect(DriverCatalog.rows().count == 3)
+        #else
+        #expect(DriverCatalog.entries.count == 2)
+        #expect(DriverCatalog.rows().count == 2)
+        #endif
         let entry = try #require(DriverCatalog.entries.first)
         #expect(entry.targetName == "SimulatedDriver")
         #expect(entry.transport == .inProcess)
@@ -33,6 +38,7 @@ struct DriverCatalogTests {
         let simulated = try #require(DriverIdentifier("com.glycemicgpt.simulated"))
         #expect(DriverCatalog.entry(for: simulated)?.targetName == "SimulatedDriver")
 
+        #if TRACE_REPLAY_DRIVER_ENABLED
         let trace = try #require(DriverIdentifier("com.glycemicgpt.trace-replay"))
         let traceEntry = try #require(DriverCatalog.entry(for: trace))
         #expect(traceEntry.targetName == "TraceReplayDriver")
@@ -41,6 +47,10 @@ struct DriverCatalogTests {
         #expect(traceEntry.version == "1.0.0")
         #expect(traceEntry.capabilities == [.glucoseSource, .insulinSource])
         #expect(traceEntry.verification == .beta)
+        #else
+        let trace = try #require(DriverIdentifier("com.glycemicgpt.trace-replay"))
+        #expect(DriverCatalog.entry(for: trace) == nil)
+        #endif
         let tandem = try #require(DriverCatalog.entry(for: tandemID))
         #expect(tandem.targetName == "TandemDriver")
         #expect(tandem.displayName == "Tandem Insulin Pump")
@@ -50,7 +60,11 @@ struct DriverCatalogTests {
         #expect(tandem.verification == .unverified)
         #expect(tandem.verification != .hardwareVerified)
         for capability in [Capability.glucoseSource, .insulinSource] {
+            #if TRACE_REPLAY_DRIVER_ENABLED
             #expect(DriverCatalog.entries(providing: capability).map(\.targetName) == ["SimulatedDriver", "TraceReplayDriver", "TandemDriver"])
+            #else
+            #expect(DriverCatalog.entries(providing: capability).map(\.targetName) == ["SimulatedDriver", "TandemDriver"])
+            #endif
         }
         #expect(DriverCatalog.entries(providing: .pumpStatus).map(\.targetName) == ["TandemDriver"])
         for capability in Capability.allCases where !tandem.capabilities.contains(capability) {
@@ -98,7 +112,11 @@ struct DriverCatalogTests {
             "directories under Sources/Drivers/ \(directories.sorted()), manifest paths name \(manifestDirectories.sorted())"
         )
 
+        #if TRACE_REPLAY_DRIVER_ENABLED
         let declaredNames = Set(manifestTargets.map(\.name))
+        #else
+        let declaredNames = Set(manifestTargets.map(\.name).filter { $0 != "TraceReplayDriver" })
+        #endif
         let registered = Set(DriverCatalog.entries.map(\.targetName))
         #expect(declaredNames == registered, "manifest target names \(declaredNames.sorted()), catalog entries \(registered.sorted())")
     }

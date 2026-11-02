@@ -84,15 +84,19 @@ development_status:
   1-4-the-driver-catalog-and-the-closed-capability-set: done
   1-5-the-simulated-driver-as-a-shipped-target: done
   1-6-encrypted-local-store-with-write-time-invariants: done
-  1-7-the-trace-replay-driver: backlog
+  # 1-7 split (2026-11-02): 1-7a TandemWire (#28), 1-7b Trace-Replay Driver (#30), 1-7c kill switch + composition (#31).
+  1-7a-tandem-wire-decoding-for-recorded-frames: done
+  1-7b-the-trace-replay-driver-and-de-identified-traces: done
+  1-7c-trace-replay-kill-switch-app-composition-and-demo-label: review
   1-8-discover-a-tandem-pump-by-scanning: backlog
   1-9-complete-first-time-tandem-pairing: backlog
   1-10-reconnect-indefinitely-and-survive-backgrounding: backlog
   1-11-recover-from-a-broken-pairing: backlog
   # 1-12 split: 1-12a registry (#20), 1-12b lifecycle on the registry, 1-12c confirmation/settings/events.
   1-12a-driver-registry-slot-derivation-and-persisted-selection: done
-  1-12b-registry-owns-driver-lifecycle-and-no-active-driver-error: in-progress
-  1-12c-deactivation-confirmation-settings-and-events: backlog
+  1-12b-registry-owns-driver-lifecycle-and-no-active-driver-error: done
+  1-12c-driver-screen-deactivation-confirmation-and-settings: done
+  1-12d-bounded-best-effort-driver-event-delivery: backlog
   # 1-13 split at story creation (2026-10-30): ~1,600 reviewable lines combined, over the
   # PR budget. 1-13b stacks on 1-13a.
   1-13a-app-shell-demo-banner-and-home-scaffold: done
@@ -103,7 +107,9 @@ development_status:
   # 1-17 split: 1-17a flow/safety/Backend stage (#19), 1-17b permissions + monitoring warning (#21).
   1-17a-first-run-welcome-safety-and-backend-stage: done
   1-17b-permissions-and-the-monitoring-limits-warning: done
-  1-18-driver-contributed-cards-deterministically-ordered: backlog
+  1-18-driver-contributed-cards-deterministically-ordered: done
+  # 1-18b: remaining card element types, icons, detail screens, numeric display rule (digits are refused until it lands), stable duplicate-id handling.
+  1-18b-card-vocabulary-completion-and-safe-numeric-display: backlog
   1-19-reach-pairing-from-settings-with-driver-supplied-copy: backlog
   1-20-see-connection-status-without-opening-the-app: backlog
   epic-1-retrospective: optional
@@ -175,8 +181,8 @@ development_status:
   8-2-register-identifiers-once-and-choose-a-channel: backlog
   8-3-never-let-an-installed-build-lapse: backlog
   8-4-promotion-versioning-and-pinned-inputs: backlog
-  8-5-the-five-required-checks: backlog
-  8-6-swift-static-analysis-that-actually-analyses-swift: backlog
+  8-5-the-five-required-checks: done
+  8-6-swift-static-analysis-that-actually-analyses-swift: done
   8-7-guards-that-keep-the-invariants-true: backlog
   8-8-build-test-and-ui-test-every-target: done
   8-9-licensing-attribution-and-the-spdx-contract: backlog
@@ -203,3 +209,16 @@ development_status:
 #   2026-11-01  #19 1-17a onboarding: unskippable safety + server-optional Backend squash -> develop
 #   2026-11-01  #20 1-12a driver registry: derived slots + persisted active set    squash -> develop
 #   2026-11-01  #21 1-17b onboarding permissions + what-stops-monitoring warning   squash -> develop
+#   2026-11-01  #22 docs: FR-28 transient restore failures + tracker sync           squash -> develop
+#   2026-11-01  #23 1-12b registry owns Driver lifecycle; honest no-source states   squash -> develop
+#   2026-11-02  #24 1-12c Drivers screen, confirmed deactivation, per-Driver settings squash -> develop
+#   2026-11-02  #25 1-18 Driver-contributed Home cards, fixed order, no digits      squash -> develop
+#   2026-11-02  #26 docs: AD-3 amended for shared vendor wire targets              squash -> develop
+#   2026-11-02  #27 8-5 five required checks                                       squash -> develop
+#   2026-11-02  #28 1-7a TandemWire decoding (LOW/HIGH fail safe)                   squash -> develop
+#   2026-11-02  #29 8-6 CodeQL Swift + gitleaks in the Static Analysis Gate         squash -> develop
+#   2026-11-02  #30 1-7b Trace-Replay Driver                                        squash -> develop
+# OWED BEFORE LIVE TANDEM DATA REACHES ANY USER (from 1-7a review): hero shows LOW/HIGH for
+# out-of-range readings; Alert Floor treats below-range as urgent low (Epic 2). IOB ceiling needs a
+# source-backed SafetyConstants value. Maintainer actions: TestFlight credentials; mark the five
+# required checks on the develop ruleset; maintainer review of invented copy before public TestFlight.

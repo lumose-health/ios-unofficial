@@ -292,10 +292,16 @@ struct PackageManifestTests {
     func traceReplayDependencies() throws {
         let arguments = try #require(Self.targetArguments(named: "TraceReplayDriver", in: try Self.manifestSource()))
         #expect(arguments.contains("dependencies:[\"DriverAPI\",\"SafetyCore\",\"TandemWire\"]"))
-        #expect(arguments.contains("resources:[.copy(\"Traces\")]"))
+        #expect(arguments.contains("resources:traceReplayDriverResources"))
         #expect(arguments.contains("exclude:[\"README.md\"]"))
         let tests = try #require(Self.allTargetDeclarations(in: try Self.manifestSource()).first { $0.name == "TraceReplayDriverTests" }?.arguments)
-        #expect(tests.contains("resources:[.copy(\"Traces\")]"))
+        #expect(tests.contains("resources:traceReplayDriverResources"))
+        // The bundled traces ship exactly when the Driver is compiled: the
+        // committed switch, or the every-Driver build's override.
+        let manifest = Self.collapsed(try Self.manifestSource())
+        #expect(manifest.contains("lettraceReplayDriverCompiled=traceReplayDriverEnabled||everyDriverBuild"))
+        #expect(manifest.contains("lettraceReplayDriverResources:[Resource]=traceReplayDriverCompiled?[.copy(\"Traces\")]:[]"))
+        #expect(manifest.contains("lettraceReplayDriverSettings:[SwiftSetting]=traceReplayDriverCompiled?[.define(\"TRACE_REPLAY_DRIVER_ENABLED\")]:[]"))
     }
 
     @Test("TandemWire depends on exactly DriverAPI and SafetyCore")
