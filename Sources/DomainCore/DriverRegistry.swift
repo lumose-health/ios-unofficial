@@ -54,6 +54,7 @@ public actor DriverRegistry {
     private var lifecycles: [DriverIdentifier: DriverLifecycle]
     private var isBusy = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var observers: [UUID: AsyncStream<Void>.Continuation] = [:]
     #if DEBUG
     private var onEnqueue: (@Sendable () -> Void)?
     private var transitionFault: (@Sendable (DriverIdentifier, DriverLifecycleState) -> DriverFailure?)?
@@ -94,6 +95,25 @@ public actor DriverRegistry {
     }
 
     public var persistedSelection: Set<String> { persisted }
+
+    /// Yields after any lifecycle transition or selection save. Consecutive
+    /// changes may coalesce into one element, so an observer re-reads the state
+    /// it cares about rather than counting elements.
+    public func changes() -> AsyncStream<Void> {
+        let (stream, continuation) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        let id = UUID()
+        observers[id] = continuation
+        continuation.onTermination = { [weak self] _ in
+            Task { await self?.removeObserver(id) }
+        }
+        return stream
+    }
+
+    private func removeObserver(_ id: UUID) { observers[id] = nil }
+
+    private func notifyChanged() {
+        for continuation in observers.values { continuation.yield() }
+    }
 
     public func lifecycleState(of id: DriverIdentifier) -> DriverLifecycleState? {
         lifecycles[id]?.state
@@ -152,12 +172,14 @@ public actor DriverRegistry {
         do { try lifecycle.advance(to: next) }
         catch { throw .lifecycle(error) }
         lifecycles[id] = lifecycle
+        notifyChanged()
     }
 
     private func save(_ ids: Set<String>) throws(DriverRegistryError) {
         do { try store.save(ids) }
         catch { throw .persistenceFailed(error) }
         persisted = ids
+        notifyChanged()
     }
 
     private func tearDown(_ id: DriverIdentifier) async throws(DriverRegistryError) {

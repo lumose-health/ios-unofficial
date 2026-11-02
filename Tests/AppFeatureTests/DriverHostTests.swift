@@ -25,9 +25,17 @@ private final class HostSelectionStore: DriverSelectionStore, @unchecked Sendabl
     private let lock = NSLock()
     private var ids: Set<String>
     var saveFailure: DriverSelectionStoreFailure?
-    init(_ ids: Set<String>) { self.ids = ids }
-    func hasSavedSelection() -> Bool { true }
-    func load() throws(DriverSelectionStoreFailure) -> Set<String> { lock.withLock { ids } }
+    var loadFailure: DriverSelectionStoreFailure?
+    private let saved: Bool
+    init(_ ids: Set<String>, saved: Bool = true) { self.ids = ids; self.saved = saved }
+    func hasSavedSelection() -> Bool { saved }
+    func load() throws(DriverSelectionStoreFailure) -> Set<String> {
+        lock.lock()
+        defer { lock.unlock() }
+        if let loadFailure { throw loadFailure }
+        return ids
+    }
+    var savedIDs: Set<String> { lock.lock(); defer { lock.unlock() }; return ids }
     func save(_ ids: Set<String>) throws(DriverSelectionStoreFailure) {
         lock.lock()
         defer { lock.unlock() }
@@ -180,15 +188,160 @@ struct DriverHostTests {
         await model.setScenePhaseActive(true).value
         #expect(model.source == .connected(driver.descriptor.identifier))
         try await registry.deactivate(driver.descriptor.identifier)
-        #expect(await eventually { model.source == .pending && model.ports == nil })
+        // Still in the foreground, so Home reconnects and finds the slot empty.
+        #expect(await eventually { model.source == .noActiveDriver && model.ports == nil })
+    }
+
+    @Test @MainActor func transientSelectionLoadFailureShowsWillRetryAndForegroundRestores() async throws {
+        let seedTarget = HostTestDriver()
+        let selected = StreamingHostDriver()
+        let store = HostSelectionStore([selected.descriptor.identifier.rawValue], saved: false)
+        store.loadFailure = .unavailable(detail: "before first unlock")
+        let registry = try DriverRegistry(drivers: [seedTarget, selected], store: store)
+        let startup = Task {
+            await DriverStartup.run(registry: registry, store: store, firstLaunchDefault: seedTarget.descriptor.identifier)
+        }
+        let model = HomeModel(registry: registry, awaitStartup: { await startup.value },
+                              demoIdentifiers: [], scheduler: HostManualScheduler())
         await model.setScenePhaseActive(true).value
+        #expect(model.source == .selectionDeferred(.unavailable(detail: "before first unlock")))
+        #expect(model.ports == nil)
+        let message = HomeSourceMessage.make(source: model.source, displayName: model.displayName(of:))
+        #expect(message?.identifier == "home.source-deferred")
+        #expect(message?.title == "Data source not running")
+
+        store.loadFailure = nil
+        await model.setScenePhaseActive(false).value
+        await model.setScenePhaseActive(true).value
+        #expect(model.source == .connected(selected.descriptor.identifier))
+        #expect(await selected.activationCount == 1)
+        // The first-launch default never replaces a selection that was only unreadable.
+        #expect(await seedTarget.activationCount == 0)
+        #expect(store.savedIDs == [selected.descriptor.identifier.rawValue])
+        await model.setScenePhaseActive(false).value
+    }
+
+    @Test @MainActor func failedFirstLaunchSeedShowsDidntStart() async throws {
+        let driver = HostTestDriver(activationFailure: .authenticationRejected)
+        let id = driver.descriptor.identifier
+        let store = HostSelectionStore([], saved: false)
+        let registry = try DriverRegistry(drivers: [driver], store: store)
+        let model = HomeModel(registry: registry, awaitStartup: {
+            await DriverStartup.run(registry: registry, store: store, firstLaunchDefault: id)
+        }, demoIdentifiers: [id], scheduler: HostManualScheduler())
+        await model.setScenePhaseActive(true).value
+        #expect(model.source == .seedFailed(id, .activationFailed(id, .authenticationRejected)))
+        #expect(!model.isDemo)
+        let message = HomeSourceMessage.make(source: model.source, displayName: model.displayName(of:))
+        #expect(message?.identifier == "home.source-failed")
+        #expect(message?.body == "Host test Driver didn't start. Restart the app to try again.")
+    }
+
+    @Test @MainActor func pendingStartupShowsStartingMessage() async throws {
+        let gate = HostDeactivationGate()
+        let driver = HostTestDriver(activationGate: gate)
+        let model = makeHostModel(driver: driver, demoIdentifiers: [], scheduler: HostManualScheduler())
+        let connecting = model.setScenePhaseActive(true)
+        await gate.waitUntilEntered()
+        #expect(model.source == .pending)
+        let message = HomeSourceMessage.make(source: model.source, displayName: model.displayName(of:))
+        #expect(message?.identifier == "home.starting")
+        #expect(message?.title == "Starting…")
+        await gate.release()
+        await connecting.value
+        #expect(model.source == .connected(driver.descriptor.identifier))
+        #expect(HomeSourceMessage.make(source: model.source, displayName: model.displayName(of:)) == nil)
+    }
+
+    @Test @MainActor func holderChangeClearsPreviousValuesAndDemoLabel() async throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let demoSample = try glucose(150, at: now)
+        let demoStatus = try PumpStatusSnapshot(batteryFraction: 0.8, observedAt: now)
+        let demo = HostTestDriver(glucoseReads: [.value(demoSample)], pumpReads: [.value(demoStatus)])
+        let next = StreamingHostDriver()
+        let store = HostSelectionStore([demo.descriptor.identifier.rawValue])
+        let registry = try DriverRegistry(drivers: [demo, next], store: store)
+        let model = HomeModel(registry: registry, awaitStartup: {
+            await DriverStartup.run(registry: registry, store: store, firstLaunchDefault: nil)
+        }, demoIdentifiers: [demo.descriptor.identifier], clock: HostAdjustableClock(now: now),
+            scheduler: HostManualScheduler(), readGap: { _ in })
+        await model.setScenePhaseActive(true).value
+        #expect(model.latestGlucose == demoSample)
+        #expect(model.latestPumpStatus == demoStatus)
+        #expect(model.heroState.accessibilityLabel.hasPrefix("DEMO DATA"))
+
+        try await registry.activate(next.descriptor.identifier)
+        #expect(await eventually { model.source == .connected(next.descriptor.identifier) })
+        #expect(model.latestGlucose == nil)
+        #expect(model.latestIOB == nil)
+        #expect(model.latestPumpStatus == nil)
+        #expect(!model.isDemo)
+        #expect(model.heroState.valueText == "--")
+        #expect(!model.heroState.accessibilityLabel.hasPrefix("DEMO DATA"))
+
+        // An older sample from the new Driver is not held back by the old Driver's timestamp.
+        let older = try glucose(110, at: now.addingTimeInterval(-120))
+        await next.emit(older)
+        #expect(await eventually { model.latestGlucose == older })
+        await model.setScenePhaseActive(false).value
+    }
+
+    @Test @MainActor func teardownWithoutStreamEndDropsConnection() async throws {
+        // HostTestDriver's streams never finish, so only the registry can say it stopped.
+        let driver = HostTestDriver()
+        let store = HostSelectionStore([driver.descriptor.identifier.rawValue])
+        let registry = try DriverRegistry(drivers: [driver], store: store)
+        let model = HomeModel(registry: registry, awaitStartup: {
+            await DriverStartup.run(registry: registry, store: store, firstLaunchDefault: nil)
+        }, demoIdentifiers: [], scheduler: HostManualScheduler())
+        await model.setScenePhaseActive(true).value
+        #expect(model.source == .connected(driver.descriptor.identifier))
+        try await registry.deactivate(driver.descriptor.identifier)
+        #expect(await driver.didDeactivate)
+        #expect(await eventually { model.source == .noActiveDriver && model.ports == nil })
+        #expect(model.lifecycleState == .notActivated)
+    }
+
+    @Test @MainActor func teardownDuringConnectReadDropsLateWritesAndAttachment() async throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let lateStatus = try PumpStatusSnapshot(batteryFraction: 0.7, observedAt: now)
+        let gate = HostReadGate()
+        let driver = HostTestDriver(glucoseReads: [.value(try glucose(120, at: now))],
+                                    pumpReads: [.value(lateStatus)], pumpReadGate: gate)
+        let store = HostSelectionStore([driver.descriptor.identifier.rawValue])
+        let registry = try DriverRegistry(drivers: [driver], store: store)
+        let model = HomeModel(registry: registry, awaitStartup: {
+            await DriverStartup.run(registry: registry, store: store, firstLaunchDefault: nil)
+        }, demoIdentifiers: [], clock: HostAdjustableClock(now: now), scheduler: HostManualScheduler(), readGap: { _ in })
+        await gate.arm()
+        let connecting = model.setScenePhaseActive(true)
+        await gate.waitUntilEntered()
+        #expect(model.isRefreshing)
+        #expect(model.ports != nil)
+
+        try await registry.deactivate(driver.descriptor.identifier)
+        // The registry change drops the in-flight connection: the read's generation is stale.
+        #expect(await eventually { model.ports == nil && !model.isRefreshing })
+        await gate.release()
+        await connecting.value
+
+        #expect(model.latestPumpStatus == nil)
+        #expect(model.latestGlucose == nil)
+        // The held sequence stopped after its pump read and never read glucose.
+        #expect(await driver.readCounts == (0, 1))
         #expect(model.source == .noActiveDriver)
+        #expect(model.ports == nil)
     }
 
     @Test @MainActor func sourceMessagesCoverEveryState() {
         let id = HostTestDriver.simulatedIdentifier
         let name: (DriverIdentifier) -> String? = { _ in "Host test Driver" }
-        #expect(HomeSourceMessage.make(source: .pending, displayName: name) == nil)
+        #expect(HomeSourceMessage.make(source: .pending, displayName: name) ==
+                HomeSourceMessage(title: "Starting…", body: "Connecting to your data source.", identifier: "home.starting"))
+        #expect(HomeSourceMessage.make(source: .seedFailed(id, .activationFailed(id, .timedOut)), displayName: name) ==
+                HomeSourceMessage(title: "Unable to start data source", body: "Host test Driver didn't start. Restart the app to try again.", identifier: "home.source-failed"))
+        #expect(HomeSourceMessage.make(source: .selectionDeferred(.unavailable(detail: "locked")), displayName: name) ==
+                HomeSourceMessage(title: "Data source not running", body: "Your data source isn't running yet. It will retry when you return to the app.", identifier: "home.source-deferred"))
         #expect(HomeSourceMessage.make(source: .connected(id), displayName: name) == nil)
         #expect(HomeSourceMessage.make(source: .noActiveDriver, displayName: name) ==
                 HomeSourceMessage(title: "No glucose source", body: "No active Driver is providing glucose readings, so there is nothing to show here.", identifier: "home.no-glucose-source"))

@@ -26,6 +26,18 @@ struct CapabilityReadTests {
         #expect(try await insulin.doses(since: Date(timeIntervalSince1970: 0)).isEmpty)
     }
 
+    @Test func changesYieldAfterLifecycleTransitionAndSave() async throws {
+        let driver = PortTestDriver(id: id, capabilities: [.insulinSource])
+        let registry = try DriverRegistry(drivers: [driver], store: RecordingSelectionStore())
+        let changes = await registry.changes()
+        var iterator = changes.makeAsyncIterator()
+        try await registry.activate(id)
+        #expect(await iterator.next() != nil)
+        try await registry.deactivate(id)
+        #expect(await iterator.next() != nil)
+        #expect(await registry.slots.holder(of: .insulinSource) == nil)
+    }
+
     @Test func everyCapabilityHasAnExplicitAbsentState() async throws {
         let registry = try DriverRegistry(drivers: [], store: RecordingSelectionStore())
         for capability in Capability.allCases {

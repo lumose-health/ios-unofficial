@@ -9,7 +9,12 @@ public enum HomeSource: Sendable, Equatable {
     case connected(DriverIdentifier)
     case noActiveDriver
     case startFailed(DriverIdentifier, DriverFailure)
+    /// The first-launch default could not be activated.
+    case seedFailed(DriverIdentifier, DriverRegistryError)
     case deferred(DriverIdentifier, DriverFailure)
+    /// The saved selection could not be read yet (for example before first
+    /// unlock). It is still on disk, and restore runs again on the next foreground.
+    case selectionDeferred(DriverSelectionStoreFailure)
     case unavailable(CapabilityReadError)
 }
 
@@ -26,7 +31,11 @@ public struct HomeSourceMessage: Sendable, Equatable {
 
     public static func make(source: HomeSource, displayName: (DriverIdentifier) -> String?) -> Self? {
         switch source {
-        case .pending, .connected: return nil
+        case .connected: return nil
+        case .pending:
+            return Self(title: "Starting…",
+                        body: "Connecting to your data source.",
+                        identifier: "home.starting")
         // A glucose read never yields the remaining errors, but if one did, nothing
         // is providing glucose; say so rather than fall through to the dashboard.
         case .noActiveDriver, .unavailable(.noActiveDriver), .unavailable(.notSingleInstance),
@@ -34,13 +43,17 @@ public struct HomeSourceMessage: Sendable, Equatable {
             return Self(title: "No glucose source",
                         body: "No active Driver is providing glucose readings, so there is nothing to show here.",
                         identifier: "home.no-glucose-source")
-        case .startFailed(let id, _), .unavailable(.holderNotRunning(let id, _, _)):
+        case .startFailed(let id, _), .seedFailed(let id, _), .unavailable(.holderNotRunning(let id, _, _)):
             return Self(title: "Unable to start data source",
                         body: "\(displayName(id) ?? id.rawValue) didn't start. Restart the app to try again.",
                         identifier: "home.source-failed")
         case .deferred(let id, _):
             return Self(title: "Data source not running",
                         body: "\(displayName(id) ?? id.rawValue) isn't running. It will retry when the app starts again.",
+                        identifier: "home.source-deferred")
+        case .selectionDeferred:
+            return Self(title: "Data source not running",
+                        body: "Your data source isn't running yet. It will retry when you return to the app.",
                         identifier: "home.source-deferred")
         case .unavailable(.portUnavailable(let id, _)):
             return Self(title: "Unable to start data source",
@@ -101,12 +114,20 @@ public final class HomeModel {
     private var connecting = false
     private var connectionGeneration = 0
     private var refreshGeneration: Int?
+    private var startupOutcome: DriverStartupOutcome?
+    // Set when a connection is dropped while `connect()` is running, so that
+    // call connects again instead of a second one racing it.
+    private var reconnectAfterConnect = false
+    // The Driver whose values are cached. A different holder never inherits them.
+    private var cacheHolder: DriverIdentifier?
     // These handles are mutated on the main actor and only read outside it during deinit.
     @ObservationIgnored nonisolated(unsafe) private var tickRegistration: SchedulerRegistration?
     @ObservationIgnored nonisolated(unsafe) private var streamTasks: [Task<Void, Never>] = []
+    @ObservationIgnored nonisolated(unsafe) private var registryObserver: Task<Void, Never>?
 
     deinit {
         tickRegistration?.cancel()
+        registryObserver?.cancel()
         for task in streamTasks { task.cancel() }
     }
 
@@ -130,6 +151,14 @@ public final class HomeModel {
         self.isDemo = isDemo
         self.heroState = HeroState.make(sample: nil, trendSourceTimestamp: nil, iob: nil, pumpStatus: nil,
                                         targetRange: .default, unit: .mgdl, now: clock.now, isDemo: isDemo)
+        // A Driver torn down by the registry may never finish its streams, so
+        // the connection is also checked against the registry on every change.
+        registryObserver = Task { [weak self, registry] in
+            for await _ in await registry.changes() {
+                guard let self else { return }
+                await self.validateConnection()
+            }
+        }
     }
 
     public var footerMessage: String? {
@@ -169,21 +198,39 @@ public final class HomeModel {
         guard !connecting else { return }
         connecting = true
         defer { connecting = false }
+        repeat {
+            reconnectAfterConnect = false
+            await connectOnce()
+        } while reconnectAfterConnect && wantsActive
+    }
+
+    private func loadStartupOutcome() async -> DriverStartupOutcome {
+        guard let previous = startupOutcome else { return await awaitStartup() }
+        guard previous.report.selectionFailure?.isTransient == true else { return previous }
+        return await DriverStartup.retryRestore(registry: registry)
+    }
+
+    private func connectOnce() async {
         startTickerIfNeeded()
         refreshHero()
         let generation = connectionGeneration
-        let outcome = await awaitStartup()
+        let outcome = await loadStartupOutcome()
         guard generation == connectionGeneration else { return }
+        startupOutcome = outcome
         let glucoseHeld: HeldPort
         do { glucoseHeld = try await registry.port(for: .glucoseSource) }
         catch {
             guard generation == connectionGeneration else { return }
             if error == .cancelled { return }
             if error == .noActiveDriver(.glucoseSource) {
-                if let failed = glucoseFailure(in: outcome.report.failed) {
+                if let failure = outcome.report.selectionFailure, failure.isTransient {
+                    source = .selectionDeferred(failure)
+                } else if let failed = glucoseFailure(in: outcome.report.failed) {
                     source = .startFailed(failed.id, failed.failure)
                 } else if let deferred = glucoseFailure(in: outcome.report.deferred) {
                     source = .deferred(deferred.id, deferred.failure)
+                } else if let seedError = outcome.seedError, let target = outcome.seedTarget {
+                    source = .seedFailed(target, seedError)
                 } else { source = .noActiveDriver }
             } else if case .holderNotRunning(let id, _, _) = error,
                       let deferred = outcome.report.deferred.first(where: { $0.id == id }) {
@@ -225,11 +272,20 @@ public final class HomeModel {
             pump = nil
         }
         guard generation == connectionGeneration else { return }
+        if cacheHolder != glucoseHeld.holder {
+            // Another Driver's values must not be shown as this one's, and its
+            // timestamps must not gate this Driver's samples.
+            cacheHolder = glucoseHeld.holder
+            latestGlucose = nil
+            latestIOB = nil
+            latestPumpStatus = nil
+        }
         let activePorts = ActiveDriverPorts(identifier: glucoseHeld.holder, glucoseSource: glucose,
                                             insulinSource: insulin, pumpStatusSource: pump)
         ports = activePorts
         slotErrors = errors
         lifecycleState = await registry.lifecycleState(of: glucoseHeld.holder) ?? .notActivated
+        guard generation == connectionGeneration else { return }
         isDemo = DemoDataLabel.isVisible(activeGlucoseDriver: glucoseHeld.holder, demoIdentifiers: demoIdentifiers)
         refreshHero()
         if !isRefreshing {
@@ -240,21 +296,33 @@ public final class HomeModel {
         }
         source = .connected(glucoseHeld.holder)
         streamTasks.append(Task { [weak self] in
-            for await sample in glucose.readings { self?.receive(sample) }
+            for await sample in glucose.readings {
+                guard let self, self.connectionGeneration == generation else { return }
+                self.receive(sample)
+            }
             if !Task.isCancelled { self?.streamEnded(generation: generation) }
         })
         if let insulin {
             streamTasks.append(Task { [weak self] in
-                for await sample in insulin.insulinOnBoard { self?.receive(sample) }
+                for await sample in insulin.insulinOnBoard {
+                    guard let self, self.connectionGeneration == generation else { return }
+                    self.receive(sample)
+                }
                 if !Task.isCancelled { self?.streamEnded(generation: generation) }
             })
         }
         if let pump {
             streamTasks.append(Task { [weak self] in
-                for await status in pump.status { self?.receive(status) }
+                for await status in pump.status {
+                    guard let self, self.connectionGeneration == generation else { return }
+                    self.receive(status)
+                }
                 if !Task.isCancelled { self?.streamEnded(generation: generation) }
             })
         }
+        // The registry may have torn the holder down before `ports` was set,
+        // when no change could yet be matched against this connection.
+        await validateConnection()
     }
 
     private func glucoseFailure(in failures: [RestoreFailure]) -> RestoreFailure? {
@@ -266,6 +334,22 @@ public final class HomeModel {
 
     private func streamEnded(generation: Int) {
         guard generation == connectionGeneration else { return }
+        dropConnection()
+    }
+
+    /// Drops the connection when its glucose holder is no longer the running
+    /// holder of the slot. A failed read on the same holder never gets here.
+    private func validateConnection() async {
+        guard let ports else { return }
+        let generation = connectionGeneration
+        let holder = await registry.slots.holder(of: .glucoseSource)
+        let state = await registry.lifecycleState(of: ports.identifier)
+        guard generation == connectionGeneration, self.ports != nil else { return }
+        if holder == ports.identifier, state == .active || state == .degraded { return }
+        dropConnection()
+    }
+
+    private func dropConnection() {
         connectionGeneration &+= 1
         refreshGeneration = nil
         foregroundReadSatisfied = false
@@ -274,6 +358,9 @@ public final class HomeModel {
         ports = nil
         lifecycleState = .notActivated
         source = .pending
+        guard wantsActive else { return }
+        if connecting { reconnectAfterConnect = true }
+        else { Task { [weak self] in await self?.connect() } }
     }
 
     public func refresh() async {
