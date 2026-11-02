@@ -30,6 +30,27 @@ struct SimulatedDriverCapabilityTests {
         #expect(driver.descriptor.identifier == SimulatedDriver.identifier)
     }
 
+    @Test("The simulated dashboard card contains only non-numeric demo information")
+    func dashboardCardIsSafeDemoCopy() async throws {
+        let (driver, _, _) = try makeDriver()
+        let cards = await driver.dashboardCards()
+        #expect(cards.count == 1)
+        let card = try #require(cards.first)
+        #expect(card.id == "simulated.status")
+        #expect(card.title == "Simulated Driver")
+        #expect(card.priority == DashboardCardDescriptor.minimumDriverPriority)
+        #expect(card.elements == [
+            .statusBadge(text: "Demo", color: .info),
+            .label(text: "Synthetic data for trying the app. It does not come from a device.", style: .body),
+        ])
+        let text = card.elements.map { element -> String in
+            switch element {
+            case .label(let text, _), .statusBadge(let text, _): text
+            }
+        }.joined()
+        #expect(text.rangeOfCharacter(from: .decimalDigits) == nil)
+    }
+
     /// The descriptor exists twice by necessity: the instance carries one, and
     /// `DriverCatalog.entries` carries an independent literal (DriverAPI cannot
     /// import SimulatedDriver, so the catalog cannot reference the instance).

@@ -1,7 +1,7 @@
 import Foundation
 
-/// What every Driver implements: an identity, a set of Capability ports, and two
-/// entry points the platform calls (AD-16).
+/// What every Driver implements: an identity, its Capability ports, and the
+/// read-only entry points the platform calls (AD-16).
 ///
 /// ## What is NOT here, and why
 ///
@@ -66,6 +66,12 @@ public protocol Driver: Actor {
     ///   rather than absorbing it.
     func capability(_ capability: Capability) -> CapabilityPort?
 
+    /// Supplies declarative dashboard content when the platform refreshes Home.
+    /// The platform owns its validation and presentation; this data-only method
+    /// lets card content reflect the Driver's current state without making it
+    /// part of constant catalog metadata.
+    func dashboardCards() async -> [DashboardCardDescriptor]
+
     /// Brings the Driver up.
     ///
     /// Called by the platform on entry into ``DriverLifecycleState/activating``,
@@ -97,4 +103,8 @@ public protocol Driver: Actor {
     /// The platform moves the lifecycle to ``DriverLifecycleState/deactivating``
     /// before and ``DriverLifecycleState/notActivated`` after.
     func deactivate() async
+}
+
+public extension Driver {
+    func dashboardCards() async -> [DashboardCardDescriptor] { [] }
 }

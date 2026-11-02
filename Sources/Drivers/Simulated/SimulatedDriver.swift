@@ -130,6 +130,18 @@ public actor SimulatedDriver: Driver {
         }
     }
 
+    public func dashboardCards() async -> [DashboardCardDescriptor] {
+        [DashboardCardDescriptor(
+            id: "simulated.status",
+            title: "Simulated Driver",
+            priority: DashboardCardDescriptor.minimumDriverPriority,
+            elements: [
+                .statusBadge(text: "Demo", color: .info),
+                .label(text: "Synthetic data for trying the app. It does not come from a device.", style: .body),
+            ]
+        )]
+    }
+
     /// Registers a fresh tick, cancelling whatever registration is already
     /// live. Necessary because ``DriverLifecycleState/active`` permits a
     /// direct move to ``DriverLifecycleState/failed`` without passing through

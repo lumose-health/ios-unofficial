@@ -90,6 +90,7 @@ public final class HomeModel {
     public private(set) var latestGlucose: GlucoseSample?
     public private(set) var latestIOB: InsulinOnBoardSample?
     public private(set) var latestPumpStatus: PumpStatusSnapshot?
+    public private(set) var driverCards: [ContributedCard] = []
     /// A read from an earlier connection cannot block or update the current one.
     public var isRefreshing: Bool { refreshGeneration == connectionGeneration }
     public private(set) var heroState: HeroState
@@ -142,10 +143,17 @@ public final class HomeModel {
     @ObservationIgnored nonisolated(unsafe) private var tickRegistration: SchedulerRegistration?
     @ObservationIgnored nonisolated(unsafe) private var streamTasks: [Task<Void, Never>] = []
     @ObservationIgnored nonisolated(unsafe) private var registryObserver: Task<Void, Never>?
+    // Driver card code runs only inside this task, never inline in the change
+    // loop or `refresh()`, so a Driver that never answers cannot stall Home.
+    @ObservationIgnored nonisolated(unsafe) private var cardReload: Task<Void, Never>?
+    // Only the latest reload may publish, so a slower earlier one cannot bring
+    // back cards that a later one already removed.
+    private var cardReloadSequence = 0
 
     deinit {
         tickRegistration?.cancel()
         registryObserver?.cancel()
+        cardReload?.cancel()
         for task in streamTasks { task.cancel() }
     }
 
@@ -175,6 +183,7 @@ public final class HomeModel {
             for await _ in await registry.changes() {
                 guard let self else { return }
                 await self.validateConnection()
+                self.reloadDriverCards()
             }
         }
     }
@@ -190,6 +199,29 @@ public final class HomeModel {
 
     public func displayName(of id: DriverIdentifier) -> String? {
         registry.descriptors.first(where: { $0.identifier == id })?.displayName
+    }
+
+    public func isDemoDriver(_ id: DriverIdentifier) -> Bool { demoIdentifiers.contains(id) }
+
+    /// Replaces any reload in flight with a new one and returns without
+    /// waiting for Driver card code.
+    private func reloadDriverCards() {
+        cancelCardReload()
+        guard ports != nil else { return }
+        let sequence = cardReloadSequence
+        let generation = connectionGeneration
+        cardReload = Task { [weak self, registry] in
+            let cards = await registry.contributedCards()
+            guard let self, !Task.isCancelled, sequence == self.cardReloadSequence,
+                  generation == self.connectionGeneration, self.ports != nil else { return }
+            self.driverCards = cards
+        }
+    }
+
+    private func cancelCardReload() {
+        cardReload?.cancel()
+        cardReload = nil
+        cardReloadSequence &+= 1
     }
 
     /// Records the latest scene phase before dispatching any asynchronous work.
@@ -294,6 +326,8 @@ public final class HomeModel {
                 source = .deferred(id, deferred.failure)
             } else { source = .unavailable(error) }
             ports = nil
+            cancelCardReload()
+            driverCards = []
             if case .holderNotRunning(_, _, let state) = error {
                 lifecycleState = state
             } else {
@@ -382,6 +416,7 @@ public final class HomeModel {
         // The registry may have torn the holder down before `ports` was set,
         // when no change could yet be matched against this connection.
         await validateConnection()
+        reloadDriverCards()
     }
 
     private func glucoseFailure(in failures: [RestoreFailure]) -> RestoreFailure? {
@@ -432,6 +467,8 @@ public final class HomeModel {
         streamTasks.removeAll()
         ports = nil
         portsEpoch = nil
+        cancelCardReload()
+        driverCards = []
         lifecycleState = .notActivated
         if !keepCache {
             cacheHolder = nil
@@ -451,7 +488,10 @@ public final class HomeModel {
 
     public func refresh() async {
         guard !isRefreshing, lifecycleState == .active, let ports else { return }
-        await runReadSequence(ports: ports, generation: connectionGeneration)
+        let generation = connectionGeneration
+        await runReadSequence(ports: ports, generation: generation)
+        guard generation == connectionGeneration else { return }
+        reloadDriverCards()
     }
 
     private func runReadSequence(ports: ActiveDriverPorts, generation: Int) async {
