@@ -209,7 +209,7 @@ struct PackageManifestTests {
         let entries = try FileManager.default.contentsOfDirectory(atPath: sources.path)
             .filter { !$0.hasPrefix(".") }
             .sorted()
-        #expect(entries == ["AppFeature", "DomainCore", "DriverAPI", "Drivers", "Persistence", "SafetyCore"])
+        #expect(entries == ["AppFeature", "DomainCore", "DriverAPI", "Drivers", "Persistence", "SafetyCore", "Wire"])
     }
 
     /// `Persistence` is the only target allowed to see the SQL vendor, and its
@@ -254,6 +254,7 @@ struct PackageManifestTests {
             "SimulatedDriver", "SimulatedDriverTests",
             "Persistence", "PersistenceTests",
             "AppFeature", "AppFeatureTests",
+            "TandemWire", "TandemWireTests",
         ]))
     }
 
@@ -283,5 +284,29 @@ struct PackageManifestTests {
             arguments.contains("dependencies:[\"DriverAPI\",\"SafetyCore\"]"),
             "SimulatedDriver may depend only on DriverAPI and SafetyCore (AD-3); its target declares: \(arguments)"
         )
+    }
+
+    @Test("TandemWire depends on exactly DriverAPI and SafetyCore")
+    func tandemWireDependencies() throws {
+        let arguments = try #require(Self.targetArguments(named: "TandemWire", in: try Self.manifestSource()))
+        #expect(arguments.contains("path:\"Sources/Wire/Tandem\""))
+        #expect(arguments.contains("dependencies:[\"DriverAPI\",\"SafetyCore\"]"))
+    }
+
+    @Test("Every wire target stays within the DriverAPI and SafetyCore dependency ceiling")
+    func wireTargetsStayWithinDependencyCeiling() throws {
+        let declarations = Self.allTargetDeclarations(in: try Self.manifestSource())
+        let wireTargets = declarations.filter { $0.arguments.contains("path:\"Sources/Wire/") }
+        #expect(wireTargets.map(\.name) == ["TandemWire"])
+        for target in wireTargets {
+            guard let start = target.arguments.range(of: "dependencies:["),
+                  let end = target.arguments.range(of: "]", range: start.upperBound..<target.arguments.endIndex)
+            else {
+                Issue.record("Wire target \(target.name) has no readable dependency list")
+                continue
+            }
+            let dependencies = target.arguments[start.upperBound..<end.lowerBound].split(separator: ",")
+            #expect(dependencies.allSatisfy { $0 == "\"DriverAPI\"" || $0 == "\"SafetyCore\"" })
+        }
     }
 }
