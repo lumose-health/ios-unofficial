@@ -77,7 +77,9 @@ public struct DeactivationPrompt: Identifiable, Hashable, Sendable {
 
     deinit { registryObserver?.cancel() }
 
-    private func refresh() async {
+    /// Re-reads the registry. The screen calls this when it appears, so it
+    /// never shows a state from before it was last on screen.
+    public func refresh() async {
         let selection = await registry.persistedSelection
         let selectionUnavailable: Bool
         if case .unavailable = await registry.selectionLoadFailure { selectionUnavailable = true }
@@ -269,6 +271,7 @@ public struct DriversScreen: View {
             }
         }
         .navigationTitle("Drivers")
+        .task { await model.refresh() }
         #if os(iOS)
         .toolbar(.hidden, for: .tabBar)
         #endif

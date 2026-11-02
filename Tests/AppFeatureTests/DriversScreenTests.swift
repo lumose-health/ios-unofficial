@@ -130,6 +130,23 @@ struct DriversScreenTests {
         await model.activate(driver.descriptor.id)
         #expect(await driver.activationCount == 0)
     }
+
+    @Test @MainActor func emptySelectionReadAfterUnlockClearsTheNotice() async throws {
+        let driver = ScreenTestDriver(id: "test.screen.unlocked", name: "Unlocked", capabilities: [.glucoseSource],
+                                      verification: .beta)
+        let store = ScreenSelectionStore(loadFailure: .unavailable(detail: "protected data unavailable"))
+        let registry = try DriverRegistry(drivers: [driver], store: store)
+        let model = DriversModel(registry: registry)
+        #expect(await screenEventually { model.selectionNotice != nil })
+
+        // The saved selection is empty, so restore starts nothing; the screen
+        // must still hear that the selection can be read again.
+        store.setLoadFailure(nil)
+        _ = await registry.restore()
+        #expect(await screenEventually { model.selectionNotice == nil })
+        #expect(model.rows[0].canActivate)
+        #expect(await driver.activationCount == 0)
+    }
 }
 
 private actor ScreenTestDriver: Driver {
@@ -159,12 +176,16 @@ private actor ScreenTestDriver: Driver {
 private final class ScreenSelectionStore: DriverSelectionStore, @unchecked Sendable {
     private let lock = NSLock()
     private var ids: Set<String> = []
-    private let loadFailure: DriverSelectionStoreFailure?
+    private var loadFailure: DriverSelectionStoreFailure?
     init(loadFailure: DriverSelectionStoreFailure? = nil) { self.loadFailure = loadFailure }
+    func setLoadFailure(_ failure: DriverSelectionStoreFailure?) {
+        lock.lock(); defer { lock.unlock() }; loadFailure = failure
+    }
     func hasSavedSelection() -> Bool { true }
     func load() throws(DriverSelectionStoreFailure) -> Set<String> {
+        lock.lock(); defer { lock.unlock() }
         if let loadFailure { throw loadFailure }
-        lock.lock(); defer { lock.unlock() }; return ids
+        return ids
     }
     func save(_ ids: Set<String>) throws(DriverSelectionStoreFailure) {
         lock.lock(); defer { lock.unlock() }; self.ids = ids
@@ -192,10 +213,12 @@ private actor ScreenGate {
     }
 }
 
+/// Polls until `condition` holds or two seconds pass.
 @MainActor private func screenEventually(_ condition: @MainActor () -> Bool) async -> Bool {
-    for _ in 0..<2000 {
+    let deadline = ContinuousClock.now + .seconds(2)
+    while ContinuousClock.now < deadline {
         if condition() { return true }
-        await Task.yield()
+        try? await Task.sleep(for: .milliseconds(1))
     }
     return condition()
 }

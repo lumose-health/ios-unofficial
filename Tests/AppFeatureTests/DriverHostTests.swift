@@ -272,6 +272,27 @@ struct DriverHostTests {
         await model.setScenePhaseActive(false).value
     }
 
+    @Test @MainActor func startupFailureStopsApplyingAfterTheUserChangesDrivers() async throws {
+        let failing = HostTestDriver(activationFailure: .authenticationRejected)
+        let working = StreamingHostDriver()
+        let store = HostSelectionStore([failing.descriptor.identifier.rawValue])
+        let registry = try DriverRegistry(drivers: [failing, working], store: store)
+        let model = HomeModel(registry: registry, awaitStartup: {
+            await DriverStartup.run(registry: registry, store: store, firstLaunchDefault: nil)
+        }, demoIdentifiers: [], scheduler: HostManualScheduler())
+        await model.setScenePhaseActive(true).value
+        #expect(model.source == .startFailed(failing.descriptor.identifier, .authenticationRejected))
+
+        try await registry.activate(working.descriptor.identifier)
+        #expect(await eventually { model.source == .connected(working.descriptor.identifier) })
+        try await registry.deactivate(working.descriptor.identifier)
+        #expect(await eventually { model.source == .noActiveDriver && model.ports == nil })
+        let message = HomeSourceMessage.make(source: model.source, displayName: model.displayName(of:))
+        #expect(message?.identifier == "home.no-glucose-source")
+        #expect(message?.title == "No glucose source")
+        await model.setScenePhaseActive(false).value
+    }
+
     @Test @MainActor func failedFirstLaunchSeedShowsDidntStart() async throws {
         let driver = HostTestDriver(activationFailure: .authenticationRejected)
         let id = driver.descriptor.identifier

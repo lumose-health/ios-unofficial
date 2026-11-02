@@ -301,6 +301,9 @@ public actor DriverRegistry {
             } catch {
                 loadFailure = error
             }
+            // A selection that becomes readable but is empty starts nothing, so
+            // observers would otherwise never learn it can be read again.
+            if loadFailure != failure { notifyChanged() }
         }
         if let loadFailure {
             report.selectionFailure = loadFailure

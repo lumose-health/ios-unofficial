@@ -123,6 +123,11 @@ public final class HomeModel {
     private var connectionGeneration = 0
     private var refreshGeneration: Int?
     private var startupOutcome: DriverStartupOutcome?
+    // The registry's selection and activation epochs when the startup outcome
+    // was read. Once they move, the user has changed Drivers and the outcome no
+    // longer describes what is running.
+    private var startupSnapshot: RegistrySnapshot?
+    private var startupSuperseded = false
     // The glucose holder's activation epoch when its ports were read. A
     // deactivate and activate that coalesce into one registry change still
     // move the epoch, so ports from the earlier activation are not kept.
@@ -224,19 +229,45 @@ public final class HomeModel {
         } while runningConnect == token && wantsActive && connectIfStillUnconnected && ports == nil
     }
 
-    private func loadStartupOutcome() async -> DriverStartupOutcome {
-        guard let previous = startupOutcome else { return await awaitStartup() }
-        guard previous.report.selectionFailure?.isTransient == true else { return previous }
-        return await DriverStartup.retryRestore(registry: registry)
+    private struct RegistrySnapshot: Equatable {
+        let selection: Set<String>
+        let epochs: [DriverIdentifier: Int]
+    }
+
+    private func registrySnapshot() async -> RegistrySnapshot {
+        var epochs: [DriverIdentifier: Int] = [:]
+        for descriptor in registry.descriptors {
+            epochs[descriptor.identifier] = await registry.activationEpoch(of: descriptor.identifier)
+        }
+        return RegistrySnapshot(selection: await registry.persistedSelection, epochs: epochs)
+    }
+
+    /// Returns the startup outcome and whether it was read just now. A transient
+    /// selection failure is retried on every connect.
+    private func loadStartupOutcome() async -> (DriverStartupOutcome, fresh: Bool) {
+        guard let previous = startupOutcome else { return (await awaitStartup(), true) }
+        guard previous.report.selectionFailure?.isTransient == true else { return (previous, false) }
+        return (await DriverStartup.retryRestore(registry: registry), true)
     }
 
     private func connectOnce() async {
         startTickerIfNeeded()
         refreshHero()
         let generation = connectionGeneration
-        let outcome = await loadStartupOutcome()
+        let (outcome, fresh) = await loadStartupOutcome()
         guard generation == connectionGeneration else { return }
         startupOutcome = outcome
+        let snapshot = await registrySnapshot()
+        guard generation == connectionGeneration else { return }
+        if fresh {
+            startupSnapshot = snapshot
+            startupSuperseded = false
+        } else if snapshot != startupSnapshot {
+            startupSuperseded = true
+        }
+        // Startup failures describe the Drivers as startup left them, and stop
+        // applying after the first change the user makes.
+        let startupReport: RestoreReport? = startupSuperseded ? nil : outcome.report
         // Read before the port, so a later activation can only look newer than
         // the ports it produced, never older.
         var epochBeforePort: (holder: DriverIdentifier, epoch: Int)?
@@ -251,15 +282,15 @@ public final class HomeModel {
             if error == .noActiveDriver(.glucoseSource) {
                 if let failure = outcome.report.selectionFailure, failure.isTransient {
                     source = .selectionDeferred(failure)
-                } else if let failed = glucoseFailure(in: outcome.report.failed) {
+                } else if let failed = glucoseFailure(in: startupReport?.failed ?? []) {
                     source = .startFailed(failed.id, failed.failure)
-                } else if let deferred = glucoseFailure(in: outcome.report.deferred) {
+                } else if let deferred = glucoseFailure(in: startupReport?.deferred ?? []) {
                     source = .deferred(deferred.id, deferred.failure)
-                } else if let seedError = outcome.seedError, let target = outcome.seedTarget {
+                } else if !startupSuperseded, let seedError = outcome.seedError, let target = outcome.seedTarget {
                     source = .seedFailed(target, seedError)
                 } else { source = .noActiveDriver }
             } else if case .holderNotRunning(let id, _, _) = error,
-                      let deferred = outcome.report.deferred.first(where: { $0.id == id }) {
+                      let deferred = startupReport?.deferred.first(where: { $0.id == id }) {
                 source = .deferred(id, deferred.failure)
             } else { source = .unavailable(error) }
             ports = nil
