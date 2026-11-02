@@ -46,7 +46,8 @@ public struct RestoreReport: Equatable, Sendable {
 /// Owns lifecycle transitions and the persisted active selection.
 public actor DriverRegistry {
     private let drivers: [DriverIdentifier: any Driver]
-    private let descriptors: [DriverDescriptor]
+    public nonisolated let descriptors: [DriverDescriptor]
+    public nonisolated let initialSlots: DriverSlots
     private let store: any DriverSelectionStore
     private var persisted: Set<String>
     private var loadFailure: DriverSelectionStoreFailure?
@@ -70,11 +71,15 @@ public actor DriverRegistry {
         self.lifecycles = Dictionary(uniqueKeysWithValues: byID.keys.map { ($0, DriverLifecycle()) })
         self.store = store
         do {
-            self.persisted = try store.load()
+            let loaded = try store.load()
+            self.persisted = loaded
             self.loadFailure = nil
+            let known = Set(byID.keys.filter { loaded.contains($0.rawValue) })
+            self.initialSlots = DriverSlots.derive(active: known, descriptors: self.descriptors)
         } catch {
             self.persisted = []
             self.loadFailure = error
+            self.initialSlots = DriverSlots.derive(active: [], descriptors: self.descriptors)
         }
     }
 
@@ -92,6 +97,27 @@ public actor DriverRegistry {
 
     public func lifecycleState(of id: DriverIdentifier) -> DriverLifecycleState? {
         lifecycles[id]?.state
+    }
+
+    /// Reads one selected slot without waiting for lifecycle operations on other Drivers.
+    public func port(for capability: Capability) async throws(CapabilityReadError) -> HeldPort {
+        guard capability.cardinality == .singleInstance else { throw .notSingleInstance(capability) }
+        while true {
+            if Task.isCancelled { throw .cancelled }
+            guard let holder = slots.holder(of: capability) else { throw .noActiveDriver(capability) }
+            let state = lifecycles[holder]?.state ?? .notActivated
+            guard state == .active || state == .degraded else {
+                throw .holderNotRunning(holder, capability, state)
+            }
+            guard let driver = drivers[holder] else { throw .noActiveDriver(capability) }
+            let port = await driver.capability(capability)
+            if Task.isCancelled { throw .cancelled }
+            let currentState = lifecycles[holder]?.state ?? .notActivated
+            guard slots.holder(of: capability) == holder,
+                  currentState == .active || currentState == .degraded else { continue }
+            guard let port, port.capability == capability else { throw .portUnavailable(holder, capability) }
+            return HeldPort(holder: holder, port: port)
+        }
     }
 
     #if DEBUG

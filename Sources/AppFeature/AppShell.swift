@@ -66,11 +66,13 @@ struct MainTabView: View {
         switch tab {
         case .home:
             Group {
-                if let activationError = model.hostError {
+                if let message = HomeSourceMessage.make(source: model.source, displayName: model.displayName(of:)) {
                     VStack(spacing: 12) {
-                        Text("Unable to start data source").font(.headline)
-                        Text(activationError.recoverer)
-                    }.padding(16)
+                        Text(message.title).font(.headline)
+                        Text(message.body).foregroundStyle(.primary)
+                    }
+                    .padding(16)
+                    .accessibilityIdentifier(message.identifier)
                 } else {
                     HomeScreen()
                 }

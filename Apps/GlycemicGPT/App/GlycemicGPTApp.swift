@@ -2,6 +2,7 @@ import SwiftUI
 import AppFeature
 import SimulatedDriver
 import SafetyCore
+import DomainCore
 @_spi(DriverPlatform) import DriverAPI
 
 @main
@@ -13,8 +14,16 @@ struct GlycemicGPTApp: App {
     init() {
         startDestination = StartDestination.resolve(onboardingComplete: OnboardingCompletion.isComplete(in: .standard))
         let validator = AppComposition.makeSafetyValidator()
-        let driver = SimulatedDriver(clock: SystemClock(), scheduler: WallClockScheduler(), validator: validator)
-        _model = State(initialValue: HomeModel(driver: driver, demoIdentifiers: [SimulatedDriver.identifier]))
+        let simulated = SimulatedDriver(clock: SystemClock(), scheduler: WallClockScheduler(), validator: validator)
+        let store = FileDriverSelectionStore(fileURL: AppComposition.driverSelectionFileURL)
+        let registry: DriverRegistry
+        do { registry = try DriverRegistry(drivers: [simulated], store: store) }
+        catch { preconditionFailure("Driver identifiers in this build must be unique: \(error)") }
+        let startup = Task {
+            await DriverStartup.run(registry: registry, store: store, firstLaunchDefault: SimulatedDriver.identifier)
+        }
+        _model = State(initialValue: HomeModel(registry: registry, awaitStartup: { await startup.value },
+                                              demoIdentifiers: [SimulatedDriver.identifier]))
     }
 
     var body: some Scene {
