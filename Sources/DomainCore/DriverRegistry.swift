@@ -119,6 +119,67 @@ public actor DriverRegistry {
         lifecycles[id]?.state
     }
 
+    /// How long a card read waits for one Driver's cards. A Driver that has not
+    /// answered by then is left out of that read, so it cannot hold back the
+    /// cards of other Drivers. This bounds presentation work only; it is not a
+    /// clinical or freshness bound.
+    public static let dashboardCardsTimeout: Duration = .seconds(3)
+
+    /// Reads cards from running Drivers and applies platform validation. Each
+    /// Driver is queried concurrently; one that does not answer within
+    /// `timeout`, or that stops providing before it answers, contributes nothing.
+    /// Cancelling the caller ends the read at once.
+    public func contributedCards(timeout: Duration = DriverRegistry.dashboardCardsTimeout) async -> [ContributedCard] {
+        let providing: [(id: DriverIdentifier, driver: any Driver)] = descriptors.compactMap { descriptor in
+            let id = descriptor.identifier
+            guard let driver = drivers[id], isProvidingCards(lifecycles[id]?.state) else { return nil }
+            return (id, driver)
+        }
+        guard !providing.isEmpty else { return [] }
+        let replies = await Self.collectCards(from: providing, timeout: timeout)
+        var result: [ContributedCard] = []
+        for (id, _) in providing {
+            guard let cards = replies[id], isProvidingCards(lifecycles[id]?.state) else { continue }
+            let valid = DashboardCardValidation.accepted(cards, from: id) { message in
+                NSLog("%@", message)
+            }
+            result.append(contentsOf: valid.map { ContributedCard(driver: id, card: $0) })
+        }
+        return ContributedCard.ordered(result)
+    }
+
+    private static func collectCards(
+        from providing: [(id: DriverIdentifier, driver: any Driver)], timeout: Duration
+    ) async -> [DriverIdentifier: [DashboardCardDescriptor]] {
+        let (stream, continuation) = AsyncStream<(DriverIdentifier, [DashboardCardDescriptor])>.makeStream()
+        // Unstructured on purpose: a task group waits for every child, so one
+        // Driver that never returns would hold the whole read open.
+        let queries = providing.map { entry in
+            Task { continuation.yield((entry.id, await entry.driver.dashboardCards())) }
+        }
+        let deadline = Task {
+            try? await Task.sleep(for: timeout)
+            continuation.finish()
+        }
+        var replies: [DriverIdentifier: [DashboardCardDescriptor]] = [:]
+        await withTaskCancellationHandler {
+            for await (id, cards) in stream {
+                replies[id] = cards
+                if replies.count == providing.count { break }
+            }
+        } onCancel: {
+            continuation.finish()
+        }
+        deadline.cancel()
+        continuation.finish()
+        for query in queries { query.cancel() }
+        return replies
+    }
+
+    private func isProvidingCards(_ state: DriverLifecycleState?) -> Bool {
+        state == .active || state == .degraded
+    }
+
     /// Reads one selected slot without waiting for lifecycle operations on other Drivers.
     public func port(for capability: Capability) async throws(CapabilityReadError) -> HeldPort {
         guard capability.cardinality == .singleInstance else { throw .notSingleInstance(capability) }

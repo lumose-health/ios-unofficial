@@ -339,7 +339,7 @@ struct DriverHostTests {
 
     @Test @MainActor func teardownWithoutStreamEndDropsConnection() async throws {
         // HostTestDriver's streams never finish, so only the registry can say it stopped.
-        let driver = HostTestDriver()
+        let driver = HostTestDriver(cards: [DashboardCardDescriptor(id: "visible", title: "Visible", priority: 100, elements: [])])
         let store = HostSelectionStore([driver.descriptor.identifier.rawValue])
         let registry = try DriverRegistry(drivers: [driver], store: store)
         let model = HomeModel(registry: registry, awaitStartup: {
@@ -347,10 +347,12 @@ struct DriverHostTests {
         }, demoIdentifiers: [], scheduler: HostManualScheduler())
         await model.setScenePhaseActive(true).value
         #expect(model.source == .connected(driver.descriptor.identifier))
+        #expect(await eventually { model.driverCards.map(\.card.id) == ["visible"] })
         try await registry.deactivate(driver.descriptor.identifier)
         #expect(await driver.didDeactivate)
         #expect(await eventually { model.source == .noActiveDriver && model.ports == nil })
         #expect(model.lifecycleState == .notActivated)
+        #expect(model.driverCards.isEmpty)
     }
 
     @Test @MainActor func teardownDuringConnectReadDropsLateWritesAndAttachment() async throws {
@@ -419,6 +421,77 @@ struct DriverHostTests {
         #expect(model.heroState.valueText == "125")
         #expect(!model.isRefreshing)
         #expect(gaps.values.isEmpty)
+    }
+
+    @Test @MainActor func contributedCardOrderIsStableAcrossRefreshes() async throws {
+        let a = DashboardCardDescriptor(id: "z", title: "Z", priority: 100, elements: [])
+        let b = DashboardCardDescriptor(id: "a", title: "A", priority: 100, elements: [])
+        let driver = HostTestDriver(cards: [a, b])
+        let model = makeHostModel(driver: driver, demoIdentifiers: [], scheduler: HostManualScheduler())
+        await model.setScenePhaseActive(true).value
+        let id = HostTestDriver.simulatedIdentifier
+        let expected = [ContributedCard.ID(driver: id, card: "a"), ContributedCard.ID(driver: id, card: "z")]
+        #expect(await eventually { model.driverCards.map(\.id) == expected })
+        for _ in 0..<5 {
+            let before = await driver.cardReadCount
+            await model.refresh()
+            var reread = false
+            for _ in 0..<2000 where !reread {
+                let count = await driver.cardReadCount
+                let settled = await driver.allCardReadsFinished
+                reread = count > before && settled
+                if !reread { try await Task.sleep(nanoseconds: 1_000_000) }
+            }
+            #expect(reread)
+            #expect(await eventually { model.driverCards.map(\.id) == expected })
+        }
+    }
+
+    @Test @MainActor func hungCardDriverDoesNotBlockRefreshOrDeactivation() async throws {
+        let hang = HostCardHang()
+        let driver = HostTestDriver(cards: [DashboardCardDescriptor(id: "never", title: "Never", priority: 100, elements: [])],
+                                    cardHang: hang)
+        let store = HostSelectionStore([driver.descriptor.identifier.rawValue])
+        let registry = try DriverRegistry(drivers: [driver], store: store)
+        let model = HomeModel(registry: registry, awaitStartup: {
+            await DriverStartup.run(registry: registry, store: store, firstLaunchDefault: nil)
+        }, demoIdentifiers: [], scheduler: HostManualScheduler(), readGap: { _ in })
+        await model.setScenePhaseActive(true).value
+        #expect(model.source == .connected(driver.descriptor.identifier))
+        await hang.waitUntilEntered()
+
+        await model.refresh()
+        #expect(model.driverCards.isEmpty)
+
+        try await registry.deactivate(driver.descriptor.identifier)
+        #expect(await eventually { model.source == .noActiveDriver && model.ports == nil })
+        #expect(model.driverCards.isEmpty)
+        await hang.release()
+    }
+
+    @Test @MainActor func slowerEarlierCardReloadCannotReplaceLaterCards() async throws {
+        let gate = HostReadGate()
+        await gate.arm()
+        let driver = HostTestDriver(cards: [DashboardCardDescriptor(id: "stale", title: "Stale", priority: 100, elements: [])],
+                                    cardGate: gate)
+        let model = makeHostModel(driver: driver, demoIdentifiers: [], scheduler: HostManualScheduler())
+        await model.setScenePhaseActive(true).value
+        await gate.waitUntilEntered()
+
+        await driver.setCards([DashboardCardDescriptor(id: "fresh", title: "Fresh", priority: 100, elements: [])])
+        await model.refresh()
+        #expect(await eventually { model.driverCards.map(\.card.id) == ["fresh"] })
+
+        await gate.release()
+        var finished = false
+        for _ in 0..<2000 where !finished {
+            finished = await driver.allCardReadsFinished
+            if !finished { try await Task.sleep(nanoseconds: 1_000_000) }
+        }
+        #expect(finished)
+        // Let any reload still holding the stale answer try to publish it.
+        try await Task.sleep(nanoseconds: 20_000_000)
+        #expect(model.driverCards.map(\.card.id) == ["fresh"])
     }
 
     @Test @MainActor func refreshFailureKeepsCachedReadingAndLogsOnlyStep() async throws {
@@ -713,6 +786,12 @@ private actor HostTestDriver: Driver {
     private let hasInsulin: Bool
     private let deactivationGate: HostDeactivationGate?
     private let activationGate: HostDeactivationGate?
+    private var contributedCards: [DashboardCardDescriptor]
+    private var reverseCards = false
+    private let cardGate: HostReadGate?
+    private let cardHang: HostCardHang?
+    private(set) var cardReadCount = 0
+    private(set) var finishedCardReads = 0
     private(set) var activationCount = 0
     private(set) var deactivationCount = 0
     private(set) var didDeactivate = false
@@ -721,7 +800,8 @@ private actor HostTestDriver: Driver {
          initialSample: GlucoseSample? = nil,
          glucoseReads: [HostReadResult<GlucoseSample>] = [], pumpReads: [HostReadResult<PumpStatusSnapshot>]? = nil,
          deactivationGate: HostDeactivationGate? = nil, activationGate: HostDeactivationGate? = nil,
-         pumpReadGate: HostReadGate? = nil) {
+         pumpReadGate: HostReadGate? = nil, cards: [DashboardCardDescriptor] = [],
+         cardGate: HostReadGate? = nil, cardHang: HostCardHang? = nil) {
         self.activationFailure = activationFailure
         self.missing = missing
         self.hasInsulin = hasInsulin
@@ -729,6 +809,9 @@ private actor HostTestDriver: Driver {
         self.pump = pumpReads.map { HostPumpSource(scripted: $0, gate: pumpReadGate) }
         self.deactivationGate = deactivationGate
         self.activationGate = activationGate
+        self.contributedCards = cards
+        self.cardGate = cardGate
+        self.cardHang = cardHang
         self.descriptor = DriverDescriptor(
             identifier: Self.simulatedIdentifier,
             targetName: "HostTestDriver",
@@ -739,6 +822,21 @@ private actor HostTestDriver: Driver {
             verification: .unverified
         )
     }
+
+    func dashboardCards() async -> [DashboardCardDescriptor] {
+        cardReadCount += 1
+        // Captured before suspending, so a held read answers with the cards of its own time.
+        let snapshot = contributedCards
+        if let cardHang { await cardHang.hang() }
+        await cardGate?.holdIfArmed()
+        reverseCards.toggle()
+        finishedCardReads += 1
+        return reverseCards ? Array(snapshot.reversed()) : snapshot
+    }
+
+    func setCards(_ cards: [DashboardCardDescriptor]) { contributedCards = cards }
+
+    var allCardReadsFinished: Bool { finishedCardReads == cardReadCount }
 
     func capability(_ capability: Capability) -> CapabilityPort? {
         guard capability != missing else { return nil }
@@ -886,6 +984,31 @@ private struct HostPumpSource: PumpStatusSource {
 /// Holds the first read that arrives after `arm()` until `release()`, and lets
 /// every other read through. That models one slow Driver read without stalling
 /// the reads that follow it.
+/// Holds every card read until released, standing in for a Driver that never answers.
+private actor HostCardHang {
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var enteredWaiters: [CheckedContinuation<Void, Never>] = []
+    private var released = false
+
+    func hang() async {
+        if released { return }
+        for waiter in enteredWaiters { waiter.resume() }
+        enteredWaiters.removeAll()
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func waitUntilEntered() async {
+        if !waiters.isEmpty { return }
+        await withCheckedContinuation { enteredWaiters.append($0) }
+    }
+
+    func release() {
+        released = true
+        for waiter in waiters { waiter.resume() }
+        waiters.removeAll()
+    }
+}
+
 private actor HostReadGate {
     private var armed = false
     private var entered = false

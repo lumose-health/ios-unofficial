@@ -9,6 +9,8 @@ actor TestDriver: Driver {
     var activationFailure: DriverFailure?
     var onActivate: (@Sendable () async -> Void)?
     var onDeactivate: (@Sendable () async -> Void)?
+    var cards: [DashboardCardDescriptor] = []
+    var cardsGate: Gate?
 
     init(id: String, capabilities: Set<Capability>, transport: DriverTransport = .inProcess) {
         descriptor = DriverDescriptor(identifier: DriverIdentifier(id)!, targetName: "TestDriver",
@@ -17,6 +19,10 @@ actor TestDriver: Driver {
     }
 
     func capability(_ capability: Capability) -> CapabilityPort? { nil }
+    func dashboardCards() async -> [DashboardCardDescriptor] {
+        if let cardsGate { await cardsGate.wait() }
+        return cards
+    }
     func activate() async throws(DriverFailure) {
         activateCount += 1
         if let onActivate { await onActivate() }
@@ -29,6 +35,7 @@ actor TestDriver: Driver {
     func setFailure(_ failure: DriverFailure?) { activationFailure = failure }
     func setActivationHook(_ hook: (@Sendable () async -> Void)?) { onActivate = hook }
     func setDeactivationHook(_ hook: (@Sendable () async -> Void)?) { onDeactivate = hook }
+    func setCards(_ cards: [DashboardCardDescriptor], gate: Gate? = nil) { self.cards = cards; self.cardsGate = gate }
 }
 
 final class RecordingSelectionStore: DriverSelectionStore, @unchecked Sendable {
@@ -65,11 +72,14 @@ final class RecordingSelectionStore: DriverSelectionStore, @unchecked Sendable {
 
 actor Gate {
     private var opened = false
+    private var hasEntered = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
     func wait() async {
         if opened { return }
+        hasEntered = true
         await withCheckedContinuation { waiters.append($0) }
     }
+    func entered() -> Bool { hasEntered }
     func open() {
         opened = true
         for waiter in waiters { waiter.resume() }

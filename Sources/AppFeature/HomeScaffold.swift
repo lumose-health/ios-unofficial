@@ -2,6 +2,7 @@ import SwiftUI
 import Observation
 import SafetyCore
 import DriverAPI
+import DomainCore
 
 public enum HomeCard: String, CaseIterable, Sendable {
     case statusRow, glucoseHero, recentMeal, glucoseTrend, timeInRange, cgmStats
@@ -13,6 +14,26 @@ public enum HomeCardBody: Equatable, Sendable { case empty(String), comingSoon(S
 public enum HomeScaffoldModel {
     public static let order: [HomeCard] = [.statusRow, .glucoseHero, .recentMeal, .glucoseTrend, .timeInRange, .cgmStats, .insulinSummary, .recentBoluses, .driverCards, .footer]
     public static let omittedWithoutData: Set<HomeCard> = [.recentMeal]
+    public static let platformPriorities: ClosedRange<Int> = 0...50
+
+    public static func priority(of card: HomeCard) -> Int? {
+        guard card != .driverCards, card != .footer else { return nil }
+        return order.firstIndex(of: card)
+    }
+
+    public enum HomeSlot: Hashable {
+        case platform(HomeCard)
+        case driver(ContributedCard)
+        case footer
+    }
+
+    public static func layout(contributed: [ContributedCard]) -> [HomeSlot] {
+        let platform = order.compactMap { card -> HomeSlot? in
+            guard card != .footer, card != .driverCards, !omittedWithoutData.contains(card) else { return nil }
+            return .platform(card)
+        }
+        return platform + ContributedCard.ordered(contributed).map(HomeSlot.driver) + [.footer]
+    }
     private static let textCards: [HomeCard] = [.glucoseTrend, .timeInRange, .cgmStats, .insulinSummary, .recentBoluses]
     public static let cardTable: [(title: String, emptyText: String)] = textCards.compactMap { card in
         content(for: card).map { (title: $0.title, emptyText: $0.emptyText) }
@@ -95,8 +116,12 @@ struct HomeScaffoldView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                ForEach(HomeScaffoldModel.order.filter { !HomeScaffoldModel.omittedWithoutData.contains($0) }, id: \.self) { card in
-                    cardView(card)
+                ForEach(HomeScaffoldModel.layout(contributed: model.driverCards), id: \.self) { slot in
+                    switch slot {
+                    case .platform(let card): cardView(card)
+                    case .driver(let card): DriverCardView(card: card)
+                    case .footer: cardView(.footer)
+                    }
                 }
             }
             .padding(.horizontal, 16).padding(.top, 16).padding(.bottom, 88)
