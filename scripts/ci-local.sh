@@ -27,6 +27,8 @@ Usage: bash scripts/ci-local.sh <command>
   static-analysis    Run CodeQL, gitleaks, safety and Driver guards
   swift-analysis     Trace the app build and evaluate CodeQL Swift results
   secrets-scan       Scan the committed tree with gitleaks
+  static-guards      Run gitleaks, safety and Driver guards and their self-tests
+  needs-verdict      Fail unless every job in NEEDS_RESULTS succeeded
   dependency-scan    Scan source with pinned OSV-Scanner
   workflow-lint      Run actionlint, shellcheck, pins, policy and the roster checks
   workflow-policy    Check required job and workflow structure offline
@@ -34,7 +36,8 @@ Usage: bash scripts/ci-local.sh <command>
   workflow-pins      Check action references under .github/workflows and .github/actions
   required-checks    Compare docs/ci-checks.md and the develop ruleset with the roster
   install-ci-tools   Install pinned tools for workflow-lint, workflow-security,
-                     dependency-scan or static-analysis
+                     dependency-scan, static-analysis, swift-analysis
+                     or secrets-scan
   --self-test    Exercise the verdict and guard failure paths without Xcode
 
 Required checks on develop (also listed in docs/ci-checks.md):
@@ -114,22 +117,44 @@ require_tool() {
   [[ "$actual" =~ (^|[^0-9.])${version_re}([^0-9.]|[.]([^0-9]|$)|$) ]] || { fail "$tool $version is required (got $actual)"; return 1; }
 }
 
+# Runs everything the Static Analysis workflow runs, on one machine. CI runs
+# static-guards and swift-analysis as separate jobs so they do not compete for cores.
 static_analysis() {
   local pid status=0
   mkdir -p .build/static-analysis
   swift_analysis > .build/static-analysis/codeql.log 2>&1 &
   pid=$!
   trap 'kill "$pid" 2>/dev/null || true' EXIT
+  static_guards
+  wait "$pid" || status=$?
+  cat .build/static-analysis/codeql.log
+  trap - EXIT
+  [[ "${status:-2}" == 0 ]] || { fail "swift-analysis failed with status ${status:-2}"; return 1; }
+}
+
+static_guards() {
   secrets_scan
   bash scripts/guards/safety_guards.sh
   bash scripts/guards/driver_guards.sh
   bash scripts/guards/safety_guards.sh --self-test
   bash scripts/guards/driver_guards.sh --self-test
-  wait "$pid" || status=$?
-  cat .build/static-analysis/codeql.log
-  trap - EXIT
-  [[ "${status:-2}" == 0 ]] || { fail "swift-analysis failed with status ${status:-2}"; return 1; }
   echo 'Semgrep p/secrets is not wired yet.'
+}
+
+# Every needed job must have succeeded. NEEDS_RESULTS is "job=result job=result".
+needs_verdict() {
+  local gate=${GATE_NAME:-Static Analysis Gate} entry name result count=0
+  local -a entries=()
+  read -r -a entries <<< "${NEEDS_RESULTS:-}" || true
+  [[ ${#entries[@]} -gt 0 ]] || { fail "$gate: needs results are empty"; return 1; }
+  for entry in "${entries[@]}"; do
+    name=${entry%%=*}
+    result=${entry#*=}
+    [[ "$entry" == *=* && -n "$name" ]] || { fail "$gate: malformed needs result: $entry"; return 1; }
+    [[ "$result" == success ]] || { fail "$gate: $name result is ${result:-empty}; gate fails"; return 1; }
+    count=$((count + 1))
+  done
+  echo "$gate: all $count needed jobs succeeded"
 }
 
 swift_analysis() {
@@ -223,27 +248,39 @@ workflow_security() {
 
 install_ci_tools() {
   local target=${1:-} artifact hash url archive
-  case "$target" in workflow-lint|workflow-security|dependency-scan|static-analysis) ;; *) fail "unknown install-ci-tools target: $target"; return 1;; esac
-  if [[ "$target" == static-analysis ]]; then
-    [[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 ]] || { fail 'install-ci-tools static-analysis requires Darwin arm64'; return 1; }
-    command -v zstd >/dev/null 2>&1 || { fail 'zstd is required'; return 1; }
+  local darwin=false codeql=false gitleaks=false
+  case "$target" in
+    workflow-lint|workflow-security|dependency-scan) ;;
+    static-analysis) darwin=true; codeql=true; gitleaks=true ;;
+    swift-analysis) darwin=true; codeql=true ;;
+    secrets-scan) darwin=true; gitleaks=true ;;
+    *) fail "unknown install-ci-tools target: $target"; return 1;;
+  esac
+  if [[ "$darwin" == true ]]; then
+    [[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 ]] || { fail "install-ci-tools $target requires Darwin arm64"; return 1; }
+    [[ "$codeql" == false ]] || command -v zstd >/dev/null 2>&1 || { fail 'zstd is required'; return 1; }
   else
     [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]] || { fail 'install-ci-tools requires Linux x86_64'; return 1; }
   fi
   mkdir -p .build/ci-tools
-  if [[ "$target" == static-analysis ]]; then
+  if [[ "$codeql" == true ]]; then
     url=https://github.com/github/codeql-action/releases/download/codeql-bundle-v2.27.2/codeql-bundle-swift-osx64.tar.zst
     hash=25a08dfd23997ccf6374b5a70d9aa27a510e027f1b5aed60e1a653f8a3596375
     archive=.build/ci-tools/codeql-bundle.tar.zst
     curl -fsSL "$url" -o "$archive"
     printf '%s  %s\n' "$hash" "$archive" | shasum -a 256 -c -
     zstd -dc "$archive" | tar -xf - -C .build/ci-tools
+  fi
+  if [[ "$gitleaks" == true ]]; then
     url=https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_darwin_arm64.tar.gz
     hash=b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5
     archive=.build/ci-tools/gitleaks.tar.gz
     curl -fsSL "$url" -o "$archive"
     printf '%s  %s\n' "$hash" "$archive" | shasum -a 256 -c -
     tar -xzf "$archive" -C .build/ci-tools gitleaks
+  fi
+  if [[ "$darwin" == true ]]; then
+    : # CodeQL and gitleaks are installed above.
   elif [[ "$target" == workflow-lint ]]; then
     url=https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz
     hash=023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757
@@ -273,10 +310,10 @@ install_ci_tools() {
     ln -sf zizmor-venv/bin/zizmor .build/ci-tools/zizmor
   fi
   if [[ -n "${GITHUB_PATH:-}" ]]; then
-    if [[ "$target" == static-analysis ]]; then printf '%s\n' "$ROOT/.build/ci-tools/codeql" >> "$GITHUB_PATH"; fi
+    if [[ "$codeql" == true ]]; then printf '%s\n' "$ROOT/.build/ci-tools/codeql" >> "$GITHUB_PATH"; fi
     printf '%s\n' "$ROOT/.build/ci-tools" >> "$GITHUB_PATH"
   else
-    if [[ "$target" == static-analysis ]]; then echo "install-ci-tools: add $ROOT/.build/ci-tools/codeql to PATH"; fi
+    if [[ "$codeql" == true ]]; then echo "install-ci-tools: add $ROOT/.build/ci-tools/codeql to PATH"; fi
     echo "install-ci-tools: add $ROOT/.build/ci-tools to PATH"
   fi
 }
@@ -485,6 +522,14 @@ self_test() {
   chmod +x "$fixture/mock-bin/codeql"
   assert_case missing-xcodebuild fail 'xcodebuild is unavailable' env CI_LOCAL_TOOLS="$ROOT/$fixture/no-tools" PATH="$ROOT/$fixture/mock-bin" "$BASH" "$ROOT/scripts/ci-local.sh" swift-analysis
   assert_case unset-status fail 'status 2' "$BASH" "$ROOT/scripts/ci-local.sh" status-default-test
+  assert_case needs-all-success pass '' env NEEDS_RESULTS='guards=success codeql=success' "$BASH" "$ROOT/scripts/ci-local.sh" needs-verdict
+  assert_case needs-failure fail 'codeql result is failure' env NEEDS_RESULTS='guards=success codeql=failure' "$BASH" "$ROOT/scripts/ci-local.sh" needs-verdict
+  assert_case needs-skipped fail 'guards result is skipped' env NEEDS_RESULTS='guards=skipped codeql=success' "$BASH" "$ROOT/scripts/ci-local.sh" needs-verdict
+  assert_case needs-cancelled fail 'codeql result is cancelled' env NEEDS_RESULTS='guards=success codeql=cancelled' "$BASH" "$ROOT/scripts/ci-local.sh" needs-verdict
+  assert_case needs-empty-result fail 'codeql result is empty' env NEEDS_RESULTS='guards=success codeql=' "$BASH" "$ROOT/scripts/ci-local.sh" needs-verdict
+  assert_case needs-unset fail 'needs results are empty' env -u NEEDS_RESULTS "$BASH" "$ROOT/scripts/ci-local.sh" needs-verdict
+  assert_case needs-blank fail 'needs results are empty' env NEEDS_RESULTS='  ' "$BASH" "$ROOT/scripts/ci-local.sh" needs-verdict
+  assert_case needs-malformed fail 'malformed needs result' env NEEDS_RESULTS='guards=success codeql' "$BASH" "$ROOT/scripts/ci-local.sh" needs-verdict
   mkdir -p "$fixture/.github/workflows" "$fixture/.github/actions"
   (cd "$fixture"; printf 'steps:\n  - uses: a/b@v1.0.0\n' > .github/workflows/check.yml; assert_case action-tag fail 'unpinned action' pin_scan)
   (cd "$fixture"; printf 'steps:\n  - uses: a/b@1234abcd\n' > .github/workflows/check.yml; assert_case short-sha fail 'unpinned action' pin_scan)
@@ -528,6 +573,8 @@ case "${1:-}" in
   workflow-pins) pin_scan ;;
   static-analysis) static_analysis ;;
   swift-analysis) swift_analysis ;;
+  static-guards) static_guards ;;
+  needs-verdict) needs_verdict ;;
   secrets-scan) secrets_scan ;;
   status-default-test) status=''; [[ "${status:-2}" == 0 ]] || fail "status ${status:-2}" ;;
   dependency-scan) dependency_scan ;;
