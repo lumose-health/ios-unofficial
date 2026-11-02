@@ -46,6 +46,7 @@ Ten product decisions were taken during discovery. Decisions 3, 4, 6 and 9 were 
 |---|---|---|
 | 2026-08-10 | PRD finalised. | Discovery and the parity, safety and downstream reviews |
 | 2026-11-01 | Distribution moves to a project TestFlight build (internal first; public link gated on L1, L2, A1, E1); fork-and-build becomes the advanced self-build path; decisions 3, 4, 6 and 9 rewritten; decisions 5 (Medtronic excluded from the project build under L2) and 7 (per-deployment APNs viable only for self-builds) edited to match; NG-4 withdrawn; §5.10 and §5.12 rewritten; ledger, matrices, non-goals, risks, open questions and the addendum updated. Parity-review fixes: C1 (OQ-20 resolved; FR-40 reconciles the Target Range), C2 (FR-164's escape hatch on the Backend stage), C3 (PD-41 and OQ-7 name Medtronic's two shipped gates and the outstanding annunciation gate). The interim amendment note is removed. | Sprint Change Proposal 2026-10-30 |
+| 2026-11-01 | FR-28 refined: on the restore path, only a permanent activation failure clears a persisted Driver selection. A transient failure (`transportUnavailable`, `connectionLost`, `timedOut`, `cancelled`) keeps the selection, leaves the Driver inactive and retries on the next restore, so a pump that is out of range, or Bluetooth that is off during a background relaunch, does not silently lose the user's selection. | Driver registry safety review |
 
 ## 1. Vision
 
@@ -606,7 +607,7 @@ A Driver that fails to initialize is skipped entirely and no other Driver is aff
 
 **Consequences (testable):**
 - An initialization failure logs, drops that Driver's settings-store entry, removes it from the Driver list, and leaves every other Driver constructed and listed. The app does not crash.
-- An activation failure returns a typed error, leaves the Driver inactive, writes no slot persistence, and (on the restore path) clears any stale persisted selection for it.
+- An activation failure returns a typed error, leaves the Driver inactive, and writes no slot persistence. On the restore path, a permanent failure clears the persisted selection for it; a transient failure (`transportUnavailable`, `connectionLost`, `timedOut`, `cancelled`) keeps the selection and is retried on the next restore (revised 2026-11-01).
 - No invariant violation in this subsystem terminates the process. Rejections and failures are recoverable and logged; validation uses failable or throwing construction, never a trap that would kill a background Bluetooth wake.
 - A Driver whose settings or card descriptor computation fails degrades to omitting that descriptor rather than removing the Driver from the list or taking down the settings screen.
 

@@ -19,7 +19,7 @@ max_cycles: 3
 
 # Story 1.17a: First run — welcome, safety, and the Backend stage
 
-Status: review
+Status: done
 
 <!-- Planning note (for the maintainer):
 SPLIT. epics.md Story 1.17 is too large for one reviewable PR. Honest estimate for the whole story
