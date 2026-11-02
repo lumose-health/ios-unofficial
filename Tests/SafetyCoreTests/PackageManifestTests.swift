@@ -255,6 +255,7 @@ struct PackageManifestTests {
             "Persistence", "PersistenceTests",
             "AppFeature", "AppFeatureTests",
             "TandemWire", "TandemWireTests",
+            "TraceReplayDriver", "TraceReplayDriverTests",
         ]))
     }
 
@@ -284,6 +285,16 @@ struct PackageManifestTests {
             arguments.contains("dependencies:[\"DriverAPI\",\"SafetyCore\"]"),
             "SimulatedDriver may depend only on DriverAPI and SafetyCore (AD-3); its target declares: \(arguments)"
         )
+    }
+
+    @Test("TraceReplayDriver has its exact dependency and resource declarations")
+    func traceReplayDependencies() throws {
+        let arguments = try #require(Self.targetArguments(named: "TraceReplayDriver", in: try Self.manifestSource()))
+        #expect(arguments.contains("dependencies:[\"DriverAPI\",\"SafetyCore\",\"TandemWire\"]"))
+        #expect(arguments.contains("resources:[.copy(\"Traces\")]"))
+        #expect(arguments.contains("exclude:[\"README.md\"]"))
+        let tests = try #require(Self.allTargetDeclarations(in: try Self.manifestSource()).first { $0.name == "TraceReplayDriverTests" }?.arguments)
+        #expect(tests.contains("resources:[.copy(\"Traces\")]"))
     }
 
     @Test("TandemWire depends on exactly DriverAPI and SafetyCore")

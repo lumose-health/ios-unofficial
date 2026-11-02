@@ -1,0 +1,17 @@
+{
+  "format": "glycemicgpt-trace",
+  "version": 1,
+  "vendor": "tandem",
+  "description": "Synthesized: a CRC failure in the middle of three EGV responses.",
+  "pumpTimeZone": "America/Chicago",
+  "provenance": {
+    "source": "synthesized",
+    "method": "Every value invented; no capture was used. Frames built from the documented cargo layouts with CRC-16/CCITT-FALSE.",
+    "reviewedBy": null
+  },
+  "frames": [
+    {"channel": "currentStatus", "receivedAt": "2025-01-15T14:00:05Z", "notifications": ["000123010880e80d20780001008a84"], "note": "VALID reading"},
+    {"channel": "currentStatus", "receivedAt": "2025-01-15T14:05:05Z", "notifications": ["0002230208ace90d207d000100be5a"], "note": "CRC corrupted: a decode failure; replay must halt here"},
+    {"channel": "currentStatus", "receivedAt": "2025-01-15T14:10:05Z", "notifications": ["0003230308d8ea0d2082000100bb18"], "note": "VALID reading"}
+  ]
+}
