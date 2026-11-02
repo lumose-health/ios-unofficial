@@ -8,6 +8,9 @@ module WorkflowPolicy
   ROSTER = ['Static Analysis Gate', 'Dependency Scan Gate', 'Workflow Lint', 'Workflow Security', 'iOS Gate'].freeze
   AGGREGATE = ['Dependency Scan Gate', 'iOS Gate'].freeze
   NEEDS = { 'Dependency Scan Gate' => ['detect-dependencies', 'osv'], 'iOS Gate' => ['detect-changes', 'build'] }.freeze
+  # Gates that pass only when every listed job succeeded. The listed jobs run
+  # unconditionally, so a skipped result is never expected and fails the gate.
+  ALL_OF = { 'Static Analysis Gate' => ['guards', 'codeql'] }.freeze
   # A shell or working-directory override in a roster workflow changes how
   # every gate command runs. Each allowed override is listed here by
   # 'file:location' (as the policy error prints it) with a non-empty reason.
@@ -145,6 +148,24 @@ module WorkflowPolicy
             errors << "#{file}:#{id}: gate-verdict step must not have if" if verdict.key?('if')
             env = verdict['env'] || {}
             %w[DETECT_RESULT SHOULD_BUILD WORK_RESULT EVENT_NAME GATE_NAME].each { |key| errors << "#{file}:#{id}: missing #{key} env" unless env.key?(key) }
+          end
+          walk(job['steps'] || []) { |node| errors << "#{file}:#{id}: needs. in run" if node.is_a?(Hash) && node['run'].to_s.include?('needs.') }
+        elsif ALL_OF.key?(name)
+          expected = ALL_OF[name]
+          value = job['if'].to_s.gsub(/\A\$\{\{\s*|\s*\}\}\z/, '').strip
+          errors << "#{file}:#{id}: requires if: always()" unless value == 'always()'
+          needs = job['needs']
+          errors << "#{file}:#{id}: requires needs #{expected.join(', ')}" unless needs.is_a?(Array) && needs.map(&:to_s).sort == expected.sort
+          expected.each do |dep|
+            errors << "#{file}:#{dep}: job #{name} needs must not have if" if jobs[dep].is_a?(Hash) && jobs[dep].key?('if')
+          end
+          verdict = (job['steps'] || []).find { |step| step.is_a?(Hash) && step['run'].to_s.strip == 'bash scripts/ci-local.sh needs-verdict' }
+          errors << "#{file}:#{id}: missing needs-verdict step" unless verdict
+          if verdict
+            errors << "#{file}:#{id}: needs-verdict step must not have if" if verdict.key?('if')
+            results = (verdict['env'] || {})['NEEDS_RESULTS'].to_s.strip.gsub(/\s+/, ' ')
+            wanted = expected.map { |dep| "#{dep}=${{ needs.#{dep}.result }}" }
+            errors << "#{file}:#{id}: NEEDS_RESULTS must be #{wanted.join(' ')}" unless results == wanted.join(' ')
           end
           walk(job['steps'] || []) { |node| errors << "#{file}:#{id}: needs. in run" if node.is_a?(Hash) && node['run'].to_s.include?('needs.') }
         else
