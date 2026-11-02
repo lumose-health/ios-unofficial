@@ -1,0 +1,30 @@
+# gitleaks configuration for `bash scripts/ci-local.sh secrets-scan`.
+# Every allowlist entry names one rule, exact files and exact strings, with a reason.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = """Public git commit SHAs, not credentials. gitleaks' sourcegraph-access-token \
+rule matches any bare 40-character hex string. These are the published commit SHAs of GitHub \
+Actions pins (actions/checkout, actions/github-script, actions/create-github-app-token, \
+dorny/paths-filter, actions/setup-java, gradle/actions, actions/upload-artifact) and of the \
+GlycemicGPT/GlycemicGPT commit the research notes were extracted from, each confirmed against \
+the GitHub commits API."""
+targetRules = ["sourcegraph-access-token"]
+condition = "AND"
+paths = [
+  '''(^|/)_bmad-output/planning-artifacts/prds/prd-ios-unofficial-2026-08-01/research/contract-and-invariants\.json$''',
+  '''(^|/)_bmad-output/planning-artifacts/prds/prd-ios-unofficial-2026-08-01/research/docs-and-policy\.json$''',
+]
+regexes = [
+  '''^9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0$''',
+  '''^f28e40c7f34bde8b3046d885e986cb6290c5673b$''',
+  '''^1b10c78c7865c340bc4f6099eb2f838309f1e8c3$''',
+  '''^bcd2ba49218906704ab6c1aa796996da409d3eb1$''',
+  '''^7b450fff21473bca461d4b92ce414b9d0420d706$''',
+  '''^0f481fcb613427c0f801b606911222b5b6f3083a$''',
+  '''^3f131e8634966bd73d06cc69884922b02e6faf92$''',
+  '''^043fb46d1a93c77aae656e7c1c64a875d1fc6a0a$''',
+  '''^2ffc3607d1fd7676070181d2886d476d7868f268$''',
+]

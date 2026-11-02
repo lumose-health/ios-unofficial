@@ -24,15 +24,17 @@ Usage: bash scripts/ci-local.sh <command>
   ios-gate       Build and test Swift, Drivers, guards, and declared Xcode targets
   ui-tests       Run declared XCUITest schemes on declared Simulator destinations
   gate-verdict   Evaluate DETECT_RESULT, SHOULD_BUILD, WORK_RESULT, EVENT_NAME
-  static-analysis    Run safety and Driver guards and their self-tests
+  static-analysis    Run CodeQL, gitleaks, safety and Driver guards
+  swift-analysis     Trace the app build and evaluate CodeQL Swift results
+  secrets-scan       Scan the committed tree with gitleaks
   dependency-scan    Scan source with pinned OSV-Scanner
   workflow-lint      Run actionlint, shellcheck, pins, policy and the roster checks
   workflow-policy    Check required job and workflow structure offline
   workflow-security  Run zizmor and the pull_request_target backstop
   workflow-pins      Check action references under .github/workflows and .github/actions
   required-checks    Compare docs/ci-checks.md and the develop ruleset with the roster
-  install-ci-tools   Install pinned Linux tools for workflow-lint, workflow-security
-                     or dependency-scan
+  install-ci-tools   Install pinned tools for workflow-lint, workflow-security,
+                     dependency-scan or static-analysis
   --self-test    Exercise the verdict and guard failure paths without Xcode
 
 Required checks on develop (also listed in docs/ci-checks.md):
@@ -42,7 +44,7 @@ Required checks on develop (also listed in docs/ci-checks.md):
   Workflow Security      workflow-security (needs zizmor 1.5.2)
   iOS Gate               ios-gate
 
-CodeQL, Semgrep and gitleaks are not wired yet. OSV-Scanner --no-ignore also
+Semgrep p/secrets is not wired yet. OSV-Scanner --no-ignore also
 scans untracked local directories; CI uses a clean checkout.
 EOF
 }
@@ -104,19 +106,70 @@ pin_scan() {
 }
 
 require_tool() {
-  local tool=$1 version=$2 actual version_re
+  local tool=$1 version=$2 version_arg=${3:---version} actual version_re
   command -v "$tool" >/dev/null 2>&1 || { fail "$tool $version is required"; return 1; }
-  actual=$("$tool" --version 2>&1) || { fail "$tool $version is required"; return 1; }
+  actual=$("$tool" "$version_arg" 2>&1) || { fail "$tool $version is required"; return 1; }
   version_re=${version//./\\.}
-  [[ "$actual" =~ (^|[^0-9.])${version_re}([^0-9.]|$) ]] || { fail "$tool $version is required (got $actual)"; return 1; }
+  # A trailing sentence period ("release 2.27.2.") still matches; "2.27.20" or "2.27.2.1" does not.
+  [[ "$actual" =~ (^|[^0-9.])${version_re}([^0-9.]|[.]([^0-9]|$)|$) ]] || { fail "$tool $version is required (got $actual)"; return 1; }
 }
 
 static_analysis() {
+  local pid status=0
+  mkdir -p .build/static-analysis
+  swift_analysis > .build/static-analysis/codeql.log 2>&1 &
+  pid=$!
+  trap 'kill "$pid" 2>/dev/null || true' EXIT
+  secrets_scan
   bash scripts/guards/safety_guards.sh
   bash scripts/guards/driver_guards.sh
   bash scripts/guards/safety_guards.sh --self-test
   bash scripts/guards/driver_guards.sh --self-test
-  echo 'CodeQL, Semgrep and gitleaks are not wired yet.'
+  wait "$pid" || status=$?
+  cat .build/static-analysis/codeql.log
+  trap - EXIT
+  [[ "${status:-2}" == 0 ]] || { fail "swift-analysis failed with status ${status:-2}"; return 1; }
+  echo 'Semgrep p/secrets is not wired yet.'
+}
+
+swift_analysis() {
+  local status=0 build_command
+  local tools=${CI_LOCAL_TOOLS:-$ROOT/.build/ci-tools}
+  [[ ! -d "$tools" ]] || PATH="$tools:$PATH"
+  [[ ! -d "$tools/codeql" ]] || PATH="$tools/codeql:$PATH"
+  require_tool codeql 2.27.2
+  check_xcode
+  # The CodeQL Swift extractor ships as x86_64 only; Apple silicon runs it under Rosetta 2.
+  if [[ "$(uname -m)" == arm64 ]] && ! arch -x86_64 /usr/bin/true >/dev/null 2>&1; then
+    fail 'swift-analysis needs Rosetta 2 on Apple silicon (softwareupdate --install-rosetta)'; return 1
+  fi
+  mkdir -p .build/static-analysis
+  rm -rf .build/codeql .build/static-analysis/codeql.sarif
+  mkdir -p .build/codeql
+  build_command='xcodebuild build -project Apps/GlycemicGPT/GlycemicGPT.xcodeproj -scheme GlycemicGPT -sdk iphonesimulator -derivedDataPath .build/codeql/dd CODE_SIGNING_ALLOWED=NO COMPILER_INDEX_STORE_ENABLE=NO'
+  codeql database create .build/codeql/db --language=swift --source-root=. --overwrite --command="$build_command" || status=$?
+  [[ "${status:-2}" == 0 ]] || { fail "codeql database create failed with status ${status:-2}"; return 1; }
+  status=0
+  codeql database analyze .build/codeql/db --format=sarif-latest --output=.build/static-analysis/codeql.sarif --threads=2 --ram=4096 \
+    codeql/swift-queries@1.3.12:codeql-suites/swift-security-extended.qls \
+    codeql/swift-queries@1.3.12:diagnostics/ExtractedFiles.ql || status=$?
+  [[ "${status:-2}" == 0 ]] || { fail "codeql database analyze failed with status ${status:-2}"; return 1; }
+  git ls-files 'Sources/*.swift' 'Apps/*.swift' > .build/static-analysis/tracked-swift.txt
+  ruby scripts/lib/sarif_gate.rb .build/static-analysis/codeql.sarif codeql-exclusions.txt .build/static-analysis/tracked-swift.txt
+}
+
+secrets_scan() {
+  local -a options=()
+  local tools=${CI_LOCAL_TOOLS:-$ROOT/.build/ci-tools}
+  [[ ! -d "$tools" ]] || PATH="$tools:$PATH"
+  require_tool gitleaks 8.30.1 version
+  mkdir -p .build/static-analysis
+  rm -rf .build/static-analysis/tree .build/static-analysis/gitleaks.json
+  mkdir -p .build/static-analysis/tree
+  git archive HEAD | tar -x -C .build/static-analysis/tree
+  [[ ! -f .gitleaks.toml ]] || options=(--config .gitleaks.toml)
+  gitleaks dir .build/static-analysis/tree --no-banner --redact --exit-code 1 \
+    --report-format json --report-path .build/static-analysis/gitleaks.json "${options[@]+"${options[@]}"}"
 }
 
 dependency_scan() {
@@ -170,10 +223,28 @@ workflow_security() {
 
 install_ci_tools() {
   local target=${1:-} artifact hash url archive
-  [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]] || { fail 'install-ci-tools requires Linux x86_64'; return 1; }
-  case "$target" in workflow-lint|workflow-security|dependency-scan) ;; *) fail "unknown install-ci-tools target: $target"; return 1;; esac
+  case "$target" in workflow-lint|workflow-security|dependency-scan|static-analysis) ;; *) fail "unknown install-ci-tools target: $target"; return 1;; esac
+  if [[ "$target" == static-analysis ]]; then
+    [[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 ]] || { fail 'install-ci-tools static-analysis requires Darwin arm64'; return 1; }
+    command -v zstd >/dev/null 2>&1 || { fail 'zstd is required'; return 1; }
+  else
+    [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]] || { fail 'install-ci-tools requires Linux x86_64'; return 1; }
+  fi
   mkdir -p .build/ci-tools
-  if [[ "$target" == workflow-lint ]]; then
+  if [[ "$target" == static-analysis ]]; then
+    url=https://github.com/github/codeql-action/releases/download/codeql-bundle-v2.27.2/codeql-bundle-swift-osx64.tar.zst
+    hash=25a08dfd23997ccf6374b5a70d9aa27a510e027f1b5aed60e1a653f8a3596375
+    archive=.build/ci-tools/codeql-bundle.tar.zst
+    curl -fsSL "$url" -o "$archive"
+    printf '%s  %s\n' "$hash" "$archive" | shasum -a 256 -c -
+    zstd -dc "$archive" | tar -xf - -C .build/ci-tools
+    url=https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_darwin_arm64.tar.gz
+    hash=b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5
+    archive=.build/ci-tools/gitleaks.tar.gz
+    curl -fsSL "$url" -o "$archive"
+    printf '%s  %s\n' "$hash" "$archive" | shasum -a 256 -c -
+    tar -xzf "$archive" -C .build/ci-tools gitleaks
+  elif [[ "$target" == workflow-lint ]]; then
     url=https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz
     hash=023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757
     archive=.build/ci-tools/actionlint.tar.gz
@@ -202,8 +273,10 @@ install_ci_tools() {
     ln -sf zizmor-venv/bin/zizmor .build/ci-tools/zizmor
   fi
   if [[ -n "${GITHUB_PATH:-}" ]]; then
+    if [[ "$target" == static-analysis ]]; then printf '%s\n' "$ROOT/.build/ci-tools/codeql" >> "$GITHUB_PATH"; fi
     printf '%s\n' "$ROOT/.build/ci-tools" >> "$GITHUB_PATH"
   else
+    if [[ "$target" == static-analysis ]]; then echo "install-ci-tools: add $ROOT/.build/ci-tools/codeql to PATH"; fi
     echo "install-ci-tools: add $ROOT/.build/ci-tools to PATH"
   fi
 }
@@ -397,6 +470,21 @@ self_test() {
   assert_case missing-actionlint fail 'actionlint 1.7.7 is required' env PATH=/usr/bin:/bin "$BASH" "$ROOT/scripts/ci-local.sh" workflow-lint
   assert_case missing-zizmor fail 'zizmor 1.5.2 is required' env PATH=/usr/bin:/bin "$BASH" "$ROOT/scripts/ci-local.sh" workflow-security
   assert_case missing-osv fail 'osv-scanner 2.3.3 is required' env PATH=/usr/bin:/bin "$BASH" "$ROOT/scripts/ci-local.sh" dependency-scan
+  ruby scripts/lib/sarif_gate_test.rb
+  assert_case missing-codeql fail 'codeql 2.27.2 is required' env CI_LOCAL_TOOLS="$ROOT/$fixture/no-tools" PATH=/usr/bin:/bin "$BASH" "$ROOT/scripts/ci-local.sh" swift-analysis
+  assert_case missing-gitleaks fail 'gitleaks 8.30.1 is required' env CI_LOCAL_TOOLS="$ROOT/$fixture/no-tools" PATH=/usr/bin:/bin "$BASH" "$ROOT/scripts/ci-local.sh" secrets-scan
+  mkdir -p "$fixture/mock-bin"
+  ln -s /usr/bin/dirname "$fixture/mock-bin/dirname"
+  ln -s /bin/cat "$fixture/mock-bin/cat"
+  printf '#!/bin/sh\necho Linux\n' > "$fixture/mock-bin/uname"
+  chmod +x "$fixture/mock-bin/uname"
+  assert_case wrong-install-platform fail 'requires Darwin arm64' env PATH="$ROOT/$fixture/mock-bin:/usr/bin:/bin" "$BASH" "$ROOT/scripts/ci-local.sh" install-ci-tools static-analysis
+  printf '#!/bin/sh\nif [ "$1" = -s ]; then echo Darwin; else echo arm64; fi\n' > "$fixture/mock-bin/uname"
+  assert_case missing-zstd fail 'zstd is required' env PATH="$ROOT/$fixture/mock-bin" "$BASH" "$ROOT/scripts/ci-local.sh" install-ci-tools static-analysis
+  printf '#!/bin/sh\necho "CodeQL command-line toolchain release 2.27.2."\n' > "$fixture/mock-bin/codeql"
+  chmod +x "$fixture/mock-bin/codeql"
+  assert_case missing-xcodebuild fail 'xcodebuild is unavailable' env CI_LOCAL_TOOLS="$ROOT/$fixture/no-tools" PATH="$ROOT/$fixture/mock-bin" "$BASH" "$ROOT/scripts/ci-local.sh" swift-analysis
+  assert_case unset-status fail 'status 2' "$BASH" "$ROOT/scripts/ci-local.sh" status-default-test
   mkdir -p "$fixture/.github/workflows" "$fixture/.github/actions"
   (cd "$fixture"; printf 'steps:\n  - uses: a/b@v1.0.0\n' > .github/workflows/check.yml; assert_case action-tag fail 'unpinned action' pin_scan)
   (cd "$fixture"; printf 'steps:\n  - uses: a/b@1234abcd\n' > .github/workflows/check.yml; assert_case short-sha fail 'unpinned action' pin_scan)
@@ -439,6 +527,9 @@ case "${1:-}" in
   gate-verdict) gate_verdict ;;
   workflow-pins) pin_scan ;;
   static-analysis) static_analysis ;;
+  swift-analysis) swift_analysis ;;
+  secrets-scan) secrets_scan ;;
+  status-default-test) status=''; [[ "${status:-2}" == 0 ]] || fail "status ${status:-2}" ;;
   dependency-scan) dependency_scan ;;
   workflow-lint) workflow_lint "${2:-}" ;;
   workflow-policy) workflow_policy "${2:-}" ;;
