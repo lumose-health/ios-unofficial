@@ -84,4 +84,9 @@ public enum SafetyConstants {
     /// alarm, it is mirrored in the other targets, and only this file's
     /// single-definition-site guarantee detects a drifted copy.
     public static let alertFloorMaxFutureSkew: TimeInterval = 60
+
+    /// Re-alarm delay after a floor notification or acknowledgement (FR-74).
+    /// Mirrors Android `AlertFloor.kt:339` (`FLOOR_COOLDOWN_MS = 30 * 60_000L`)
+    /// and the Backend's 30-minute deduplication window.
+    public static let alertFloorCooldown: TimeInterval = 1800
 }
