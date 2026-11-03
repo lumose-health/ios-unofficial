@@ -39,4 +39,13 @@ struct AlertThresholdsTests {
             #expect(AlertClassifier.classify(try Glucose(mgdl: value), against: thresholds) == expected)
         }
     }
+
+    @Test func sensorRangeClassificationDoesNotDependOnThresholds() throws {
+        let first = try AlertThresholds(urgentLow: 40, low: 90, high: 300, urgentHigh: 450)
+        let second = try AlertThresholds(urgentLow: 35, low: 95, high: 330, urgentHigh: 470)
+        let sample = try Glucose(mgdl: 92)
+        #expect(AlertClassifier.classify(sample, against: first) != AlertClassifier.classify(sample, against: second))
+        #expect(AlertClassifier.classify(SensorRangeSide.below) == .lowUrgent)
+        #expect(AlertClassifier.classify(SensorRangeSide.above) == .highUrgent)
+    }
 }

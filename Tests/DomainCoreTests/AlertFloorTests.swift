@@ -2,6 +2,7 @@ import Foundation
 import Testing
 import SafetyCore
 import DomainCore
+import DriverAPI
 
 final class AlertTestClock: Clock, @unchecked Sendable {
     private let lock = NSLock()
@@ -116,6 +117,110 @@ struct AlertFloorTests {
         #expect(await floor.evaluate(try reading(100, at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl) == .inRange)
         let calls = await port.calls()
         #expect(calls.0 == 0 && calls.1 == 0)
+    }
+
+    @Test func excursionsUseThresholdAndFreshnessGates() async throws {
+        let (floor, port, clock, setting) = try setup()
+        let below = SensorRangeExcursion(side: .below, recordedAt: clock.now)
+        #expect(await floor.evaluate(below, thresholds: .notConfigured, backend: .notConfigured, unit: .mgdl) == .suppressed(.dataTrust(.thresholdsNotConfigured)))
+        let stale = SensorRangeExcursion(side: .below, recordedAt: clock.now.addingTimeInterval(-SafetyConstants.cgmStaleAfter))
+        #expect(await floor.evaluate(stale, thresholds: setting, backend: .notConfigured, unit: .mgdl) == .suppressed(.dataTrust(.notFresh)))
+        let healthy = BackendAlertingStatus.configured(networkReachable: true, streamConnected: true, backendHasFreshGlucose: true)
+        #expect(await floor.evaluate(below, thresholds: setting, backend: healthy, unit: .mgdl) == .suppressed(.backendAlerting))
+        let calls = await port.calls()
+        #expect(calls.0 == 0 && calls.1 == 0)
+    }
+
+    @Test func excursionNotificationUsesWordsAndNoGlucoseValue() async throws {
+        let (floor, _, clock, setting) = try setup()
+        let below = SensorRangeExcursion(side: .below, recordedAt: clock.now)
+        guard case .fired(let low) = await floor.evaluate(below, thresholds: setting, backend: .notConfigured, unit: .mgdl) else {
+            Issue.record("below-range report should fire"); return
+        }
+        #expect(low.type == .lowUrgent)
+        #expect(low.severity == .urgent && low.tier == .interrupting)
+        #expect(low.alertIdentifier == "local-floor:low_urgent:175000")
+        #expect(low.glucose == nil)
+        #expect(low.body == "Urgent low glucose below the sensor's range — computed on your phone from your last sensor reading. Threshold-only, no prediction. Not a replacement for your CGM app.")
+
+        let above = SensorRangeExcursion(side: .above, recordedAt: clock.now)
+        guard case .fired(let high) = await floor.evaluate(above, thresholds: setting, backend: .notConfigured, unit: .mmol) else {
+            Issue.record("above-range report should fire"); return
+        }
+        #expect(high.type == .highUrgent)
+        #expect(high.severity == .urgent && high.tier == .interrupting)
+        #expect(high.glucose == nil)
+        #expect(high.body == "Urgent high glucose above the sensor's range — computed on your phone from your last sensor reading. Threshold-only, no prediction. Not a replacement for your CGM app.")
+        // The edge number the frame carries is never shown, in either unit.
+        let numbers = [low.body, high.body].filter { $0.contains(where: \.isNumber) }
+        #expect(numbers.isEmpty)
+    }
+
+    @Test func belowRangeFiresDuringAcknowledgedLowWarningAndRearmsIt() async throws {
+        let (floor, port, clock, setting) = try setup()
+        let configured = try #require(setting.configuredThresholds)
+        let warning = try reading(Double(configured.low), at: clock.now)
+        guard case .fired = await floor.evaluate(warning, thresholds: setting, backend: .notConfigured, unit: .mgdl) else {
+            Issue.record("low warning should fire"); return
+        }
+        await floor.acknowledge(.lowWarning)
+        let below = SensorRangeExcursion(side: .below, recordedAt: clock.now)
+        guard case .fired = await floor.evaluate(below, thresholds: setting, backend: .notConfigured, unit: .mgdl) else {
+            Issue.record("below-range report should fire during warning cooldown"); return
+        }
+        #expect(await floor.evaluate(below, thresholds: setting, backend: .notConfigured, unit: .mgdl) == .suppressed(.coolingDown))
+        guard case .fired = await floor.evaluate(warning, thresholds: setting, backend: .notConfigured, unit: .mgdl) else {
+            Issue.record("acknowledged low warning should re-arm"); return
+        }
+        let posted = await port.notifications()
+        #expect(posted.map(\.type) == [.lowWarning, .lowUrgent, .lowWarning])
+    }
+
+    @Test func numericUrgentLowCoolsDownABelowRangeReport() async throws {
+        let (floor, port, clock, setting) = try setup()
+        let t = try fixture(setting)
+        guard case .fired = await floor.evaluate(try reading(Double(t.urgentLow), at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl) else {
+            Issue.record("numeric urgent low should fire"); return
+        }
+        clock.advance(1)
+        let below = SensorRangeExcursion(side: .below, recordedAt: clock.now)
+        #expect(await floor.evaluate(below, thresholds: setting, backend: .notConfigured, unit: .mgdl) == .suppressed(.coolingDown))
+        let posted = await port.notifications()
+        #expect(posted.map(\.type) == [.lowUrgent])
+        let allNumeric = posted.allSatisfy { $0.glucose != nil }
+        #expect(allNumeric)
+    }
+
+    @Test func belowRangeReportCoolsDownANumericUrgentLow() async throws {
+        let (floor, port, clock, setting) = try setup()
+        let t = try fixture(setting)
+        let below = SensorRangeExcursion(side: .below, recordedAt: clock.now)
+        guard case .fired = await floor.evaluate(below, thresholds: setting, backend: .notConfigured, unit: .mgdl) else {
+            Issue.record("below-range report should fire"); return
+        }
+        clock.advance(1)
+        #expect(await floor.evaluate(try reading(Double(t.urgentLow), at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl) == .suppressed(.coolingDown))
+        let posted = await port.notifications()
+        #expect(posted.map(\.type) == [.lowUrgent])
+        #expect(posted.map(\.glucose) == [nil])
+    }
+
+    @Test func acknowledgedUrgentLowRearmsSoABelowRangeReportFires() async throws {
+        let (floor, port, clock, setting) = try setup()
+        let t = try fixture(setting)
+        _ = await floor.evaluate(try reading(Double(t.urgentLow), at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl)
+        await floor.acknowledge(.lowUrgent)
+        let below = SensorRangeExcursion(side: .below, recordedAt: clock.now)
+        #expect(await floor.evaluate(below, thresholds: setting, backend: .notConfigured, unit: .mgdl) == .suppressed(.coolingDown))
+        guard case .fired = await floor.evaluate(try reading(Double(t.low), at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl) else {
+            Issue.record("low warning should fire"); return
+        }
+        guard case .fired(let rearmed) = await floor.evaluate(below, thresholds: setting, backend: .notConfigured, unit: .mgdl) else {
+            Issue.record("a different type must re-arm the acknowledged urgent low for a below-range report"); return
+        }
+        #expect(rearmed.glucose == nil)
+        let posted = await port.notifications()
+        #expect(posted.map(\.type) == [.lowUrgent, .lowWarning, .lowUrgent])
     }
 
     @Test func backendGateStopsBeforeTrustAndPort() async throws {
@@ -249,8 +354,9 @@ struct AlertFloorTests {
         #expect(notification.tier == .interrupting)
         #expect(notification.sensorTimestamp == clock.now)
         #expect(notification.body == "Urgent low glucose 54 mg/dL — computed on your phone from your last sensor reading. Threshold-only, no prediction. Not a replacement for your CGM app.")
-        let mmol = AlertFloorContent.body(for: .lowUrgent, glucose: notification.glucose, unit: .mmol)
-        #expect(mmol.contains(GlucoseFormatter.stringWithLabel(notification.glucose, in: .mmol)))
+        let glucose = try #require(notification.glucose)
+        let mmol = AlertFloorContent.body(for: .lowUrgent, glucose: glucose, unit: .mmol)
+        #expect(mmol.contains(GlucoseFormatter.stringWithLabel(glucose, in: .mmol)))
         let thresholds = try #require(setting.configuredThresholds)
         for value in stride(from: 20, through: 500, by: 1) {
             let type = AlertClassifier.classify(try Glucose(mgdl: value), against: thresholds)

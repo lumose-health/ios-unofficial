@@ -1035,6 +1035,7 @@ private final class HostScriptedReads<Value: Sendable>: @unchecked Sendable {
 
 private struct HostGlucoseSource: GlucoseSource {
     let initialSample: GlucoseSample?
+    let sensorRangeExcursions: AsyncStream<SensorRangeExcursion> = AsyncStream { $0.finish() }
     let reads: HostScriptedReads<GlucoseSample>
     init(initialSample: GlucoseSample?, scripted: [HostReadResult<GlucoseSample>]) {
         self.initialSample = initialSample
@@ -1225,6 +1226,7 @@ private actor StreamingHostDriver: Driver {
 
 private struct StreamGlucosePort: GlucoseSource {
     let readings: AsyncStream<GlucoseSample>
+    let sensorRangeExcursions: AsyncStream<SensorRangeExcursion> = AsyncStream { $0.finish() }
     var gate: HostReadGate?
     func latestReading() async throws(DriverFailure) -> GlucoseSample? {
         await gate?.holdIfArmed()

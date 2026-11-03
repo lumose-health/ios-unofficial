@@ -26,6 +26,33 @@ struct SimulatedDriverLifecycleTests {
         return (driver, clock, scheduler)
     }
 
+    @Test("Sensor range stream stays silent across ticks and finishes on teardown")
+    func sensorRangeStreamIsSilent() async throws {
+        let (driver, clock, scheduler) = try makeDriver()
+        guard case .glucoseSource(let port) = driver.capability(.glucoseSource) else {
+            Issue.record("expected glucose source"); return
+        }
+        let excursions = port.sensorRangeExcursions
+        try await driver.activate()
+        for _ in 0..<5 {
+            clock.advance(by: SimulatedDriver.defaultTickInterval)
+            await scheduler.tick()
+        }
+        await driver.deactivate()
+        var values: [SensorRangeExcursion] = []
+        for await excursion in excursions { values.append(excursion) }
+        #expect(values.isEmpty)
+
+        try await driver.activate()
+        guard case .glucoseSource(let renewedPort) = driver.capability(.glucoseSource) else {
+            Issue.record("expected renewed glucose source"); return
+        }
+        await driver.deactivate()
+        var renewedValues: [SensorRangeExcursion] = []
+        for await excursion in renewedPort.sensorRangeExcursions { renewedValues.append(excursion) }
+        #expect(renewedValues.isEmpty)
+    }
+
     @Test("Emissions happen only between activate() and deactivate()")
     func emitsOnlyWhileActive() async throws {
         let (driver, clock, scheduler) = try makeDriver()

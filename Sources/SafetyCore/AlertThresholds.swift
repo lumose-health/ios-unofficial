@@ -38,6 +38,13 @@ public enum AlertThresholdSetting: Hashable, Sendable {
 }
 
 public enum AlertClassifier {
+    public static func classify(_ side: SensorRangeSide) -> AlertType {
+        switch side {
+        case .below: .lowUrgent
+        case .above: .highUrgent
+        }
+    }
+
     public static func classify(_ glucose: Glucose, against thresholds: AlertThresholds) -> AlertType? {
         let value = glucose.mgdl.rounded(.toNearestOrAwayFromZero)
         if value <= Double(thresholds.urgentLow) { return .lowUrgent }

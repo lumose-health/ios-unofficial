@@ -30,6 +30,17 @@ public struct GlucoseSample: Hashable, Sendable {
     }
 }
 
+/// A sensor range report with no measured glucose number.
+public struct SensorRangeExcursion: Hashable, Sendable {
+    public let side: SensorRangeSide
+    public let recordedAt: Date
+
+    public init(side: SensorRangeSide, recordedAt: Date) {
+        self.side = side
+        self.recordedAt = recordedAt
+    }
+}
+
 /// The rate-of-change arrow a CGM reports alongside a reading.
 ///
 /// A closed vocabulary rather than a raw number: sensors disagree about the units

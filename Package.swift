@@ -138,7 +138,7 @@ let package = Package(
         ),
         .testTarget(
             name: "TraceReplayDriverTests",
-            dependencies: ["TraceReplayDriver", "DriverAPI", "SafetyCore", "TandemWire"],
+            dependencies: ["TraceReplayDriver", "DriverAPI", "SafetyCore", "TandemWire", "DomainCore"],
             resources: traceReplayDriverResources,
             swiftSettings: [.swiftLanguageMode(.v6)] + traceReplayDriverSettings
         ),

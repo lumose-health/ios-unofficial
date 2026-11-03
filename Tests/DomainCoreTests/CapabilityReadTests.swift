@@ -152,6 +152,7 @@ private actor PortTestDriver: Driver {
 
 private struct EmptyGlucosePort: GlucoseSource {
     var readings: AsyncStream<GlucoseSample> { AsyncStream { _ in } }
+    let sensorRangeExcursions: AsyncStream<SensorRangeExcursion> = AsyncStream { $0.finish() }
     func latestReading() async throws(DriverFailure) -> GlucoseSample? { nil }
 }
 
