@@ -73,6 +73,32 @@ struct DriverFailureTests {
         #expect(DriverFailure.notPaired != DriverFailure.authenticationRejected)
     }
 
+    /// FR-10 asks for distinct categories, so every pairing outcome a
+    /// scan-and-connect Driver can produce must be distinguishable, including
+    /// the ones that reuse an existing case.
+    @Test("Pairing rejection categories are distinct and carry the radio reason")
+    func pairingRejectionCategories() {
+        let reasons: [BluetoothUnavailableReason] = [
+            .poweredOff, .resetting, .unknown, .permissionDenied, .permissionRestricted, .unsupported,
+        ]
+        let failures: [DriverFailure] = [
+            .pairingRejected(.codeRejected),
+            .pairingRejected(.secureHandshakeRejected),
+            .pairingRejected(.pumpBusy),
+            .timedOut,
+            .authenticationRejected,
+            .cancelled,
+        ] + reasons.map { .pairingRejected(.bluetoothUnavailable($0)) }
+        #expect(Set(failures).count == failures.count)
+
+        guard case .pairingRejected(.bluetoothUnavailable(let reason)) =
+                DriverFailure.pairingRejected(.bluetoothUnavailable(.permissionRestricted)) else {
+            Issue.record("radio reason lost")
+            return
+        }
+        #expect(reason == .permissionRestricted)
+    }
+
     @Test("A failure carries the Capability that was unavailable")
     func capabilityFailureCarriesTheCapability() {
         let failure = DriverFailure.capabilityUnavailable(.glucoseSource)
@@ -96,14 +122,43 @@ struct DriverFailureTests {
         #expect(Set(rejections).count == rejections.count)
     }
 
+    /// One Bluetooth condition, one retry answer: `transportUnavailable` covers
+    /// only conditions that clear on their own, and the conditions that need the
+    /// user (permission, hardware) exist only as permanent pairing reasons.
+    @Test("Bluetooth conditions needing the user are permanent; transportUnavailable stays transient")
+    func bluetoothRetryClassificationAgrees() {
+        #expect(DriverFailure.transportUnavailable.isTransient)
+        for reason in [BluetoothUnavailableReason.poweredOff, .resetting, .unknown] {
+            #expect(DriverFailure.pairingRejected(.bluetoothUnavailable(reason)).isTransient)
+        }
+        for reason in [BluetoothUnavailableReason.permissionDenied, .permissionRestricted, .unsupported] {
+            #expect(!DriverFailure.pairingRejected(.bluetoothUnavailable(reason)).isTransient)
+        }
+        #expect(!DriverFailure.pairingRejected(.codeRejected).isTransient)
+    }
+
     /// Every case is pinned, so moving one between the two sides is a visible
     /// test change rather than a quiet edit to the switch.
-    @Test("Transient failures are exactly the transport, link, timeout and cancellation cases")
+    @Test("Transient failures are exactly the transport, link, timeout, cancellation, busy-pump and recoverable-radio cases")
     func transientClassification() {
-        let transient: [DriverFailure] = [.transportUnavailable, .connectionLost, .timedOut, .cancelled]
+        let transient: [DriverFailure] = [
+            .transportUnavailable,
+            .connectionLost,
+            .timedOut,
+            .cancelled,
+            .pairingRejected(.pumpBusy),
+            .pairingRejected(.bluetoothUnavailable(.poweredOff)),
+            .pairingRejected(.bluetoothUnavailable(.resetting)),
+            .pairingRejected(.bluetoothUnavailable(.unknown)),
+        ]
         let permanent: [DriverFailure] = [
             .notPaired,
             .authenticationRejected,
+            .pairingRejected(.codeRejected),
+            .pairingRejected(.secureHandshakeRejected),
+            .pairingRejected(.bluetoothUnavailable(.permissionDenied)),
+            .pairingRejected(.bluetoothUnavailable(.permissionRestricted)),
+            .pairingRejected(.bluetoothUnavailable(.unsupported)),
             .decodeFailed(detail: "frame"),
             .valueRejected(bound: "glucose"),
             .capabilityUnavailable(.glucoseSource),

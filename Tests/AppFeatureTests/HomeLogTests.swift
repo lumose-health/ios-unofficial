@@ -13,6 +13,7 @@ struct HomeLogTests {
             (.deviceFault(code: "secret"), "deviceFault"),
             (.illegalTransition(from: .active, to: .failed), "illegalTransition"),
             (.safetyLimitRejected(.notFinite), "safetyLimitRejected"), (.cancelled, "cancelled"),
+            (.pairingRejected(.codeRejected), "pairingRejected"),
         ]
         for (failure, expected) in cases { #expect(failure.caseName == expected) }
     }
