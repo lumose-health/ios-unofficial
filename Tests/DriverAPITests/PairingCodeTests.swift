@@ -41,6 +41,26 @@ struct PairingCodeTests {
         #expect(code.utf8Bytes == [0x31, 0x32, 0x33, 0x34, 0x35, 0x36])
     }
 
+    @Test("Identity follows the secret bytes, not Unicode canonical equivalence")
+    func identityIsBytewise() throws {
+        // Precomposed and decomposed e-acute: equal as Strings, different secrets.
+        let composed = try #require(PairingCode("\u{E9}12345"))
+        let decomposed = try #require(PairingCode("e\u{301}12345"))
+        #expect("\u{E9}12345" == "e\u{301}12345")
+        #expect(composed.utf8Bytes != decomposed.utf8Bytes)
+        #expect(composed != decomposed)
+
+        let distinct = Set([composed, decomposed])
+        #expect(distinct.contains(composed))
+        #expect(distinct.contains(decomposed))
+        let distinctCount = distinct.count
+        #expect(distinctCount == 2)
+
+        let repeated = Set([composed, try #require(PairingCode("\u{E9}12345"))])
+        let repeatedCount = repeated.count
+        #expect(repeatedCount == 1)
+    }
+
     @Test("Descriptions, reflection and dumps never show the code")
     func neverPrinted() throws {
         let code = try #require(PairingCode("987654"))
