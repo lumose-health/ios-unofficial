@@ -30,7 +30,7 @@ public final class CoreBluetoothCentral: BluetoothCentral, @unchecked Sendable {
     }
 
     public func startScan(services: [String]) {
-        queue.async { [manager] in
+        queue.async { [self] in
             guard manager.state == .poweredOn else { return }
             // Duplicates allowed so RSSI updates live (FR-4).
             manager.scanForPeripherals(withServices: services.map { CBUUID(string: $0) },
@@ -39,7 +39,7 @@ public final class CoreBluetoothCentral: BluetoothCentral, @unchecked Sendable {
     }
 
     public func stopScan() {
-        queue.async { [manager] in manager.stopScan() }
+        queue.async { [self] in manager.stopScan() }
     }
 }
 
