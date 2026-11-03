@@ -46,9 +46,13 @@ public enum DriverFailure: Error, Hashable, Sendable {
     /// ``notPaired`` because the recovery is different: re-pair, not pair.
     case authenticationRejected
 
-    /// The transport itself is unavailable: Bluetooth off, permission not
-    /// granted, no network for a sync destination. Nothing about the device is
-    /// known, and retrying without the transport returning is pointless.
+    /// The transport itself is unavailable for a reason that clears without
+    /// the user acting: Bluetooth off, resetting or not yet reported, no
+    /// network for a sync destination. Nothing about the device is known, and
+    /// retrying without the transport returning is pointless. A missing
+    /// Bluetooth permission or unsupported hardware is not this case: it needs
+    /// the user, and is ``PairingRejection/bluetoothUnavailable(_:)`` with a
+    /// permanent reason.
     case transportUnavailable
 
     /// The device was reachable and is not any more — out of range, or it dropped
@@ -96,6 +100,13 @@ public enum DriverFailure: Error, Hashable, Sendable {
     /// last-known-good stays in force, nothing is clamped (SI-11, AD-13).
     case safetyLimitRejected(SafetyLimitRejection)
 
+    /// A first-time pairing attempt failed in a way the user needs explained
+    /// distinctly (FR-10). Pairing failures that already have a case here use
+    /// it: a handshake that ran past its bound is ``timedOut``, a pump that no
+    /// longer trusts this phone is ``authenticationRejected`` (FR-11), and a
+    /// cancelled attempt is ``cancelled`` (FR-9).
+    case pairingRejected(PairingRejection)
+
     /// The work was cancelled — the platform tore the Driver down, or the task
     /// was cancelled. Not an error condition to report to the user.
     case cancelled
@@ -119,7 +130,16 @@ extension DriverFailure {
         switch self {
         case .transportUnavailable, .connectionLost, .timedOut, .cancelled:
             return true
-        case .notPaired, .authenticationRejected, .decodeFailed, .valueRejected,
+        case .pairingRejected(.pumpBusy),
+             .pairingRejected(.bluetoothUnavailable(.poweredOff)),
+             .pairingRejected(.bluetoothUnavailable(.resetting)),
+             .pairingRejected(.bluetoothUnavailable(.unknown)):
+            return true
+        case .pairingRejected(.codeRejected), .pairingRejected(.secureHandshakeRejected),
+             .pairingRejected(.bluetoothUnavailable(.permissionDenied)),
+             .pairingRejected(.bluetoothUnavailable(.permissionRestricted)),
+             .pairingRejected(.bluetoothUnavailable(.unsupported)),
+             .notPaired, .authenticationRejected, .decodeFailed, .valueRejected,
              .capabilityUnavailable, .deviceFault, .illegalTransition, .safetyLimitRejected:
             return false
         }
@@ -144,4 +164,33 @@ public enum SafetyLimitRejection: Hashable, Sendable {
     /// The lower bound was not below the upper bound — an empty or inverted range
     /// admits nothing and would silently reject every reading.
     case emptyOrInverted(lower: Double, upper: Double)
+}
+
+/// Why a first-time pairing attempt failed (FR-10, AD-13).
+///
+/// Carries no copy: the sentence the user sees is supplied by the Driver
+/// (FR-2). Carries no secret material either (SI-9).
+public enum PairingRejection: Hashable, Sendable {
+    /// The device refused the code: wrong, mistyped or expired. In the EC-JPAKE
+    /// handshake a key-confirmation mismatch, including a reflected
+    /// confirmation, is this case; so is a legacy pump challenge answered 0.
+    ///
+    /// Never retry a pairing failure automatically with the same code, whatever
+    /// ``DriverFailure/isTransient`` says about other failures: repeated wrong
+    /// codes can lock the pump's pairing out.
+    case codeRejected
+    /// The secure handshake failed for a reason other than the code, such as
+    /// a malformed or out-of-order message from the device.
+    case secureHandshakeRejected
+    /// Another app or device holds the connection (FR-7).
+    case pumpBusy
+    /// The phone's Bluetooth radio cannot be used, and why.
+    case bluetoothUnavailable(BluetoothUnavailableReason)
+}
+
+/// Why the Bluetooth radio is unavailable. Powered off, resetting and unknown
+/// clear without the user acting; the permission and hardware cases do not.
+public enum BluetoothUnavailableReason: Hashable, Sendable {
+    case poweredOff, resetting, unknown
+    case permissionDenied, permissionRestricted, unsupported
 }

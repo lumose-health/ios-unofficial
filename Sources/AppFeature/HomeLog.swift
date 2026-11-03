@@ -33,6 +33,7 @@ extension DriverFailure {
         case .deviceFault: "deviceFault"
         case .illegalTransition: "illegalTransition"
         case .safetyLimitRejected: "safetyLimitRejected"
+        case .pairingRejected: "pairingRejected"
         case .cancelled: "cancelled"
         }
     }
