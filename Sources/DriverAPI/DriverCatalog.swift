@@ -54,6 +54,15 @@ public enum DriverCatalog {
             capabilities: [.glucoseSource, .insulinSource],
             verification: .beta
         ),
+        DriverDescriptor(
+            identifier: DriverIdentifier("com.glycemicgpt.tandem")!,
+            targetName: "TandemDriver",
+            displayName: "Tandem Insulin Pump",
+            transport: .bluetoothLowEnergy,
+            version: "1.0.0",
+            capabilities: [.glucoseSource, .insulinSource, .pumpStatus],
+            verification: .unverified
+        ),
     ]
     #else
     /// The Drivers in this build: the list above without the Trace-Replay
@@ -66,6 +75,15 @@ public enum DriverCatalog {
             transport: .inProcess,
             version: "1.0.0",
             capabilities: [.glucoseSource, .insulinSource],
+            verification: .unverified
+        ),
+        DriverDescriptor(
+            identifier: DriverIdentifier("com.glycemicgpt.tandem")!,
+            targetName: "TandemDriver",
+            displayName: "Tandem Insulin Pump",
+            transport: .bluetoothLowEnergy,
+            version: "1.0.0",
+            capabilities: [.glucoseSource, .insulinSource, .pumpStatus],
             verification: .unverified
         ),
     ]

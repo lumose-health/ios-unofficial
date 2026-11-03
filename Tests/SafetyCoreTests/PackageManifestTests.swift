@@ -256,6 +256,7 @@ struct PackageManifestTests {
             "AppFeature", "AppFeatureTests",
             "TandemWire", "TandemWireTests",
             "TraceReplayDriver", "TraceReplayDriverTests",
+            "TandemDriver", "TandemDriverTests",
         ]))
     }
 
@@ -308,6 +309,15 @@ struct PackageManifestTests {
         let arguments = try #require(Self.targetArguments(named: "TandemWire", in: try Self.manifestSource()))
         #expect(arguments.contains("path:\"Sources/Wire/Tandem\""))
         #expect(arguments.contains("dependencies:[\"DriverAPI\",\"SafetyCore\"]"))
+    }
+
+    @Test("TandemDriver declares the exact driver dependency set")
+    func tandemDriverDependencies() throws {
+        let target = try #require(Self.targetArguments(named: "TandemDriver", in: try Self.manifestSource()))
+        #expect(target.contains("dependencies:[\"DriverAPI\",\"SafetyCore\",\"TandemWire\"]"))
+        let tests = try #require(Self.allTargetDeclarations(in: try Self.manifestSource())
+            .first { $0.name == "TandemDriverTests" }?.arguments)
+        #expect(tests.contains("dependencies:[\"TandemDriver\",\"DriverAPI\",\"SafetyCore\",\"TandemWire\"]"))
     }
 
     @Test("Every wire target stays within the DriverAPI and SafetyCore dependency ceiling")

@@ -13,11 +13,11 @@ struct DriverCatalogTests {
     @Test("The catalog registers the Simulated Driver, the first Driver to ship")
     func catalogRegistersSimulatedDriver() throws {
         #if TRACE_REPLAY_DRIVER_ENABLED
+        #expect(DriverCatalog.entries.count == 3)
+        #expect(DriverCatalog.rows().count == 3)
+        #else
         #expect(DriverCatalog.entries.count == 2)
         #expect(DriverCatalog.rows().count == 2)
-        #else
-        #expect(DriverCatalog.entries.count == 1)
-        #expect(DriverCatalog.rows().count == 1)
         #endif
         let entry = try #require(DriverCatalog.entries.first)
         #expect(entry.targetName == "SimulatedDriver")
@@ -31,8 +31,9 @@ struct DriverCatalogTests {
     /// identifiers and most capabilities still answer nothing.
     @Test("Lookups answer the Simulated Driver where it is registered, and nothing where it is not")
     func lookupsMatchOnlyWhatIsRegistered() throws {
-        let unregistered = try #require(DriverIdentifier("com.glycemicgpt.tandem"))
+        let unregistered = try #require(DriverIdentifier("com.glycemicgpt.unregistered"))
         #expect(DriverCatalog.entry(for: unregistered) == nil)
+        let tandemID = try #require(DriverIdentifier("com.glycemicgpt.tandem"))
 
         let simulated = try #require(DriverIdentifier("com.glycemicgpt.simulated"))
         #expect(DriverCatalog.entry(for: simulated)?.targetName == "SimulatedDriver")
@@ -46,16 +47,29 @@ struct DriverCatalogTests {
         #expect(traceEntry.version == "1.0.0")
         #expect(traceEntry.capabilities == [.glucoseSource, .insulinSource])
         #expect(traceEntry.verification == .beta)
-        for capability in [Capability.glucoseSource, .insulinSource] {
-            #expect(DriverCatalog.entries(providing: capability).map(\.targetName) == ["SimulatedDriver", "TraceReplayDriver"])
-        }
-        for capability in Capability.allCases where capability != .glucoseSource && capability != .insulinSource {
-            #expect(DriverCatalog.entries(providing: capability).isEmpty, "\(capability)")
-        }
         #else
         let trace = try #require(DriverIdentifier("com.glycemicgpt.trace-replay"))
         #expect(DriverCatalog.entry(for: trace) == nil)
         #endif
+        let tandem = try #require(DriverCatalog.entry(for: tandemID))
+        #expect(tandem.targetName == "TandemDriver")
+        #expect(tandem.displayName == "Tandem Insulin Pump")
+        #expect(tandem.transport == .bluetoothLowEnergy)
+        #expect(tandem.version == "1.0.0")
+        #expect(tandem.capabilities == [.glucoseSource, .insulinSource, .pumpStatus])
+        #expect(tandem.verification == .unverified)
+        #expect(tandem.verification != .hardwareVerified)
+        for capability in [Capability.glucoseSource, .insulinSource] {
+            #if TRACE_REPLAY_DRIVER_ENABLED
+            #expect(DriverCatalog.entries(providing: capability).map(\.targetName) == ["SimulatedDriver", "TraceReplayDriver", "TandemDriver"])
+            #else
+            #expect(DriverCatalog.entries(providing: capability).map(\.targetName) == ["SimulatedDriver", "TandemDriver"])
+            #endif
+        }
+        #expect(DriverCatalog.entries(providing: .pumpStatus).map(\.targetName) == ["TandemDriver"])
+        for capability in Capability.allCases where !tandem.capabilities.contains(capability) {
+            #expect(DriverCatalog.entries(providing: capability).isEmpty, "\(capability)")
+        }
     }
 
     /// Registration means MEMBERSHIP in ``DriverCatalog/entries``, and this is the
