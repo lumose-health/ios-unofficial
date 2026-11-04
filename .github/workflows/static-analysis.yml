@@ -17,7 +17,7 @@ jobs:
     name: Guards and Secrets
     runs-on: macos-26
     # The guard self-tests alone take about 17 minutes on this runner.
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -38,7 +38,7 @@ jobs:
     name: CodeQL Swift
     runs-on: macos-26
     # The traced build runs under Rosetta and took about 23 minutes when it shared a runner.
-    timeout-minutes: 40
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
