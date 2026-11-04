@@ -32,11 +32,9 @@ public struct PairingCode: Hashable, Sendable {
 
     /// The secret bytes a handshake is keyed with: the code's UTF-8 encoding.
     ///
-    /// For an ASCII code this is byte-identical to the Android client, which
-    /// encodes the code as US-ASCII. For a non-ASCII code the two differ:
-    /// Android substitutes `?` for each non-ASCII character and this does not.
-    /// No device code contains non-ASCII characters, so either encoding ends in
-    /// the device rejecting the code.
+    /// An ASCII code encodes to its US-ASCII bytes, which is what a device
+    /// expects. No device code contains non-ASCII characters, so a non-ASCII
+    /// code ends in the device rejecting it.
     public var utf8Bytes: [UInt8] { Array(value.utf8) }
 
     public static func == (lhs: PairingCode, rhs: PairingCode) -> Bool {
