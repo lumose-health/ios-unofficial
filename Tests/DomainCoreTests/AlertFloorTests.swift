@@ -4,12 +4,19 @@ import SafetyCore
 import DomainCore
 import DriverAPI
 
-final class AlertTestClock: Clock, @unchecked Sendable {
+final class AlertTestClock: Clock, ElapsedClock, @unchecked Sendable {
     private let lock = NSLock()
     private var value: Date
+    private var elapsedValue: TimeInterval = 0
     init(_ now: Date) { value = now }
+    var elapsed: TimeInterval { lock.lock(); defer { lock.unlock() }; return elapsedValue }
     var now: Date { lock.lock(); defer { lock.unlock() }; return value }
     func advance(_ interval: TimeInterval) {
+        lock.lock(); defer { lock.unlock() }
+        value = value.addingTimeInterval(interval)
+        elapsedValue += interval
+    }
+    func stepWall(_ interval: TimeInterval) {
         lock.lock(); defer { lock.unlock() }
         value = value.addingTimeInterval(interval)
     }
@@ -37,24 +44,62 @@ actor FakeAlertNotifier: AlertNotifying {
     func notifications() -> [AlertFloorNotification] { posted }
 }
 
+/// Waits on real time, never on a fake clock, and records a failure at the deadline.
+/// A floor that stops before the notifier never resumes a continuation, so waiting on
+/// one would suspend the test forever, and a test time limit cannot cancel that wait.
+private func waitUntil(
+    _ description: String,
+    sourceLocation: SourceLocation = #_sourceLocation,
+    _ condition: () async -> Bool
+) async throws {
+    let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+    while await !condition() {
+        guard ContinuousClock.now < deadline else {
+            Issue.record("Timed out waiting: \(description)", sourceLocation: sourceLocation)
+            throw CancellationError()
+        }
+        await Task.yield()
+    }
+}
+
+/// Suspends the first post until released. Later posts return at once, so a second
+/// post fails the count instead of suspending the test.
 private actor PausingAlertNotifier: AlertNotifying {
     private var started = false
-    private var startedWaiter: CheckedContinuation<Void, Never>?
     private var releaseWaiter: CheckedContinuation<Void, Never>?
     private(set) var posts = 0
 
     func canPostAlerts() async -> Bool { true }
     func post(_ notification: AlertFloorNotification) async throws(AlertPostFailure) {
         posts += 1
+        if started { return }
         started = true
-        startedWaiter?.resume()
-        startedWaiter = nil
         await withCheckedContinuation { releaseWaiter = $0 }
     }
-    func waitUntilPostStarts() async {
-        if started { return }
-        await withCheckedContinuation { startedWaiter = $0 }
+    func postStarted() -> Bool { started }
+    func release() {
+        releaseWaiter?.resume()
+        releaseWaiter = nil
     }
+}
+
+/// Suspends the first permission check until released. Later checks return at once.
+private actor PermissionPausingAlertNotifier: AlertNotifying {
+    private var paused = true
+    private var started = false
+    private var releaseWaiter: CheckedContinuation<Void, Never>?
+    private(set) var posts = 0
+
+    func canPostAlerts() async -> Bool {
+        if paused {
+            paused = false
+            started = true
+            await withCheckedContinuation { releaseWaiter = $0 }
+        }
+        return true
+    }
+    func post(_ notification: AlertFloorNotification) async throws(AlertPostFailure) { posts += 1 }
+    func checkStarted() -> Bool { started }
     func release() {
         releaseWaiter?.resume()
         releaseWaiter = nil
@@ -66,7 +111,6 @@ private actor PausingAlertNotifier: AlertNotifying {
 private actor GatedAlertNotifier: AlertNotifying {
     private var gated = true
     private var started = false
-    private var startedWaiter: CheckedContinuation<Void, Never>?
     private var releaseWaiter: CheckedContinuation<Void, Never>?
     private var releaseFails = false
     private(set) var attempts = 0
@@ -78,17 +122,12 @@ private actor GatedAlertNotifier: AlertNotifying {
         if gated {
             gated = false
             started = true
-            startedWaiter?.resume()
-            startedWaiter = nil
             await withCheckedContinuation { releaseWaiter = $0 }
             if releaseFails { throw .unavailable }
         }
         posted.append(notification)
     }
-    func waitUntilPostStarts() async {
-        if started { return }
-        await withCheckedContinuation { startedWaiter = $0 }
-    }
+    func postStarted() -> Bool { started }
     func release(failing: Bool) {
         releaseFails = failing
         releaseWaiter?.resume()
@@ -98,10 +137,12 @@ private actor GatedAlertNotifier: AlertNotifying {
 
 @Suite("Alert floor gates and episodes")
 struct AlertFloorTests {
+    private let sixHours: TimeInterval = 6 * 3600
+
     private func setup() throws -> (AlertFloor, FakeAlertNotifier, AlertTestClock, AlertThresholdSetting) {
         let clock = AlertTestClock(Date(timeIntervalSince1970: 175))
         let notifier = FakeAlertNotifier()
-        let floor = AlertFloor(notifier: notifier, clock: clock)
+        let floor = AlertFloor(notifier: notifier, clock: clock, elapsed: clock)
         let thresholds = try AlertThresholds(urgentLow: 55, low: 70, high: 180, urgentHigh: 250)
         return (floor, notifier, clock, .configured(thresholds, .local))
     }
@@ -240,16 +281,147 @@ struct AlertFloorTests {
         #expect(calls.0 == 0 && calls.1 == 0)
     }
 
+    @Test func everyValidGlucoseIsSilentAtBothStaleBoundaries() async throws {
+        let (floor, port, clock, setting) = try setup()
+        let bounds = SafetyConstants.glucoseValidRange
+        let values = Array(stride(from: bounds.lowerBound, through: bounds.upperBound, by: 10)) + [bounds.upperBound]
+        for age in [SafetyConstants.cgmStaleAfter, SafetyConstants.cgmTooStaleAfter] {
+            for value in values {
+                let result = await floor.evaluate(try reading(value, at: clock.now.addingTimeInterval(-age)), thresholds: setting, backend: .notConfigured, unit: .mgdl)
+                #expect(result == .inRange || result == .suppressed(.dataTrust(.notFresh)))
+            }
+        }
+        let calls = await port.calls()
+        #expect(calls.0 == 0 && calls.1 == 0)
+    }
+
+    @Test func repollingAnIdenticalReadingCannotRefreshItsSensorAge() async throws {
+        let (floor, port, clock, setting) = try setup()
+        let sample = try reading(54, at: clock.now)
+        guard case .fired = await floor.evaluate(sample, thresholds: setting, backend: .notConfigured, unit: .mgdl) else {
+            Issue.record("fresh urgent low should fire"); return
+        }
+        clock.advance(SafetyConstants.cgmStaleAfter)
+        #expect(await floor.evaluate(sample, thresholds: setting, backend: .notConfigured, unit: .mgdl) == .suppressed(.dataTrust(.notFresh)))
+        let calls = await port.calls()
+        #expect(calls.1 == 1)
+    }
+
+    @Test func noValueOrExcursionArmsUnconfiguredThresholds() async throws {
+        let (floor, port, clock, _) = try setup()
+        let bounds = SafetyConstants.glucoseValidRange
+        let values = Array(stride(from: bounds.lowerBound, through: bounds.upperBound, by: 10)) + [bounds.upperBound]
+        for value in values {
+            #expect(await floor.evaluate(try reading(value, at: clock.now), thresholds: .notConfigured, backend: .notConfigured, unit: .mgdl) == .suppressed(.dataTrust(.thresholdsNotConfigured)))
+        }
+        for side in [SensorRangeSide.below, .above] {
+            #expect(await floor.evaluate(SensorRangeExcursion(side: side, recordedAt: clock.now), thresholds: .notConfigured, backend: .notConfigured, unit: .mgdl) == .suppressed(.dataTrust(.thresholdsNotConfigured)))
+        }
+        let calls = await port.calls()
+        #expect(calls.0 == 0 && calls.1 == 0)
+    }
+
+    @Test func rewoundAgedReadingReportsClockAndNewFloorStartsClean() async throws {
+        let (floor, port, clock, setting) = try setup()
+        _ = await floor.evaluate(try reading(100, at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl)
+        clock.stepWall(-SafetyConstants.alertFloorMaxFutureSkew - 1)
+        let aged = try reading(54, at: clock.now.addingTimeInterval(-SafetyConstants.cgmTooStaleAfter))
+        #expect(await floor.evaluate(aged, thresholds: setting, backend: .notConfigured, unit: .mgdl) == .suppressed(.dataTrust(.clockRewound)))
+        let freshFloor = AlertFloor(notifier: port, clock: clock, elapsed: clock)
+        guard case .fired = await freshFloor.evaluate(try reading(54, at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl) else {
+            Issue.record("new process-local mark should not suppress"); return
+        }
+    }
+
+    @Test func continuousClockCatchesARewindThatLeavesWallTimeAboveTheMark() async throws {
+        let (floor, port, clock, setting) = try setup()
+        _ = await floor.evaluate(try reading(100, at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl)
+        clock.advance(SafetyConstants.cgmNominalSampleInterval)
+        clock.stepWall(-SafetyConstants.alertFloorMaxFutureSkew - 0.001)
+        #expect(await floor.evaluate(try reading(54, at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl) == .suppressed(.dataTrust(.clockRewound)))
+        let calls = await port.calls()
+        #expect(calls.1 == 0)
+    }
+
+    @Test func forwardCorrectionEndsSuppressionAndFiresFreshLow() async throws {
+        let (floor, _, clock, setting) = try setup()
+        _ = await floor.evaluate(try reading(100, at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl)
+        clock.stepWall(sixHours)
+        _ = await floor.evaluate(try reading(100, at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl)
+        clock.stepWall(-sixHours + SafetyConstants.alertFloorMaxFutureSkew)
+        #expect(await floor.evaluate(try reading(54, at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl) == .suppressed(.dataTrust(.clockRewound)))
+        clock.stepWall(sixHours / 3 - SafetyConstants.alertFloorMaxFutureSkew)
+        guard case .fired = await floor.evaluate(try reading(54, at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl) else {
+            Issue.record("forward correction should release mark"); return
+        }
+    }
+
+    @Test func sixHourJumpFiresAndReturnRecoversAtBoundWithoutCooldownLatch() async throws {
+        let (floor, port, clock, setting) = try setup()
+        _ = await floor.evaluate(try reading(100, at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl)
+        clock.stepWall(sixHours)
+        guard case .fired = await floor.evaluate(try reading(54, at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl) else {
+            Issue.record("fresh low after forward jump should fire"); return
+        }
+        clock.stepWall(-sixHours)
+        #expect(await floor.evaluate(try reading(54, at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl) == .suppressed(.dataTrust(.clockRewound)))
+        clock.advance(SafetyConstants.alertFloorClockSuppressionBound - 0.001)
+        #expect(await floor.evaluate(try reading(54, at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl) == .suppressed(.dataTrust(.clockRewound)))
+        clock.advance(0.001)
+        guard case .fired = await floor.evaluate(try reading(54, at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl) else {
+            Issue.record("bound and future cooldown discard should allow alarm"); return
+        }
+        let calls = await port.calls()
+        #expect(calls.1 == 2)
+    }
+
+    @Test func futureAcknowledgementStampRespectsSkewBoundary() async throws {
+        let skew = SafetyConstants.alertFloorMaxFutureSkew
+        let (_, _, _, setting) = try setup()
+        let atLimit = AlertTestClock(Date(timeIntervalSince1970: 10_000))
+        let atLimitPort = FakeAlertNotifier()
+        let atLimitFloor = AlertFloor(notifier: atLimitPort, clock: atLimit, elapsed: atLimit)
+        await atLimitFloor.acknowledge(.lowUrgent)
+        atLimit.stepWall(-skew)
+        #expect(await atLimitFloor.evaluate(try reading(54, at: atLimit.now), thresholds: setting, backend: .notConfigured, unit: .mgdl) == .suppressed(.coolingDown))
+
+        let beyond = AlertTestClock(Date(timeIntervalSince1970: 10_000))
+        let beyondPort = FakeAlertNotifier()
+        let beyondFloor = AlertFloor(notifier: beyondPort, clock: beyond, elapsed: beyond)
+        await beyondFloor.acknowledge(.lowUrgent)
+        beyond.stepWall(-skew - 0.001)
+        guard case .fired = await beyondFloor.evaluate(try reading(54, at: beyond.now), thresholds: setting, backend: .notConfigured, unit: .mgdl) else {
+            Issue.record("future acknowledgement outside skew must be discarded"); return
+        }
+    }
+
+    @Test func aCooldownReservedDuringAPermissionCheckIsNotReadAsFutureStamped() async throws {
+        let (_, _, clock, setting) = try setup()
+        let port = PermissionPausingAlertNotifier()
+        let floor = AlertFloor(notifier: port, clock: clock, elapsed: clock)
+        let low = try reading(54, at: clock.now)
+        let first = Task { await floor.evaluate(low, thresholds: setting, backend: .notConfigured, unit: .mgdl) }
+        try await waitUntil("the permission check starts") { await port.checkStarted() }
+        clock.advance(SafetyConstants.alertFloorMaxFutureSkew + 1)
+        guard case .fired = await floor.evaluate(try reading(54, at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl) else {
+            Issue.record("the later evaluation should fire"); return
+        }
+        await port.release()
+        #expect(await first.value == .suppressed(.coolingDown))
+        let posts = await port.posts
+        #expect(posts == 1)
+    }
+
     @Test func rewindDoesNotRearmAcknowledgedEpisodeOrCallPort() async throws {
         let (floor, port, clock, setting) = try setup()
         let low = try reading(54, at: clock.now)
         _ = await floor.evaluate(low, thresholds: setting, backend: .notConfigured, unit: .mgdl)
         await floor.acknowledge(.lowUrgent)
-        clock.advance(-SafetyConstants.alertFloorMaxFutureSkew - 0.001)
-        #expect(await floor.evaluate(try reading(100, at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl) == .suppressed(.clockRewound))
+        clock.stepWall(-SafetyConstants.alertFloorMaxFutureSkew - 0.001)
+        #expect(await floor.evaluate(try reading(100, at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl) == .suppressed(.dataTrust(.clockRewound)))
         let calls = await port.calls()
         #expect(calls.0 == 1 && calls.1 == 1)
-        clock.advance(SafetyConstants.alertFloorMaxFutureSkew + 0.001)
+        clock.stepWall(SafetyConstants.alertFloorMaxFutureSkew + 0.001)
         #expect(await floor.evaluate(low, thresholds: setting, backend: .notConfigured, unit: .mgdl) == .suppressed(.coolingDown))
     }
 
@@ -313,13 +485,13 @@ struct AlertFloorTests {
     @Test func anOverlappingEvaluationCannotPostTwice() async throws {
         let clock = AlertTestClock(Date(timeIntervalSince1970: 175))
         let port = PausingAlertNotifier()
-        let floor = AlertFloor(notifier: port, clock: clock)
+        let floor = AlertFloor(notifier: port, clock: clock, elapsed: clock)
         let setting = try AlertThresholdSetting.configured(
             AlertThresholds(urgentLow: 55, low: 70, high: 180, urgentHigh: 250), .local
         )
         let low = try reading(54, at: clock.now)
         let first = Task { await floor.evaluate(low, thresholds: setting, backend: .notConfigured, unit: .mgdl) }
-        await port.waitUntilPostStarts()
+        try await waitUntil("the post starts") { await port.postStarted() }
         let second = await floor.evaluate(low, thresholds: setting, backend: .notConfigured, unit: .mgdl)
         #expect(second == .suppressed(.coolingDown))
         await port.release()
@@ -361,6 +533,101 @@ struct AlertFloorTests {
         for value in stride(from: 20, through: 500, by: 1) {
             let type = AlertClassifier.classify(try Glucose(mgdl: value), against: thresholds)
             #expect(type != .iobWarning && type != .noData)
+        }
+    }
+
+    /// Evaluates a sustained urgent low on a fixed cadence and returns the seconds since
+    /// the start at which each alarm posted. `step` runs before each evaluation.
+    private func alarmTimes(
+        every cadence: TimeInterval,
+        until end: TimeInterval,
+        step: (TimeInterval, AlertTestClock) -> Void
+    ) async throws -> [TimeInterval] {
+        let (floor, _, clock, setting) = try setup()
+        var times: [TimeInterval] = []
+        var seconds: TimeInterval = 0
+        while seconds <= end {
+            if seconds > 0 {
+                clock.advance(cadence)
+                step(seconds, clock)
+            }
+            if case .fired = await floor.evaluate(try reading(54, at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl) {
+                times.append(seconds)
+            }
+            seconds += cadence
+        }
+        return times
+    }
+
+    @Test func aRewindPastTheCooldownOnlyDelaysTheAlarmByTheSuppressionBound() async throws {
+        // The stamp stays inside the future tolerance, so the discard does not apply.
+        let cooldown = SafetyConstants.alertFloorCooldown
+        let skew = SafetyConstants.alertFloorMaxFutureSkew
+        let rewindAt = cooldown - 10
+        let times = try await alarmTimes(every: 10, until: 3 * cooldown) { seconds, clock in
+            if seconds == rewindAt { clock.stepWall(-(rewindAt + skew - 1)) }
+        }
+        #expect(times.first == 0)
+        #expect(times.dropFirst().first == rewindAt + SafetyConstants.alertFloorClockSuppressionBound)
+    }
+
+    @Test func aRewindInsideTheToleranceCannotStretchTheCooldown() async throws {
+        let (floor, _, clock, setting) = try setup()
+        let cooldown = SafetyConstants.alertFloorCooldown
+        guard case .fired = await floor.evaluate(try reading(54, at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl) else {
+            Issue.record("first low should fire"); return
+        }
+        clock.advance(cooldown / 2)
+        clock.stepWall(-SafetyConstants.alertFloorMaxFutureSkew)
+        clock.advance(cooldown / 2 - 0.001)
+        #expect(await floor.evaluate(try reading(54, at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl) == .suppressed(.coolingDown))
+        clock.advance(0.001)
+        guard case .fired = await floor.evaluate(try reading(54, at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl) else {
+            Issue.record("elapsed age reaching the cooldown must end it"); return
+        }
+    }
+
+    @Test func repeatedRewindsCannotSilenceASustainedLow() async throws {
+        let cooldown = SafetyConstants.alertFloorCooldown
+        let interval: TimeInterval = 1700
+        let cadence: TimeInterval = 420
+        let end: TimeInterval = 68_000
+        let times = try await alarmTimes(every: cadence, until: end) { seconds, clock in
+            let previous = floor((seconds - cadence) / interval)
+            let rewinds = floor(seconds / interval) - previous
+            if rewinds > 0 { clock.stepWall(-rewinds * interval) }
+        }
+        #expect(times.first == 0)
+        let longestWait = zip(times, times.dropFirst()).map { $1 - $0 }.max() ?? end
+        #expect(longestWait <= cooldown + SafetyConstants.alertFloorClockSuppressionBound + cadence, "alarms at \(times)")
+        #expect(end - (times.last ?? 0) <= cooldown + SafetyConstants.alertFloorClockSuppressionBound + cadence, "alarms at \(times)")
+    }
+
+    @Test func aForwardWallStepEndsTheCooldownBeforeElapsedAgeDoes() async throws {
+        let (floor, _, clock, setting) = try setup()
+        let cooldown = SafetyConstants.alertFloorCooldown
+        let skew = SafetyConstants.alertFloorMaxFutureSkew
+        _ = await floor.evaluate(try reading(54, at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl)
+        clock.advance(cooldown - skew)
+        clock.stepWall(skew)
+        guard case .fired = await floor.evaluate(try reading(54, at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl) else {
+            Issue.record("wall age reaching the cooldown must end it"); return
+        }
+    }
+
+    @Test func aRewindCannotStretchAnAcknowledgementCooldown() async throws {
+        let (floor, _, clock, setting) = try setup()
+        let cooldown = SafetyConstants.alertFloorCooldown
+        _ = await floor.evaluate(try reading(54, at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl)
+        // Acknowledge later than the post, so the boundary below is measured from the acknowledgement.
+        clock.advance(cooldown / 2)
+        await floor.acknowledge(.lowUrgent)
+        clock.stepWall(-SafetyConstants.alertFloorMaxFutureSkew)
+        clock.advance(cooldown - 0.001)
+        #expect(await floor.evaluate(try reading(54, at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl) == .suppressed(.coolingDown))
+        clock.advance(0.001)
+        guard case .fired = await floor.evaluate(try reading(54, at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl) else {
+            Issue.record("elapsed age reaching the cooldown must end an acknowledgement cooldown"); return
         }
     }
 
@@ -430,15 +697,19 @@ struct AlertFloorTests {
     @Test func failedPostRestoresAcknowledgement() async throws {
         let (floor, port, clock, setting) = try setup()
         let t = try fixture(setting)
+        let nudge = SafetyConstants.alertFloorMaxFutureSkew / 2
         _ = await floor.evaluate(try reading(Double(t.urgentLow), at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl)
         await floor.acknowledge(.lowUrgent)
-        clock.advance(SafetyConstants.alertFloorCooldown)
+        // A small forward nudge ends the cooldown on wall age alone, so the post can be
+        // attempted while elapsed age is still short of the cooldown.
+        clock.advance(SafetyConstants.alertFloorCooldown - nudge)
+        clock.stepWall(nudge)
         await port.setFails(true)
         #expect(await floor.evaluate(try reading(Double(t.urgentLow), at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl) == .suppressed(.postFailed))
         await port.setFails(false)
-        // A small correction inside the rewind tolerance puts the acknowledgement back
-        // inside its cooldown, so only the restored acknowledgement can re-arm it.
-        clock.advance(-SafetyConstants.alertFloorMaxFutureSkew / 2)
+        // Undoing the nudge puts the acknowledgement back inside its cooldown on both
+        // clocks, so only the restored acknowledgement can re-arm it.
+        clock.stepWall(-nudge)
         #expect(await floor.evaluate(try reading(Double(t.urgentLow), at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl) == .suppressed(.coolingDown))
         guard case .fired = await floor.evaluate(try reading(Double(t.low), at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl) else {
             Issue.record("low warning should fire"); return
@@ -453,11 +724,11 @@ struct AlertFloorTests {
     @Test func readingSuppressedBehindAFailingPostFiresOnTheNextReading() async throws {
         let (_, _, clock, setting) = try setup()
         let port = GatedAlertNotifier()
-        let floor = AlertFloor(notifier: port, clock: clock)
+        let floor = AlertFloor(notifier: port, clock: clock, elapsed: clock)
         let t = try fixture(setting)
         let a = try reading(Double(t.urgentLow), at: clock.now)
         let first = Task { await floor.evaluate(a, thresholds: setting, backend: .notConfigured, unit: .mgdl) }
-        await port.waitUntilPostStarts()
+        try await waitUntil("the post starts") { await port.postStarted() }
         clock.advance(1)
         let b = try reading(Double(t.urgentLow), at: clock.now)
         #expect(await floor.evaluate(b, thresholds: setting, backend: .notConfigured, unit: .mgdl) == .suppressed(.coolingDown))

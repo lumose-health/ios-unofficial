@@ -1,5 +1,6 @@
 import Foundation
 import DriverAPI
+import SafetyCore
 
 /// One step of simulated physiology: everything ``SimulatedDriver`` needs to
 /// turn into `DriverAPI` values, before any Safety Limit or timestamp is
@@ -62,7 +63,7 @@ struct SimulatedGenerator: Equatable {
     // MARK: Tuning constants — the "briefly" in "document the model briefly"
 
     /// 5-minute ticks across a simulated 24-hour day.
-    static let ticksPerDay = 288
+    static let ticksPerDay = Int(86_400 / SafetyConstants.cgmNominalSampleInterval)
     /// Roughly three meals a day.
     static let ticksPerMealDose = ticksPerDay / 3
     /// Hourly basal segments, at the 5-minute tick length below — a typical

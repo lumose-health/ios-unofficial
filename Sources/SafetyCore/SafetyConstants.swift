@@ -2,8 +2,9 @@ import Foundation
 
 /// The single definition site for every cross-target safety constant (AD-2, SI-4).
 ///
-/// Nothing else in `Sources/` may spell these values again — except the two named
-/// 900-second CGM and Pump declarations here; no private copy,
+/// Nothing else in `Sources/` may spell these values again — except the named
+/// 900-second CGM and Pump declarations and the named 300-second cadence and
+/// suppression-bound declarations here; no private copy,
 /// not an inline literal, not a "just this once" duplicate in a view model.
 /// `scripts/guards/safety_guards.sh` enforces that mechanically: a second code
 /// occurrence anywhere under `Sources/` fails the gate.
@@ -62,6 +63,9 @@ public enum SafetyConstants {
     /// consumer uses.
     public static let cgmStaleAfter: TimeInterval = 360
 
+    /// Nominal interval between CGM samples; also the Simulated Driver cadence.
+    public static let cgmNominalSampleInterval: TimeInterval = 300
+
     /// Seconds a CGM reading may age before its ``Freshness`` flips from `stale` to
     /// `tooStale` (Android `FreshnessPolicy.CGM`, `Freshness.kt:111`:
     /// `tooStaleAfterMs = 15 * MINUTE_MS`).
@@ -84,6 +88,9 @@ public enum SafetyConstants {
     /// alarm, it is mirrored in the other targets, and only this file's
     /// single-definition-site guarantee detects a drifted copy.
     public static let alertFloorMaxFutureSkew: TimeInterval = 60
+
+    /// Maximum continuous time a clock rewind can suppress the floor (FR-72).
+    public static let alertFloorClockSuppressionBound: TimeInterval = 300
 
     /// Re-alarm delay after a floor notification or acknowledgement (FR-74).
     /// Mirrors Android `AlertFloor.kt:339` (`FLOOR_COOLDOWN_MS = 30 * 60_000L`)

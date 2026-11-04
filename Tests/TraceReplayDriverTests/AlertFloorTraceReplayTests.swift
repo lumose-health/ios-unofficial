@@ -6,6 +6,8 @@ import DomainCore
 import SafetyCore
 @testable import TraceReplayDriver
 
+private struct FixedElapsedClock: ElapsedClock { let elapsed: TimeInterval = 0 }
+
 private actor RecordingAlertPort: AlertNotifying {
     private(set) var posted: [AlertFloorNotification] = []
     func canPostAlerts() async -> Bool { true }
@@ -17,7 +19,7 @@ private actor RecordingAlertPort: AlertNotifying {
 /// Frames are the committed bytes from `tandem-status-01.json`: a VALID
 /// reading, then a status frame whose sensor reports a range excursion. The
 /// excursion frame is newest, so it replays at the activation instant.
-@Suite("Sensor range parser to alert floor")
+@Suite("Sensor range parser to alert floor", .timeLimit(.minutes(1)))
 struct AlertFloorTraceReplayTests {
     private static let validFrame = "000123010880e80d207b000100561f"
     private static let lowFrame = "0005230508d8ea0d20340002001fe8"
@@ -77,7 +79,7 @@ struct AlertFloorTraceReplayTests {
         #expect(samples.map(\.glucose.mgdl) == [123])
 
         let notifier = RecordingAlertPort()
-        let floor = AlertFloor(notifier: notifier, clock: FixedTraceClock(now: start))
+        let floor = AlertFloor(notifier: notifier, clock: FixedTraceClock(now: start), elapsed: FixedElapsedClock())
         #expect(await floor.evaluate(excursion, thresholds: .notConfigured, backend: .notConfigured, unit: .mgdl) == .suppressed(.dataTrust(.thresholdsNotConfigured)))
         guard case .fired(let notification) = await floor.evaluate(
             excursion, thresholds: try thresholds, backend: .notConfigured, unit: .mgdl
@@ -104,7 +106,7 @@ struct AlertFloorTraceReplayTests {
         #expect(excursion.recordedAt == start)
         #expect(samples.map(\.glucose.mgdl) == [123])
 
-        let floor = AlertFloor(notifier: RecordingAlertPort(), clock: FixedTraceClock(now: start))
+        let floor = AlertFloor(notifier: RecordingAlertPort(), clock: FixedTraceClock(now: start), elapsed: FixedElapsedClock())
         guard case .fired(let notification) = await floor.evaluate(
             excursion, thresholds: try thresholds, backend: .notConfigured, unit: .mmol
         ) else {
@@ -125,7 +127,7 @@ struct AlertFloorTraceReplayTests {
         let excursion = try #require(replayed)
         let notifier = RecordingAlertPort()
         let later = FixedTraceClock(now: start.addingTimeInterval(SafetyConstants.cgmStaleAfter))
-        let floor = AlertFloor(notifier: notifier, clock: later)
+        let floor = AlertFloor(notifier: notifier, clock: later, elapsed: FixedElapsedClock())
         #expect(await floor.evaluate(excursion, thresholds: try thresholds, backend: .notConfigured, unit: .mgdl) == .suppressed(.dataTrust(.notFresh)))
         let posted = await notifier.posted
         #expect(posted.isEmpty)
