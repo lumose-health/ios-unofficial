@@ -721,6 +721,27 @@ struct AlertFloorTests {
         #expect(posted.map(\.type) == [.lowUrgent, .lowWarning, .lowUrgent])
     }
 
+    @Test func aRetryAfterAFailedPostOfAnAcknowledgedTypeReachesTheNotifierThenCoolsDown() async throws {
+        let (floor, port, clock, setting) = try setup()
+        let t = try fixture(setting)
+        _ = await floor.evaluate(try reading(Double(t.urgentLow), at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl)
+        await floor.acknowledge(.lowUrgent)
+        clock.advance(SafetyConstants.alertFloorCooldown)
+        await port.setFails(true)
+        #expect(await floor.evaluate(try reading(Double(t.urgentLow), at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl) == .suppressed(.postFailed))
+        await port.setFails(false)
+        // A failed attempt delivered nothing, so its reserved stamp must not start a new cooldown.
+        guard case .fired = await floor.evaluate(try reading(Double(t.urgentLow), at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl) else {
+            Issue.record("the retry after a failed post must reach the notifier"); return
+        }
+        clock.advance(SafetyConstants.cgmNominalSampleInterval)
+        #expect(await floor.evaluate(try reading(Double(t.urgentLow), at: clock.now), thresholds: setting, backend: .notConfigured, unit: .mgdl) == .suppressed(.coolingDown))
+        let calls = await port.calls()
+        #expect(calls.1 == 3)
+        let posted = await port.notifications()
+        #expect(posted.map(\.type) == [.lowUrgent, .lowUrgent])
+    }
+
     @Test func readingSuppressedBehindAFailingPostFiresOnTheNextReading() async throws {
         let (_, _, clock, setting) = try setup()
         let port = GatedAlertNotifier()
