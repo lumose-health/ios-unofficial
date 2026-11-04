@@ -1,5 +1,6 @@
 import Foundation
 import os
+import DriverAPI
 import SafetyCore
 
 public enum AlertPostFailure: Error, Hashable, Sendable {
@@ -42,6 +43,11 @@ public struct OSAlertFloorLog: AlertFloorLogging {
 
 /// Threshold-only fallback alarm engine with process-local episode state (FR-71, FR-74).
 public actor AlertFloor {
+    private enum Input {
+        case reading(Glucose)
+        case excursion(SensorRangeSide)
+    }
+
     private let notifier: any AlertNotifying
     private let clock: any Clock
     private let freshness: FreshnessThresholds
@@ -73,14 +79,46 @@ public actor AlertFloor {
         backend: BackendAlertingStatus,
         unit: GlucoseUnit
     ) async -> AlertFloorOutcome {
+        await evaluate(
+            .reading(reading.glucose), sensorTimestamp: reading.timestamp,
+            thresholds: thresholds, backend: backend, unit: unit
+        )
+    }
+
+    /// A sensor range report has no number: below range is always an urgent low
+    /// and above range an urgent high, but only through the same gates as a
+    /// reading (configured thresholds, Backend status, data trust on the
+    /// sensor timestamp, permission, cooldown; FR-72, FR-73, SI-5).
+    public func evaluate(
+        _ excursion: SensorRangeExcursion,
+        thresholds: AlertThresholdSetting,
+        backend: BackendAlertingStatus,
+        unit: GlucoseUnit
+    ) async -> AlertFloorOutcome {
+        await evaluate(
+            .excursion(excursion.side), sensorTimestamp: excursion.recordedAt,
+            thresholds: thresholds, backend: backend, unit: unit
+        )
+    }
+
+    private func evaluate(
+        _ input: Input,
+        sensorTimestamp: Date,
+        thresholds: AlertThresholdSetting,
+        backend: BackendAlertingStatus,
+        unit: GlucoseUnit
+    ) async -> AlertFloorOutcome {
         let now = clock.now
         if mark.isRewound(at: now) {
             return finish(.suppressed(.clockRewound), type: nil)
         }
         mark.observe(now)
 
-        let type = thresholds.configuredThresholds.flatMap {
-            AlertClassifier.classify(reading.glucose, against: $0)
+        let type = thresholds.configuredThresholds.flatMap { configured -> AlertType? in
+            switch input {
+            case .reading(let glucose): AlertClassifier.classify(glucose, against: configured)
+            case .excursion(let side): AlertClassifier.classify(side)
+            }
         }
         for prior in acknowledged.filter({ $0 != type }) {
             acknowledged.remove(prior)
@@ -96,7 +134,7 @@ public actor AlertFloor {
             return finish(.suppressed(.backendAlerting), type: type)
         }
         let trust = AlertDataTrust.evaluate(
-            sensorTimestamp: reading.timestamp, thresholds: thresholds, now: now,
+            sensorTimestamp: sensorTimestamp, thresholds: thresholds, now: now,
             mark: &mark, freshness: freshness
         )
         guard trust == .trusted else {
@@ -114,9 +152,15 @@ public actor AlertFloor {
         // Reserve the cooldown before suspension so overlapping evaluations cannot both post.
         lastFired[type] = now
         acknowledged.remove(type)
-        let notification = AlertFloorNotification(
-            type: type, glucose: reading.glucose, sensorTimestamp: reading.timestamp, unit: unit
-        )
+        let notification: AlertFloorNotification
+        switch input {
+        case .reading(let glucose):
+            notification = AlertFloorNotification(
+                type: type, glucose: glucose, sensorTimestamp: sensorTimestamp, unit: unit
+            )
+        case .excursion(let side):
+            notification = AlertFloorNotification(side: side, sensorTimestamp: sensorTimestamp)
+        }
         do {
             try await notifier.post(notification)
             return finish(.fired(notification), type: type)

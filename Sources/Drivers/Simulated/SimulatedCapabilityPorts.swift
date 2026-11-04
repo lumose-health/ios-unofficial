@@ -11,6 +11,8 @@ import DriverAPI
 /// again after the next activation, per the contract on that requirement.
 struct SimulatedGlucoseSourcePort: GlucoseSource {
     let readings: AsyncStream<GlucoseSample>
+    /// The generator stays inside 65...260 mg/dL, so this stream never yields.
+    let sensorRangeExcursions: AsyncStream<SensorRangeExcursion>
     let driver: SimulatedDriver
 
     func latestReading() async throws(DriverFailure) -> GlucoseSample? {

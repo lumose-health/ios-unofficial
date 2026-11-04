@@ -2,6 +2,7 @@
 import Foundation
 import Testing
 import DriverAPI
+import SafetyCore
 import TandemWire
 @_spi(DriverPlatform) import DriverAPI
 @testable import TraceReplayDriver
@@ -78,6 +79,21 @@ struct TraceReplayDriverTests {
         #expect(log.recorded == ["range:4:below", "range:5:above", "unusable:6:0", "unusable:7:4", "rejected:9:\(rejected)", "range:10:above"])
     }
 
+    @Test("Out-of-range frames emit timestamped excursions without glucose samples")
+    func rangeExcursions() async throws {
+        let (driver, _, _) = try makeDriver()
+        let port = try glucose(driver)
+        try await driver.activate()
+        await driver.deactivate()
+        var excursions: [SensorRangeExcursion] = []
+        for await excursion in port.sensorRangeExcursions { excursions.append(excursion) }
+        var glucoseValues: [Double] = []
+        for await sample in port.readings { glucoseValues.append(sample.glucose.mgdl) }
+        #expect(excursions.map(\.side) == [.below, .above, .above])
+        #expect(excursions.map { Int($0.recordedAt.timeIntervalSince(start)) } == [-1800, -1500, -300])
+        #expect(glucoseValues == [123, 131, 118])
+    }
+
     @Test("A corrupt frame holds the cursor and keeps earlier samples")
     func decodeHalt() async throws {
         let url = try #require(Bundle.module.url(forResource: "tandem-decode-failure-01", withExtension: "json", subdirectory: "Traces"))
@@ -106,6 +122,7 @@ struct TraceReplayDriverTests {
         let (first, _, _) = try makeDriver()
         let (second, _, _) = try makeDriver()
         let old = try glucose(first).readings
+        let oldExcursions = try glucose(first).sensorRangeExcursions
         try await first.activate()
         try await second.activate()
         let expected = rows(await first.frameResults)
@@ -113,13 +130,19 @@ struct TraceReplayDriverTests {
         await first.deactivate()
         var oldValues: [Double] = []
         for await sample in old { oldValues.append(sample.glucose.mgdl) }
+        var oldRangeValues: [SensorRangeExcursion] = []
+        for await value in oldExcursions { oldRangeValues.append(value) }
         try await first.activate()
         #expect(rows(await first.frameResults) == expected)
         let renewed = try glucose(first).readings
+        let renewedExcursions = try glucose(first).sensorRangeExcursions
         await first.deactivate()
         var newValues: [Double] = []
         for await sample in renewed { newValues.append(sample.glucose.mgdl) }
+        var newRangeValues: [SensorRangeExcursion] = []
+        for await value in renewedExcursions { newRangeValues.append(value) }
         #expect(oldValues == newValues)
+        #expect(oldRangeValues == newRangeValues)
     }
 
     @Test("Limits adopted before activation are read for every frame")

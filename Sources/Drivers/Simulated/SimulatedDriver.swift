@@ -122,7 +122,9 @@ public actor SimulatedDriver: Driver {
     public nonisolated func capability(_ capability: Capability) -> CapabilityPort? {
         switch capability {
         case .glucoseSource:
-            return .glucoseSource(SimulatedGlucoseSourcePort(readings: streams.glucose, driver: self))
+            return .glucoseSource(SimulatedGlucoseSourcePort(
+                readings: streams.glucose, sensorRangeExcursions: streams.excursions, driver: self
+            ))
         case .insulinSource:
             return .insulinSource(SimulatedInsulinSourcePort(insulinOnBoard: streams.insulinOnBoard, driver: self))
         case .pumpStatus, .bgmSource, .dataSync, .doseCategoryProvider:
@@ -286,13 +288,13 @@ private final class RegistrationBox: @unchecked Sendable {
     }
 }
 
-/// The glucose and insulin-on-board streams for one activation.
+/// The glucose, sensor-range and insulin-on-board streams for one activation.
 ///
 /// Cancelling a `for await` consumer terminates an `AsyncStream` for good, and
 /// the platform cancels its consumers when it stops the Driver. So a stream
-/// lives for one activation: ``finishAndRenew()`` ends the current pair at
-/// teardown, which also ends any consumer loop still running, and stages a
-/// fresh pair for the next activation. Within an activation every read returns
+/// lives for one activation: ``finishAndRenew()`` ends the current streams at
+/// teardown, which also ends any consumer loop still running, and stages
+/// fresh streams for the next activation. Within an activation every read returns
 /// the same stream.
 private final class ActivationStreams: @unchecked Sendable {
     private let lock = NSLock()
@@ -301,11 +303,13 @@ private final class ActivationStreams: @unchecked Sendable {
     private var terminated = false
     private var glucosePair: (stream: AsyncStream<GlucoseSample>, continuation: AsyncStream<GlucoseSample>.Continuation)
     private var insulinPair: (stream: AsyncStream<InsulinOnBoardSample>, continuation: AsyncStream<InsulinOnBoardSample>.Continuation)
+    private var excursionPair: (stream: AsyncStream<SensorRangeExcursion>, continuation: AsyncStream<SensorRangeExcursion>.Continuation)
 
     init(bufferLimit: Int) {
         self.bufferLimit = bufferLimit
         glucosePair = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(bufferLimit))
         insulinPair = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(bufferLimit))
+        excursionPair = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(bufferLimit))
         watchTermination(epoch: 0)
     }
 
@@ -317,6 +321,11 @@ private final class ActivationStreams: @unchecked Sendable {
     var insulinOnBoard: AsyncStream<InsulinOnBoardSample> {
         lock.lock(); defer { lock.unlock() }
         return insulinPair.stream
+    }
+
+    var excursions: AsyncStream<SensorRangeExcursion> {
+        lock.lock(); defer { lock.unlock() }
+        return excursionPair.stream
     }
 
     func yield(_ sample: GlucoseSample) {
@@ -341,7 +350,7 @@ private final class ActivationStreams: @unchecked Sendable {
         renew(onlyIfTerminated: true)
     }
 
-    /// The old pairs are held, and finished, outside the lock: `finish()` runs
+    /// The old streams are held, and finished, outside the lock: `finish()` runs
     /// the `onTermination` handler synchronously, and so does deallocating a
     /// stream nothing else references. That handler takes the lock.
     private func renew(onlyIfTerminated: Bool) {
@@ -352,25 +361,30 @@ private final class ActivationStreams: @unchecked Sendable {
         }
         let oldGlucose = glucosePair
         let oldInsulin = insulinPair
+        let oldExcursions = excursionPair
         epoch &+= 1
         terminated = false
         glucosePair = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(bufferLimit))
         insulinPair = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(bufferLimit))
+        excursionPair = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(bufferLimit))
         let current = epoch
         lock.unlock()
         watchTermination(epoch: current)
         oldGlucose.continuation.finish()
         oldInsulin.continuation.finish()
+        oldExcursions.continuation.finish()
     }
 
     private func watchTermination(epoch: Int) {
         lock.lock()
         let glucose = glucosePair.continuation
         let insulin = insulinPair.continuation
+        let excursions = excursionPair.continuation
         lock.unlock()
         let handler: @Sendable (Any) -> Void = { [weak self] _ in self?.markTerminated(epoch: epoch) }
         glucose.onTermination = { handler($0) }
         insulin.onTermination = { handler($0) }
+        excursions.onTermination = { handler($0) }
     }
 
     private func markTerminated(epoch: Int) {

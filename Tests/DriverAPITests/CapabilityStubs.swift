@@ -15,6 +15,7 @@ import SafetyCore
 
 struct StubGlucoseSource: GlucoseSource {
     let readings: AsyncStream<GlucoseSample> = AsyncStream { $0.finish() }
+    let sensorRangeExcursions: AsyncStream<SensorRangeExcursion> = AsyncStream { $0.finish() }
     func latestReading() async throws(DriverFailure) -> GlucoseSample? { nil }
 }
 

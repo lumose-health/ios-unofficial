@@ -5,7 +5,7 @@ import Foundation
 /// Mirrors Android's `GlucoseSource`
 /// (`plugins/pump-driver-api/.../capabilities/GlucoseSource.kt`).
 ///
-/// Both members are reads. There is nothing here to call that changes anything
+/// All members are reads. There is nothing here to call that changes anything
 /// on the device — that is AD-12 expressed structurally rather than by review:
 /// the write does not exist to be found.
 public protocol GlucoseSource: Sendable {
@@ -36,6 +36,14 @@ public protocol GlucoseSource: Sendable {
     /// the new consumer at once. Every stream on a Capability port carries
     /// this contract.
     var readings: AsyncStream<GlucoseSample> { get }
+
+    /// Reports a reading outside the range the sensor can measure, without a number.
+    ///
+    /// Like ``readings``, this stream has one consumer and is scoped to one
+    /// activation. The Driver finishes it on deactivation and vends a fresh
+    /// stream on the next activation. Its end closes only this consumer loop;
+    /// it does not mean the glucose connection was lost.
+    var sensorRangeExcursions: AsyncStream<SensorRangeExcursion> { get }
 
     /// The most recent reading the Driver holds, or `nil` if it holds none.
     ///

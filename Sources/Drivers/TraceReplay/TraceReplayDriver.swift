@@ -64,7 +64,9 @@ public actor TraceReplayDriver: Driver {
 
     public nonisolated func capability(_ capability: Capability) -> CapabilityPort? {
         switch capability {
-        case .glucoseSource: .glucoseSource(TraceReplayGlucosePort(readings: streams.glucose, driver: self))
+        case .glucoseSource: .glucoseSource(TraceReplayGlucosePort(
+            readings: streams.glucose, sensorRangeExcursions: streams.excursions, driver: self
+        ))
         case .insulinSource: .insulinSource(TraceReplayInsulinPort(insulinOnBoard: streams.insulin, driver: self))
         case .pumpStatus, .bgmSource, .dataSync, .doseCategoryProvider: nil
         }
@@ -130,6 +132,12 @@ public actor TraceReplayDriver: Driver {
                     shifted = .insulinOnBoard(value)
                 case .outOfRange(let side, _):
                     log.outOfRange(frame: index, side: side)
+                    let mappedSide: SensorRangeSide
+                    switch side {
+                    case .below: mappedSide = .below
+                    case .above: mappedSide = .above
+                    }
+                    streams.yield(SensorRangeExcursion(side: mappedSide, recordedAt: replayedAt))
                     shifted = .outOfRange(side, recordedAt: replayedAt)
                 case .sensorReadingUnusable(let status):
                     log.sensorReadingUnusable(frame: index, egvStatusID: status)
