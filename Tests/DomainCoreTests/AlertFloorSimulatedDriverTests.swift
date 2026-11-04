@@ -32,7 +32,7 @@ private final class FloorTestRegistration: SchedulerRegistration, @unchecked Sen
     func cancel() {}
 }
 
-@Suite("Alert floor with the Simulated Driver")
+@Suite("Alert floor with the Simulated Driver", .timeLimit(.minutes(1)))
 struct AlertFloorSimulatedDriverTests {
     @Test func everyDriverSampleUsesTheSameClassifierAndCooldown() async throws {
         let clock = AlertTestClock(Date(timeIntervalSince1970: 1_700_000_000))
@@ -48,8 +48,8 @@ struct AlertFloorSimulatedDriverTests {
         var iterator = glucosePort.readings.makeAsyncIterator()
         let notifier = FakeAlertNotifier()
         let unconfiguredNotifier = FakeAlertNotifier()
-        let floor = AlertFloor(notifier: notifier, clock: clock)
-        let unconfiguredFloor = AlertFloor(notifier: unconfiguredNotifier, clock: clock)
+        let floor = AlertFloor(notifier: notifier, clock: clock, elapsed: clock)
+        let unconfiguredFloor = AlertFloor(notifier: unconfiguredNotifier, clock: clock, elapsed: clock)
         let thresholds = try AlertThresholds(urgentLow: 80, low: 100, high: 150, urgentHigh: 200)
         let setting = AlertThresholdSetting.configured(thresholds, .local)
         var lastFired: [AlertType: Date] = [:]

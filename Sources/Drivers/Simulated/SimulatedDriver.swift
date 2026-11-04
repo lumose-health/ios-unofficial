@@ -34,14 +34,14 @@ public actor SimulatedDriver: Driver {
 
     /// Five minutes — a typical CGM cadence, comfortably inside the Fresh
     /// window (``SafetyConstants/cgmStaleAfter``).
-    public static let defaultTickInterval: TimeInterval = 300
+    public static let defaultTickInterval: TimeInterval = SafetyConstants.cgmNominalSampleInterval
 
     /// One simulated day of samples at the default cadence. Bounds what each
     /// capability stream buffers for a consumer that has not started (or has
     /// stopped) iterating, so an unconsumed port never accumulates an
     /// unbounded backlog; a consumer that falls further behind than this sees
     /// the newest day of samples.
-    private static let streamBufferLimit = 288
+    private static let streamBufferLimit = Int(86_400 / defaultTickInterval)
 
     /// How far back `doses(since:)` can reach: 24 hours, in seconds. Records
     /// older than this are pruned each tick, so a long-running session holds

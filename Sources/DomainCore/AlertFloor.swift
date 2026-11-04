@@ -13,7 +13,7 @@ public protocol AlertNotifying: Sendable {
 }
 
 public enum AlertFloorSuppression: Equatable, Sendable {
-    case clockRewound, backendAlerting, dataTrust(AlertDataTrustResult)
+    case backendAlerting, dataTrust(AlertDataTrustResult)
     case cannotPost, coolingDown, postFailed
 }
 
@@ -48,28 +48,44 @@ public actor AlertFloor {
         case excursion(SensorRangeSide)
     }
 
+    /// When a cooldown began, on both clocks. Either clock reaching the cooldown ends
+    /// it, so a wall-clock rewind cannot stretch it, however small or often repeated.
+    /// `elapsed` has no meaning across launches, so this stays in-process (FR-72, FR-74).
+    private struct CooldownStamp: Equatable {
+        let wall: Date
+        let elapsed: TimeInterval
+
+        func hasEnded(at now: Date, elapsed elapsedNow: TimeInterval) -> Bool {
+            let cooldown = SafetyConstants.alertFloorCooldown
+            return now.timeIntervalSince(wall) >= cooldown || elapsedNow - elapsed >= cooldown
+        }
+    }
+
     private let notifier: any AlertNotifying
     private let clock: any Clock
+    private let elapsed: any ElapsedClock
     private let freshness: FreshnessThresholds
     private let log: any AlertFloorLogging
     private var mark = WallClockHighWaterMark()
-    private var lastFired: [AlertType: Date] = [:]
+    private var lastFired: [AlertType: CooldownStamp] = [:]
     private var acknowledged: Set<AlertType> = []
 
     public init(
         notifier: any AlertNotifying,
         clock: any Clock,
+        elapsed: any ElapsedClock,
         freshness: FreshnessThresholds = FreshnessPolicy.cgm,
         log: any AlertFloorLogging = OSAlertFloorLog()
     ) {
         self.notifier = notifier
         self.clock = clock
+        self.elapsed = elapsed
         self.freshness = freshness
         self.log = log
     }
 
     public func acknowledge(_ type: AlertType) {
-        lastFired[type] = clock.now
+        lastFired[type] = CooldownStamp(wall: clock.now, elapsed: elapsed.elapsed)
         acknowledged.insert(type)
     }
 
@@ -109,10 +125,10 @@ public actor AlertFloor {
         unit: GlucoseUnit
     ) async -> AlertFloorOutcome {
         let now = clock.now
-        if mark.isRewound(at: now) {
-            return finish(.suppressed(.clockRewound), type: nil)
+        let elapsedNow = elapsed.elapsed
+        if mark.isRewound(at: now, elapsed: elapsedNow) {
+            return finish(.suppressed(.dataTrust(.clockRewound)), type: nil)
         }
-        mark.observe(now)
 
         let type = thresholds.configuredThresholds.flatMap { configured -> AlertType? in
             switch input {
@@ -134,23 +150,31 @@ public actor AlertFloor {
             return finish(.suppressed(.backendAlerting), type: type)
         }
         let trust = AlertDataTrust.evaluate(
-            sensorTimestamp: sensorTimestamp, thresholds: thresholds, now: now,
+            sensorTimestamp: sensorTimestamp, thresholds: thresholds, now: now, elapsed: elapsedNow,
             mark: &mark, freshness: freshness
         )
         guard trust == .trusted else {
             return finish(.suppressed(.dataTrust(trust)), type: type)
         }
+        // A stamp this far ahead of a trusted clock cannot latch the cooldown (FR-72).
+        // Discard before suspending: `now` goes stale across the await, and a stamp an
+        // overlapping evaluation reserves meanwhile is a real cooldown.
+        if let stamp = lastFired[type], stamp.wall.timeIntervalSince(now) > SafetyConstants.alertFloorMaxFutureSkew {
+            lastFired.removeValue(forKey: type)
+            acknowledged.remove(type)
+        }
         guard await notifier.canPostAlerts() else {
             return finish(.suppressed(.cannotPost), type: type)
         }
-        let previousTime = lastFired[type]
+        let previousStamp = lastFired[type]
         let wasAcknowledged = acknowledged.contains(type)
-        if let previousTime, now.timeIntervalSince(previousTime) < SafetyConstants.alertFloorCooldown {
+        if let previousStamp, !previousStamp.hasEnded(at: now, elapsed: elapsedNow) {
             return finish(.suppressed(.coolingDown), type: type)
         }
 
         // Reserve the cooldown before suspension so overlapping evaluations cannot both post.
-        lastFired[type] = now
+        let reserved = CooldownStamp(wall: now, elapsed: elapsedNow)
+        lastFired[type] = reserved
         acknowledged.remove(type)
         let notification: AlertFloorNotification
         switch input {
@@ -165,8 +189,8 @@ public actor AlertFloor {
             try await notifier.post(notification)
             return finish(.fired(notification), type: type)
         } catch {
-            if lastFired[type] == now && !acknowledged.contains(type) {
-                lastFired[type] = previousTime
+            if lastFired[type] == reserved && !acknowledged.contains(type) {
+                lastFired[type] = previousStamp
                 if wasAcknowledged { acknowledged.insert(type) }
             }
             return finish(.suppressed(.postFailed), type: type)

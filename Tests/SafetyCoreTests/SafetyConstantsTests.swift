@@ -23,6 +23,8 @@ struct SafetyConstantsTests {
     @Test("Floor cooldown matches the Backend deduplication window")
     func alertFloorCooldown() {
         #expect(SafetyConstants.alertFloorCooldown == 1800)
+        #expect(SafetyConstants.alertFloorClockSuppressionBound == 300)
+        #expect(SafetyConstants.cgmNominalSampleInterval == 300)
     }
 
     @Test("The glucose bound matches the canonical inclusive range")
