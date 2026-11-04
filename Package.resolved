@@ -1,5 +1,5 @@
 {
-  "originHash" : "35c84b54ab98be7924b9cf82f57218930c28dfd665c0342d9b5781c567fef18c",
+  "originHash" : "c19d39475f60f408699ec899239ab2da0d06eb709758528da4c02e675217814f",
   "pins" : [
     {
       "identity" : "grdb.swift",
@@ -8,6 +8,24 @@
       "state" : {
         "revision" : "b83108d10f42680d78f23fe4d4d80fc88dab3212",
         "version" : "7.11.1"
+      }
+    },
+    {
+      "identity" : "swift-asn1",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-asn1.git",
+      "state" : {
+        "revision" : "917b472dbe53ba699cbb0495f9a95a084bc6364d",
+        "version" : "1.7.4"
+      }
+    },
+    {
+      "identity" : "swift-crypto",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/lumose-health/swift-crypto.git",
+      "state" : {
+        "revision" : "280b22295e9e1d3e1c6e2f9f6be9c788f5d3ed13",
+        "version" : "4.5.1-glycemicgpt.1"
       }
     }
   ],

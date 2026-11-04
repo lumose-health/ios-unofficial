@@ -48,10 +48,9 @@ public enum TandemAuthorizationRequest: CaseIterable, Sendable {
     /// the packets remaining after it (low nibble) and whose second byte is the
     /// transaction ID. Same layout as the Android client's `Packetize.encode`.
     ///
-    /// Returns `nil` when `cargo` is longer than ``maximumCargoSize``. Android
-    /// accepts up to 255 bytes and masks the remaining count to four bits, which
-    /// for the longest frames wraps to zero and ends the frame early at the
-    /// receiver; this refuses instead.
+    /// Returns `nil` when `cargo` is longer than ``maximumCargoSize``. The
+    /// remaining count must fit in four bits: a count that wrapped to zero would
+    /// end the frame early at the receiver.
     public func chunks(transactionID: UInt8, cargo: [UInt8]) -> [[UInt8]]? {
         guard cargo.count <= Self.maximumCargoSize else { return nil }
         var frame = [opcode, transactionID, UInt8(cargo.count)] + cargo

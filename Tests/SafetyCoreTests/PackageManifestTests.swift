@@ -7,7 +7,7 @@ import Testing
 /// property of the package, not a style preference, so it is asserted against the
 /// manifest itself rather than trusted to review.
 ///
-/// The same reasoning now covers the workspace's one external dependency. GRDB is
+/// The same reasoning covers external dependencies. GRDB is
 /// the SQL vendor behind `Persistence`, and the value of putting it behind one
 /// target is entirely in nothing else importing it: a screen that builds a query
 /// has moved a storage decision into the UI, and a Driver that gains a database is
@@ -105,20 +105,19 @@ struct PackageManifestTests {
         return nil
     }
 
-    /// GRDB is the whole of the workspace's third-party surface. A second package
-    /// is a decision, not a convenience — it is inherited by everything that links
-    /// the target holding it, and it arrives with its own release cadence and its
-    /// own supply chain. Adding one means editing this assertion, in the PR that
-    /// adds it, where a reviewer sees it.
-    @Test("GRDB is the only external package the workspace depends on")
-    func grdbIsTheOnlyExternalPackage() throws {
+    /// The SQL store and the Tandem handshake each own one exact external pin.
+    @Test("External packages are pinned to the approved repositories and versions")
+    func externalPackagesAreExact() throws {
         let manifest = Self.collapsed(try Self.manifestSource())
         let declarations = manifest.components(separatedBy: ".package(").count - 1
-        #expect(declarations == 1, "the manifest declares \(declarations) external packages, expected exactly GRDB")
+        #expect(declarations == 2)
         #expect(
             manifest.contains(".package(url:\"https://github.com/groue/GRDB.swift.git\",exact:\"7.11.1\")"),
             "GRDB must be the official repository, pinned to an exact version (AD-6)."
         )
+        #expect(manifest.contains(
+            ".package(url:\"https://github.com/lumose-health/swift-crypto.git\",exact:\"4.5.1-glycemicgpt.1\")"
+        ))
     }
 
     /// A range would let a patch release arrive without anyone reading its
@@ -314,10 +313,68 @@ struct PackageManifestTests {
     @Test("TandemDriver declares the exact driver dependency set")
     func tandemDriverDependencies() throws {
         let target = try #require(Self.targetArguments(named: "TandemDriver", in: try Self.manifestSource()))
-        #expect(target.contains("dependencies:[\"DriverAPI\",\"SafetyCore\",\"TandemWire\"]"))
+        #expect(target.contains("dependencies:[\"DriverAPI\",\"SafetyCore\",\"TandemWire\",.product(name:\"CryptoBoringWrapper\",package:\"swift-crypto\")]"))
         let tests = try #require(Self.allTargetDeclarations(in: try Self.manifestSource())
             .first { $0.name == "TandemDriverTests" }?.arguments)
         #expect(tests.contains("dependencies:[\"TandemDriver\",\"DriverAPI\",\"SafetyCore\",\"TandemWire\"]"))
+    }
+
+    @Test("Only TandemDriver depends directly on CryptoBoringWrapper")
+    func forkProductHasOneOwner() throws {
+        let declarations = Self.allTargetDeclarations(in: try Self.manifestSource())
+        let holders = declarations.filter { $0.arguments.contains("CryptoBoringWrapper") }.map(\.name)
+        #expect(holders == ["TandemDriver"])
+    }
+
+    private static func importsBoringSSL(_ source: String) -> Bool {
+        source.contains(#/\bimport\s+(?:(?:typealias|struct|class|enum|protocol|let|var|func)\s+)?CCryptoBoringSSL/#)
+    }
+
+    @Test("The raw BoringSSL import check sees every import spelling")
+    func boringSSLImportMatching() {
+        let module = "CCrypto" + "BoringSSL"
+        for spelling in ["import \(module)", "import\t\(module)", "import   \(module)", "import\n\(module)",
+                         "@_exported import \(module)", "@testable import \(module)",
+                         "import struct \(module).BIGNUM", "@_exported  import  func  \(module).f"] {
+            #expect(Self.importsBoringSSL(spelling), "Missed: \(spelling)")
+        }
+        #expect(!Self.importsBoringSSL("import CryptoBoringWrapper"))
+        #expect(!Self.importsBoringSSL("reimport \(module)"))
+    }
+
+    @Test("No source, app or test file imports CCryptoBoringSSL")
+    func noRawBoringSSLImports() throws {
+        for directory in ["Sources", "Apps", "Tests"] {
+            let root = Self.repositoryRoot.appendingPathComponent(directory)
+            let enumerator = try #require(FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil))
+            while let url = enumerator.nextObject() as? URL {
+                guard url.pathExtension == "swift" else { continue }
+                let source = try String(contentsOf: url, encoding: .utf8)
+                #expect(!Self.importsBoringSSL(source), "Forbidden import in \(url.lastPathComponent)")
+            }
+        }
+    }
+
+    @Test("Both Package.resolved files pin swift-crypto to the reviewed revision")
+    func forkRevisionIsPinned() throws {
+        let lockfiles = ["Package.resolved", "Apps/GlycemicGPT/GlycemicGPT.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"]
+        for path in lockfiles {
+            let data = try Data(contentsOf: Self.repositoryRoot.appendingPathComponent(path))
+            let lockfile = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let pins = try #require(lockfile["pins"] as? [[String: Any]])
+            let pin = try #require(pins.first { $0["identity"] as? String == "swift-crypto" }, "No pin in \(path)")
+            let state = try #require(pin["state"] as? [String: Any])
+            #expect(pin["location"] as? String == "https://github.com/lumose-health/swift-crypto.git", "Wrong source in \(path)")
+            #expect(state["revision"] as? String == "280b22295e9e1d3e1c6e2f9f6be9c788f5d3ed13", "Wrong revision in \(path)")
+        }
+    }
+
+    @Test("Every project xcodebuild refuses to re-resolve packages")
+    func projectBuildsKeepTheLockfile() throws {
+        let script = try String(contentsOf: Self.repositoryRoot.appendingPathComponent("scripts/ci-local.sh"), encoding: .utf8)
+        let builds = script.split(separator: "\n").filter { $0.contains("xcodebuild ") && ($0.contains("-project") || $0.contains("\"$flag\"")) }
+        #expect(builds.count >= 3)
+        for build in builds { #expect(build.contains("-disableAutomaticPackageResolution"), "Missing in: \(build)") }
     }
 
     @Test("Every wire target stays within the DriverAPI and SafetyCore dependency ceiling")
