@@ -56,7 +56,7 @@ let package = Package(
         .library(name: "TraceReplayDriver", targets: ["TraceReplayDriver"]),
         .library(name: "TandemDriver", targets: ["TandemDriver"]),
     ],
-    // The workspace's first and only external dependency (AD-6).
+    // External dependencies are exact-pinned and confined to their owning targets.
     //
     // GRDB UNFORKED, on plain SQLite. At-rest protection comes from iOS Data
     // Protection at `completeUntilFirstUserAuthentication`, not from SQLCipher —
@@ -69,6 +69,7 @@ let package = Package(
     // deliberate change in a PR, with the gates re-run against the new version.
     dependencies: [
         .package(url: "https://github.com/groue/GRDB.swift.git", exact: "7.11.1"),
+        .package(url: "https://github.com/lumose-health/swift-crypto.git", exact: "4.5.1-glycemicgpt.1"),
     ],
     targets: [
         // SafetyCore has ZERO dependencies and must keep them (AD-3): it sits at
@@ -144,7 +145,7 @@ let package = Package(
         ),
         .target(
             name: "TandemDriver",
-            dependencies: ["DriverAPI", "SafetyCore", "TandemWire"],
+            dependencies: ["DriverAPI", "SafetyCore", "TandemWire", .product(name: "CryptoBoringWrapper", package: "swift-crypto")],
             path: "Sources/Drivers/Tandem",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),

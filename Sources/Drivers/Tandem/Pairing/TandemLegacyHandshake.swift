@@ -53,8 +53,8 @@ enum TandemLegacyHandshake {
         )
     }
 
-    /// The pump challenge request, keyed by the code's bytes (see
-    /// ``DriverAPI/PairingCode/utf8Bytes`` for how they relate to Android's).
+    /// The pump challenge request, keyed by the code's bytes
+    /// (``DriverAPI/PairingCode/utf8Bytes``).
     static func pumpChallengeCargo(appInstanceID: UInt16, code: PairingCode, hmacKey: [UInt8]) -> [UInt8]? {
         guard hmacKey.count == hmacKeySize else { return nil }
         return littleEndian(appInstanceID) + hmacSHA1(key: code.utf8Bytes, data: hmacKey)

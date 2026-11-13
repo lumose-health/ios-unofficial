@@ -171,7 +171,7 @@ swift_analysis() {
   mkdir -p .build/static-analysis
   rm -rf .build/codeql .build/static-analysis/codeql.sarif
   mkdir -p .build/codeql
-  build_command='xcodebuild build -project Apps/GlycemicGPT/GlycemicGPT.xcodeproj -scheme GlycemicGPT -sdk iphonesimulator -derivedDataPath .build/codeql/dd CODE_SIGNING_ALLOWED=NO COMPILER_INDEX_STORE_ENABLE=NO'
+  build_command='xcodebuild build -project Apps/GlycemicGPT/GlycemicGPT.xcodeproj -scheme GlycemicGPT -sdk iphonesimulator -derivedDataPath .build/codeql/dd -disableAutomaticPackageResolution CODE_SIGNING_ALLOWED=NO COMPILER_INDEX_STORE_ENABLE=NO'
   codeql database create .build/codeql/db --language=swift --source-root=. --overwrite --command="$build_command" || status=$?
   [[ "${status:-2}" == 0 ]] || { fail "codeql database create failed with status ${status:-2}"; return 1; }
   status=0
@@ -419,7 +419,7 @@ run_xcode_builds() {
       echo "Xcode test action opted out for $project: $reason"
     fi
     header "Xcode ${actions[*]}: $scheme ($sdk)"
-    xcodebuild "${actions[@]}" "$flag" "$project" -scheme "$scheme" -sdk "$sdk" -destination "$destination" -derivedDataPath .build/xcode-dd CODE_SIGNING_ALLOWED=NO
+    xcodebuild "${actions[@]}" "$flag" "$project" -scheme "$scheme" -sdk "$sdk" -destination "$destination" -derivedDataPath .build/xcode-dd -disableAutomaticPackageResolution CODE_SIGNING_ALLOWED=NO
   done
 }
 
@@ -457,7 +457,7 @@ ui_tests() {
       safe=$(printf '%s-%s' "$scheme" "$destination" | tr -c '[:alnum:]_-' '_')
       # xcodebuild refuses an existing result bundle, so clear this run's path first.
       rm -rf ".build/ui-results/${safe}.xcresult"
-      xcodebuild test "$flag" "$project" -scheme "$scheme" -destination "$destination" -derivedDataPath .build/xcode-dd -resultBundlePath ".build/ui-results/${safe}.xcresult" CODE_SIGNING_ALLOWED=NO
+      xcodebuild test "$flag" "$project" -scheme "$scheme" -destination "$destination" -derivedDataPath .build/xcode-dd -resultBundlePath ".build/ui-results/${safe}.xcresult" -disableAutomaticPackageResolution CODE_SIGNING_ALLOWED=NO
     done
   done
 }

@@ -77,6 +77,7 @@ graph TD
 - **Prevents:** cyclic graphs; a Driver acquiring its own storage or network path.
 - **Rule:** a Driver may depend **only** on `DriverAPI`, `SafetyCore`, and vendor wire targets under `Sources/Wire/` whose own dependencies are **only** `DriverAPI` and `SafetyCore`. A Driver's transitive closure is therefore always `{DriverAPI, SafetyCore}` plus pure protocol code. A wire target holds parsing, framing and mapping for one vendor's protocol, shared by the Drivers that speak it (for example a live Bluetooth Driver and the Trace-Replay Driver). It never holds storage, networking, Bluetooth or lifecycle. Nothing depends on an app target. The graph above is asserted by a CI check over the resolved package manifest.
 - **Amended 2026-11-02:** wire targets were added so that two Drivers can share one protocol implementation without either one depending on the other, and without widening what a Driver can reach.
+- **Amended 2026-11-03:** `TandemDriver` alone may also depend on the exact-pinned `CryptoBoringWrapper` product of the project swift-crypto fork for EC-JPAKE point and scalar arithmetic (AD-8). The exception does not extend to `TandemWire` or another Driver. No target may import `CCryptoBoringSSL` directly. Manifest and source tests enforce this boundary.
 
 ### AD-4 — Swift 6 strict concurrency; the device edge is an actor
 
