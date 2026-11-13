@@ -33,9 +33,9 @@ public struct EcJpakePoint: Equatable, Sendable {
 
 /// A scalar, always held and written as exactly 32 big-endian bytes.
 ///
-/// Writing a scalar at its minimal length is the Android client's intermittent
-/// pairing failure (roughly 1.6% of scalars have a leading zero byte). This
-/// type cannot hold one.
+/// Writing a scalar at its minimal length causes intermittent pairing failures,
+/// because roughly 1 in 256 scalars has a leading zero byte and comes out short.
+/// This type cannot hold one.
 public struct EcJpakeScalar: Equatable, Sendable {
     public static let encodedSize = 32
     public let bytes: [UInt8]

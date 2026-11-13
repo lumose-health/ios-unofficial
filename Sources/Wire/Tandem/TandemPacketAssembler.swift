@@ -7,8 +7,7 @@ import DriverAPI
 /// that keeps one transaction ID and a nonzero packets-remaining nibble must not
 /// grow the buffer without limit, and a truncated frame must never be handed on.
 ///
-/// The Android client's `PacketAssembler.kt` does not bound the assembled frame;
-/// it appends every fragment for a matching transaction ID.
+/// Every fragment appended for a matching transaction ID counts toward the bound.
 public struct TandemPacketAssembler: Sendable {
     /// Header bytes of a canonical frame: opcode, transaction ID, cargo length.
     static let frameHeaderSize = 3
