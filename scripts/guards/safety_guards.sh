@@ -214,6 +214,8 @@ done
 #   alert-floor cooldown ±5% (1710...1890): catches a nearby hand-edited
 #                      re-alarm delay while leaving unrelated durations outside
 #                      the Backend's 30-minute deduplication window alone.
+#   clock suppression / sample cadence ±5% (285...315): catches a nearby
+#                      copy of the five-minute safety bound or sensor cadence.
 #                      The FreshnessMonitor tick clamp (2, 30) is deliberately
 #                      NOT pinned here: those are internal cadence tuning, not a
 #                      cross-target alarm gate, and bands around integers that
@@ -233,6 +235,8 @@ CANON_SPEC="$CANON_SPEC;CGM tooStaleAfter (seconds):900:855:945"
 CANON_SPEC="$CANON_SPEC;Pump staleAfter (seconds):900:855:945"
 CANON_SPEC="$CANON_SPEC;Pump tooStaleAfter (seconds):3600:3420:3780"
 CANON_SPEC="$CANON_SPEC;alert-floor max future skew (seconds):60:57:63"
+CANON_SPEC="$CANON_SPEC;alert-floor clock suppression bound (seconds):300:285:315"
+CANON_SPEC="$CANON_SPEC;CGM nominal sample interval (seconds):300:285:315"
 CANON_SPEC="$CANON_SPEC;alert-floor cooldown (seconds):1800:1710:1890"
 
 # Every spelling of "read the wall clock". A superset of the three AC 4 names:
@@ -528,6 +532,8 @@ bare-upper-bound|FAIL|Sources/SafetyCore/GuardProbe.swift|let maxGlucose = 500
 off-by-one-bound|FAIL|Sources/SafetyCore/GuardProbe.swift|let ceiling = 501
 dup-epoch-underscored|FAIL|Sources/SafetyCore/GuardProbe.swift|let epochCopy = 1_199_145_600
 dup-cgm-stale-after|FAIL|Sources/SafetyCore/GuardProbe.swift|let duplicateStaleAfter = 360
+dup-clock-suppression-bound|FAIL|Sources/SafetyCore/GuardProbe.swift|let duplicateClockBound = 300
+drifted-clock-suppression-bound|FAIL|Sources/SafetyCore/GuardProbe.swift|let driftedClockBound = 301
 drifted-cgm-stale-after|FAIL|Sources/SafetyCore/GuardProbe.swift|let staleAfterCopy = 355
 dup-cgm-too-stale-after|FAIL|Sources/SafetyCore/GuardProbe.swift|let duplicateTooStaleAfter = 900
 dup-pump-stale-after|FAIL|Sources/SafetyCore/GuardProbe.swift|let duplicatePumpStaleAfter = 900
